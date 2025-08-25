@@ -606,6 +606,20 @@ python manage.py runserver
 
 Your music academy billing API now has these endpoints:
 
+### Authentication Endpoints
+
+**Google OAuth:**
+- `GET /api/auth/google/` - Initiate Google OAuth login
+- `GET /api/auth/google/callback/` - Google OAuth callback (handles authentication)
+
+**JWT Token Management:**
+- `POST /api/auth/token/` - Get JWT tokens (to be implemented)
+- `POST /api/auth/token/refresh/` - Refresh JWT token (to be implemented)
+- `GET /api/auth/user/` - Get current user profile (to be implemented)
+- `POST /api/auth/logout/` - Logout user (to be implemented)
+
+### Billing Endpoints
+
 **Teachers:**
 - `GET /api/billing/teachers/` - Get all teachers
 - `POST /api/billing/teachers/` - Create new teacher
@@ -633,5 +647,26 @@ Your music academy billing API now has these endpoints:
 - `GET /api/billing/invoices/{id}/` - Get specific invoice
 - `PUT /api/billing/invoices/{id}/` - Update invoice
 - `DELETE /api/billing/invoices/{id}/` - Delete invoice
+
+### Authentication Flow
+
+1. **Frontend redirects user to:** `GET /api/auth/google/`
+2. **User authenticates with Google**
+3. **Google redirects to:** `GET /api/auth/google/callback/?code=...`
+4. **Backend processes OAuth and returns:**
+   ```json
+   {
+     "message": "OAuth successful",
+     "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+     "refresh_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+     "user": {
+       "email": "teacher@example.com",
+       "name": "John Smith",
+       "teacher_id": 1
+     }
+   }
+   ```
+5. **Frontend uses `access_token` for authenticated API calls**
+6. **When token expires, use `refresh_token` to get new `access_token`**
 
 

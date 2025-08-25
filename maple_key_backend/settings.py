@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+from decouple import config  # For reading environment variables from .env file
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,10 +21,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-#*99&dq@wbe#g-u-71^q(bp(zkg3ay!ieoao$l6l--5cs%%rky"
+# Using config() to read from .env file for security - never commit secrets to git
+# No default value - forces proper .env setup
+SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# DEBUG should be False in production for security
+DEBUG = config('DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = []
 
@@ -40,6 +44,16 @@ INSTALLED_APPS = [
     'rest_framework', 
     'corsheaders', 
     'billing', # (current app)
+    
+    # Django Allauth - Required for OAuth authentication
+    'django.contrib.sites',  # Required by django-allauth for multi-site support
+    'allauth',  # Main allauth app for authentication
+    'allauth.account',  # Handles user accounts and registration
+    'allauth.socialaccount',  # Handles social media authentication
+    'allauth.socialaccount.providers.google',  # Google OAuth provider
+    
+    # Custom authentication app
+    'custom_auth',  # Your custom auth app for OAuth views and JWT handling
 ]
 
 MIDDLEWARE = [
@@ -51,9 +65,14 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "allauth.account.middleware.AccountMiddleware",  # Required by django-allauth
 ]
 
 ROOT_URLCONF = "maple_key_backend.urls"
+
+# Site ID - Required by django-allauth for multi-site support
+# This identifies which site in the database this Django instance represents
+SITE_ID = 1
 
 TEMPLATES = [
     {
@@ -125,6 +144,72 @@ STATIC_URL = "static/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# JWT (JSON Web Token) Settings
+# These settings control how JWT tokens are created and validated
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    # Token lifetime settings
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),  # How long access tokens are valid (60 minutes)
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),     # How long refresh tokens are valid (1 day)
+    'ROTATE_REFRESH_TOKENS': False,                  # Whether to create new refresh tokens when used
+    'BLACKLIST_AFTER_ROTATION': True,                # Blacklist old tokens after rotation
+    'UPDATE_LAST_LOGIN': False,                      # Whether to update user's last login time
+
+    # Token signing settings
+    'ALGORITHM': 'HS256',                            # Algorithm used to sign tokens (HMAC with SHA-256)
+    'SIGNING_KEY': SECRET_KEY,                       # Key used to sign tokens (your Django secret key)
+    'VERIFYING_KEY': None,                           # Key used to verify tokens (None for symmetric algorithms)
+    'AUDIENCE': None,                                # Expected audience in token (None for no validation)
+    'ISSUER': None,                                  # Expected issuer in token (None for no validation)
+
+    # HTTP header settings
+    'AUTH_HEADER_TYPES': ('Bearer',),                # Authorization header type (Bearer token)
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',        # Name of the authorization header
+    'USER_ID_FIELD': 'id',                           # Field in user model that contains user ID
+    'USER_ID_CLAIM': 'user_id',                      # Claim name for user ID in token
+
+    # Token class settings
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),  # Token classes to use
+    'TOKEN_TYPE_CLAIM': 'token_type',                # Claim name for token type
+
+    # JWT ID claim
+    'JTI_CLAIM': 'jti',                              # Claim name for JWT ID (unique identifier)
+}
+
+# Django Allauth Settings
+# These settings configure how django-allauth handles authentication
+
+# Authentication backends - order matters!
+AUTHENTICATION_BACKENDS = [
+    'django.contrib.auth.backends.ModelBackend',     # Django's default authentication backend
+    'allauth.account.auth_backends.AuthenticationBackend',  # Allauth's authentication backend
+]
+
+# Account settings (for allauth.account) - Updated to new format
+ACCOUNT_UNIQUE_EMAIL = True                          # Email addresses must be unique
+ACCOUNT_EMAIL_VERIFICATION = 'none'                  # Email verification setting ('none', 'optional', 'mandatory')
+ACCOUNT_LOGIN_METHODS = {'email'}                    # Use email for authentication instead of username
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']  # Required fields for signup
+
+# Social account settings (for allauth.socialaccount)
+SOCIALACCOUNT_PROVIDERS = {
+    'google': {
+        'SCOPE': [
+            'profile',  # Access to user's basic profile info
+            'email',    # Access to user's email address
+        ],
+        'AUTH_PARAMS': {
+            'access_type': 'online',  # Type of access ('online' or 'offline')
+        },
+        'APP': {
+            'client_id': config('GOOGLE_CLIENT_ID'),
+            'secret': config('GOOGLE_CLIENT_SECRET'),
+            'key': ''
+        }
+    }
+}
+
 
 # CORS settings
 CORS_ALLOWED_ORIGINS = [
@@ -136,9 +221,10 @@ CORS_ALLOWED_ORIGINS = [
 # Django REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',  # JWT token authentication
+        'rest_framework.authentication.SessionAuthentication',  # Session-based authentication (for admin/built in django auth)
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.IsAuthenticatedOrReadOnly',
+        'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require authentication for write operations
     ],
 }
