@@ -29,12 +29,13 @@ SECRET_KEY = config('SECRET_KEY')
 # DEBUG should be False in production for security
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver']
 
 
 # Application definition
 
 INSTALLED_APPS = [
+    'billing',  # Move this to the top - must come before admin
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -42,8 +43,9 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     'rest_framework', 
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders', 
-    'billing', # (current app)
     
     # Django Allauth - Required for OAuth authentication
     'django.contrib.sites',  # Required by django-allauth for multi-site support
@@ -228,3 +230,6 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require authentication for write operations
     ],
 }
+
+# Custom User Model
+AUTH_USER_MODEL = 'billing.User'
