@@ -5,6 +5,7 @@ urlpatterns = [
     # OAuth endpoints
     path('google/', views.google_oauth, name='google_oauth'),
     path('google/callback/', views.google_oauth_callback, name='google_callback'),
+    path('oauth-success/', views.oauth_success, name='oauth_success'),
     
     # JWT endpoints
     path('token/', views.get_jwt_token, name='get_jwt_token'),

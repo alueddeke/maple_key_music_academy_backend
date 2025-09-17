@@ -21,4 +21,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/billing/", include('billing.urls')),
     path("api/auth/", include('custom_auth.urls')),
+    # Django Allauth URLs - these handle the OAuth flow
+    path("accounts/", include('allauth.urls')),
 ]
