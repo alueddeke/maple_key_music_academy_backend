@@ -60,7 +60,7 @@ def google_oauth_callback(request):
         token_url = 'https://oauth2.googleapis.com/token'
         token_data = {
             'client_id': app.client_id,
-            'client_secret': app.key,  # Use app.key instead of app.secret
+            'client_secret': app.key,  
             'code': code,
             'grant_type': 'authorization_code',
             'redirect_uri': 'http://localhost:8000/api/auth/google/callback/'
