@@ -10,6 +10,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from django.http import HttpResponseRedirect
+from urllib.parse import urlencode
 import requests
 
 
@@ -17,7 +19,23 @@ import requests
 @permission_classes([AllowAny])
 def google_oauth(request):
     """redirect to google for oauth flow"""
-    return oauth2_login(request, 'google')
+    # Store frontend redirect URI in session for later use
+    frontend_redirect_uri = request.GET.get('redirect_uri', 'http://localhost:8000/oauth-callback')
+    request.session['frontend_redirect_uri'] = frontend_redirect_uri
+    
+    # Build Google OAuth URL manually
+    from urllib.parse import urlencode
+    google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
+    params = {
+        'client_id': '578681672265-r7jpu2dumv6129pkapljb7j8ftk29it5.apps.googleusercontent.com',
+        'redirect_uri': 'http://localhost:8000/api/auth/google/callback/',
+        'scope': 'email profile',
+        'response_type': 'code',
+        'access_type': 'online'
+    }
+    
+    redirect_url = f"{google_oauth_url}?{urlencode(params)}"
+    return HttpResponseRedirect(redirect_url)
 
 
 
@@ -42,14 +60,19 @@ def google_oauth_callback(request):
         token_url = 'https://oauth2.googleapis.com/token'
         token_data = {
             'client_id': app.client_id,
-            'client_secret': app.secret,
+            'client_secret': app.key,  
             'code': code,
             'grant_type': 'authorization_code',
             'redirect_uri': 'http://localhost:8000/api/auth/google/callback/'
         }
         
         token_response = requests.post(token_url, data=token_data)
+        print(f"DEBUG: Token exchange status: {token_response.status_code}")
+        print(f"DEBUG: Token response: {token_response.text[:200]}...")
+        
         if token_response.status_code != 200:
+            print(f"DEBUG: Token exchange failed with status {token_response.status_code}")
+            print(f"DEBUG: Error response: {token_response.text}")
             return Response({'error': 'Failed to exchange code for token'}, status=status.HTTP_400_BAD_REQUEST)
         
         token_info = token_response.json()
@@ -64,45 +87,117 @@ def google_oauth_callback(request):
             return Response({'error': 'Failed to get user info from Google'}, status=status.HTTP_400_BAD_REQUEST)
         
         user_data = user_response.json()
+        print(f"DEBUG: User data from Google: {user_data}")
         
         # Step 5: Get or create User (unified model)
         User = get_user_model()
-        user, created = User.objects.get_or_create(
-            email=user_data.get('email'),
-            defaults={
-                'username': user_data.get('email'),
-                'first_name': user_data.get('given_name', ''),
-                'last_name': user_data.get('family_name', ''),
-                'user_type': 'teacher',  # Default to teacher for OAuth
-                'oauth_provider': 'google',
-                'oauth_id': user_data.get('id'),
-                'is_approved': False,  # Requires management approval
-            }
-        )
+        try:
+            user, created = User.objects.get_or_create(
+                email=user_data.get('email'),
+                defaults={
+                    'first_name': user_data.get('given_name', ''),
+                    'last_name': user_data.get('family_name', ''),
+                    'user_type': 'teacher',  # Default to teacher for OAuth
+                    'oauth_provider': 'google',
+                    'oauth_id': user_data.get('id'),
+                    'is_approved': False,  # Requires management approval
+                }
+            )
+            print(f"DEBUG: User {'created' if created else 'found'}: {user.email}")
+        except Exception as e:
+            print(f"DEBUG: User creation failed: {str(e)}")
+            return Response({'error': f'User creation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         # Step 7: Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
+        try:
+            refresh = RefreshToken.for_user(user)
+            print(f"DEBUG: JWT tokens generated successfully for user {user.email}")
+        except Exception as e:
+            print(f"DEBUG: JWT token generation failed: {str(e)}")
+            return Response({'error': f'JWT token generation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         # Get user name from Google data or use email as fallback
         user_name = f"{user.first_name} {user.last_name}".strip()
         if not user_name:
             user_name = user_data.get('name', user.email)  # Use Google's name or email
         
-        return Response({
-            'message': 'OAuth successful',
+        # Get redirect URI from session (stored during OAuth initiation)
+        redirect_uri = request.session.get('frontend_redirect_uri', 'http://localhost:8000/oauth-callback')
+        
+        # Prepare user data for URL encoding
+        user_data = {
+            'email': user.email,
+            'name': user_name,
+            'user_id': user.id,
+            'user_type': user.user_type,
+            'is_approved': user.is_approved
+        }
+        
+        # Build redirect URL with tokens and user data
+        from urllib.parse import urlencode
+        params = {
             'access_token': str(refresh.access_token),
             'refresh_token': str(refresh),
-            'user': {
-                'email': user.email,
-                'name': user_name,
-                'user_id': user.id,
-                'user_type': user.user_type,
-                'is_approved': user.is_approved
-            }
-        })
+            'user': urlencode(user_data)
+        }
+        
+        redirect_url = f"{redirect_uri}?{urlencode(params)}"
+        
+        # Redirect to frontend with tokens
+        from django.http import HttpResponseRedirect
+        return HttpResponseRedirect(redirect_url)
         
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def oauth_success(request):
+    """Handle successful OAuth login and redirect to frontend with JWT tokens"""
+    try:
+        # Check if user is authenticated (Django Allauth should have logged them in)
+        if not request.user.is_authenticated:
+            return HttpResponseRedirect('/login?error=not_authenticated')
+        
+        # Get frontend redirect URI from session
+        frontend_redirect_uri = request.session.get('frontend_redirect_uri', 'http://localhost:8000/oauth-callback')
+        
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(request.user)
+        
+        # Get user name
+        user_name = f"{request.user.first_name} {request.user.last_name}".strip()
+        if not user_name:
+            user_name = request.user.email
+        
+        # Prepare user data for URL encoding
+        user_data = {
+            'email': request.user.email,
+            'name': user_name,
+            'user_id': request.user.id,
+            'user_type': getattr(request.user, 'user_type', 'teacher'),
+            'is_approved': getattr(request.user, 'is_approved', False)
+        }
+        
+        # Build redirect URL with tokens and user data
+        params = {
+            'access_token': str(refresh.access_token),
+            'refresh_token': str(refresh),
+            'user': urlencode(user_data)
+        }
+        
+        redirect_url = f"{frontend_redirect_uri}?{urlencode(params)}"
+        
+        # Clear session data
+        if 'frontend_redirect_uri' in request.session:
+            del request.session['frontend_redirect_uri']
+        
+        # Redirect to frontend with tokens
+        return HttpResponseRedirect(redirect_url)
+        
+    except Exception as e:
+        return HttpResponseRedirect('/login?error=oauth_error')
 
  
 

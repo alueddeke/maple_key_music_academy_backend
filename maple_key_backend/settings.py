@@ -74,7 +74,7 @@ ROOT_URLCONF = "maple_key_backend.urls"
 
 # Site ID - Required by django-allauth for multi-site support
 # This identifies which site in the database this Django instance represents
-SITE_ID = 1
+SITE_ID = 2
 
 TEMPLATES = [
     {
@@ -97,12 +97,18 @@ WSGI_APPLICATION = "maple_key_backend.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# Database configuration - PostgreSQL everywhere
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": config('POSTGRES_DB', default='maple_key_dev'),
+        "USER": config('POSTGRES_USER', default='maple_key_user'),
+        "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
+        "HOST": config('POSTGRES_HOST', default='db'),
+        "PORT": config('POSTGRES_PORT', default='5432'),
     }
 }
+
 
 
 # Password validation
@@ -140,6 +146,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -212,12 +219,23 @@ SOCIALACCOUNT_PROVIDERS = {
     }
 }
 
+# Django Allauth settings
+LOGIN_REDIRECT_URL = 'http://localhost:8000/dashboard'  # Your frontend dashboard
+SOCIALACCOUNT_LOGIN_ON_GET = True
+
+# CSRF settings
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
 
 # CORS settings
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
 ]
 
 # Django REST Framework settings
