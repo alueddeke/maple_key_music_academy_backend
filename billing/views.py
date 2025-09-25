@@ -249,7 +249,7 @@ def submit_lessons_for_invoice(request):
             lesson = Lesson.objects.create(
                 teacher=request.user,
                 student=student,
-                scheduled_date=lesson_data.get('scheduled_date'),
+                scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
                 duration=lesson_data.get('duration', 1.0),
                 rate=lesson_data.get('rate', request.user.hourly_rate),
                 status='completed',  # Mark as completed since teacher is submitting for payment
@@ -264,7 +264,7 @@ def submit_lessons_for_invoice(request):
             invoice_type='teacher_payment',
             teacher=request.user,
             status='pending',  # Ready for management approval
-            due_date=data.get('due_date'),
+            due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=30)),
             created_by=request.user,
             payment_balance=0  # Will be calculated after lessons are added
         )

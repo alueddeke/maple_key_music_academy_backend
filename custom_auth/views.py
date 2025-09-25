@@ -20,7 +20,7 @@ import requests
 def google_oauth(request):
     """redirect to google for oauth flow"""
     # Store frontend redirect URI in session for later use
-    frontend_redirect_uri = request.GET.get('redirect_uri', 'http://localhost:8000/dashboard')
+    frontend_redirect_uri = request.GET.get('redirect_uri', 'http://localhost:8000/oauth-callback')
     request.session['frontend_redirect_uri'] = frontend_redirect_uri
     
     # Build Google OAuth URL manually
@@ -60,14 +60,19 @@ def google_oauth_callback(request):
         token_url = 'https://oauth2.googleapis.com/token'
         token_data = {
             'client_id': app.client_id,
-            'client_secret': app.secret,
+            'client_secret': app.key,  # Use app.key instead of app.secret
             'code': code,
             'grant_type': 'authorization_code',
             'redirect_uri': 'http://localhost:8000/api/auth/google/callback/'
         }
         
         token_response = requests.post(token_url, data=token_data)
+        print(f"DEBUG: Token exchange status: {token_response.status_code}")
+        print(f"DEBUG: Token response: {token_response.text[:200]}...")
+        
         if token_response.status_code != 200:
+            print(f"DEBUG: Token exchange failed with status {token_response.status_code}")
+            print(f"DEBUG: Error response: {token_response.text}")
             return Response({'error': 'Failed to exchange code for token'}, status=status.HTTP_400_BAD_REQUEST)
         
         token_info = token_response.json()
@@ -82,23 +87,34 @@ def google_oauth_callback(request):
             return Response({'error': 'Failed to get user info from Google'}, status=status.HTTP_400_BAD_REQUEST)
         
         user_data = user_response.json()
+        print(f"DEBUG: User data from Google: {user_data}")
         
         # Step 5: Get or create User (unified model)
         User = get_user_model()
-        user, created = User.objects.get_or_create(
-            email=user_data.get('email'),
-            defaults={
-                'first_name': user_data.get('given_name', ''),
-                'last_name': user_data.get('family_name', ''),
-                'user_type': 'teacher',  # Default to teacher for OAuth
-                'oauth_provider': 'google',
-                'oauth_id': user_data.get('id'),
-                'is_approved': False,  # Requires management approval
-            }
-        )
+        try:
+            user, created = User.objects.get_or_create(
+                email=user_data.get('email'),
+                defaults={
+                    'first_name': user_data.get('given_name', ''),
+                    'last_name': user_data.get('family_name', ''),
+                    'user_type': 'teacher',  # Default to teacher for OAuth
+                    'oauth_provider': 'google',
+                    'oauth_id': user_data.get('id'),
+                    'is_approved': False,  # Requires management approval
+                }
+            )
+            print(f"DEBUG: User {'created' if created else 'found'}: {user.email}")
+        except Exception as e:
+            print(f"DEBUG: User creation failed: {str(e)}")
+            return Response({'error': f'User creation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         # Step 7: Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
+        try:
+            refresh = RefreshToken.for_user(user)
+            print(f"DEBUG: JWT tokens generated successfully for user {user.email}")
+        except Exception as e:
+            print(f"DEBUG: JWT token generation failed: {str(e)}")
+            return Response({'error': f'JWT token generation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         # Get user name from Google data or use email as fallback
         user_name = f"{user.first_name} {user.last_name}".strip()
@@ -106,7 +122,7 @@ def google_oauth_callback(request):
             user_name = user_data.get('name', user.email)  # Use Google's name or email
         
         # Get redirect URI from session (stored during OAuth initiation)
-        redirect_uri = request.session.get('frontend_redirect_uri', 'http://localhost:8000/dashboard')
+        redirect_uri = request.session.get('frontend_redirect_uri', 'http://localhost:8000/oauth-callback')
         
         # Prepare user data for URL encoding
         user_data = {
@@ -145,7 +161,7 @@ def oauth_success(request):
             return HttpResponseRedirect('/login?error=not_authenticated')
         
         # Get frontend redirect URI from session
-        frontend_redirect_uri = request.session.get('frontend_redirect_uri', 'http://localhost:8000/dashboard')
+        frontend_redirect_uri = request.session.get('frontend_redirect_uri', 'http://localhost:8000/oauth-callback')
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(request.user)

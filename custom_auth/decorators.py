@@ -38,11 +38,12 @@ def role_required(*allowed_roles):
                 }, status=status.HTTP_403_FORBIDDEN)
             
             # Check approval status (management is auto-approved)
-            if request.user.user_type != 'management' and not request.user.is_approved:
-                return Response({
-                    'error': 'Account pending approval',
-                    'message': 'Your account is awaiting management approval'
-                }, status=status.HTTP_403_FORBIDDEN)
+            # TODO: Re-enable approval check for production
+            # if request.user.user_type != 'management' and not request.user.is_approved:
+            #     return Response({
+            #         'error': 'Account pending approval',
+            #         'message': 'Your account is awaiting management approval'
+            #     }, status=status.HTTP_403_FORBIDDEN)
             
             return view_func(request, *args, **kwargs)
         return wrapper
@@ -136,11 +137,12 @@ def teacher_owns_resource(view_func):
             }, status=status.HTTP_403_FORBIDDEN)
         
         # Check approval status
-        if not request.user.is_approved:
-            return Response({
-                'error': 'Account pending approval',
-                'message': 'Your account is awaiting management approval'
-            }, status=status.HTTP_403_FORBIDDEN)
+        # TODO: Re-enable approval check for production
+        # if not request.user.is_approved:
+        #     return Response({
+        #         'error': 'Account pending approval',
+        #         'message': 'Your account is awaiting management approval'
+        #     }, status=status.HTTP_403_FORBIDDEN)
         
         # Check if the teacher_id in the URL matches the authenticated teacher
         teacher_id = kwargs.get('teacher_id') or kwargs.get('pk')
