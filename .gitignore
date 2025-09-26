@@ -32,7 +32,10 @@ Thumbs.db
 
 # Testing
 .coverage
+.coverage.*
 .pytest_cache/
+htmlcov/
+testing/coverage/
 
 # Logs
 logs/
