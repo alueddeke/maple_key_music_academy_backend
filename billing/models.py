@@ -52,7 +52,7 @@ class User(AbstractUser):
     # Teacher-specific fields
     bio = models.TextField(blank=True)
     instruments = models.CharField(max_length=500, blank=True, help_text="Comma-separated list of instruments")
-    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
+    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=65.00)
     
     # Student-specific fields (for future)
     assigned_teacher = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, 
@@ -98,7 +98,7 @@ class Lesson(models.Model):
                                limit_choices_to={'user_type': 'student'})
     
     # Lesson details
-    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
+    rate = models.DecimalField(max_digits=6, decimal_places=2, default=65.00)
     scheduled_date = models.DateTimeField()
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0)
@@ -115,9 +115,24 @@ class Lesson(models.Model):
         from decimal import Decimal
         return float(self.rate * self.duration)
     
+    def clean(self):
+        """Validate lesson data"""
+        from django.core.exceptions import ValidationError
+        
+        # Validate duration
+        if self.duration <= 0:
+            raise ValidationError({'duration': 'Duration must be greater than 0'})
+        
+        # Validate rate
+        if self.rate <= 0:
+            raise ValidationError({'rate': 'Rate must be greater than 0'})
+    
     def save(self, *args, **kwargs):
+        # Validate before saving
+        self.clean()
+        
         # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
-        if self.rate == 80.00 and self.teacher and self.teacher.hourly_rate != 80.00:
+        if self.rate == 65.00 and self.teacher and self.teacher.hourly_rate != 65.00:
             self.rate = self.teacher.hourly_rate
         super().save(*args, **kwargs)
     

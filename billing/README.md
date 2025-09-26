@@ -25,7 +25,7 @@ class User(AbstractUser):
     # Teacher-specific fields
     bio = models.TextField(blank=True)
     instruments = models.CharField(max_length=500, blank=True)
-    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
+    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=65.00)
     
     # Student-specific fields
     assigned_teacher = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True)
@@ -44,7 +44,7 @@ class User(AbstractUser):
 class Lesson(models.Model):
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_teaching')
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_taking')
-    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
+    rate = models.DecimalField(max_digits=6, decimal_places=2, default=65.00)
     scheduled_date = models.DateTimeField()
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0)
@@ -192,7 +192,7 @@ POST /api/billing/invoices/teacher/submit-lessons/
             "student_email": "john@example.com",
             "scheduled_date": "2024-01-15T14:00:00Z",
             "duration": 1.0,
-            "rate": 80.00,
+            "rate": 65.00,
             "teacher_notes": "Worked on scales"
         }
     ],

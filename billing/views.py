@@ -200,7 +200,7 @@ def submit_lessons_for_invoice(request):
                 "student_email": "john@example.com",  # Optional, for student lookup
                 "scheduled_date": "2024-01-15T14:00:00Z",
                 "duration": 1.0,
-                "rate": 80.00,  # Optional, defaults to teacher's hourly rate
+                "rate": 65.00,  # Optional, defaults to teacher's hourly rate
                 "teacher_notes": "Worked on scales and arpeggios"
             }
         ],
@@ -208,7 +208,12 @@ def submit_lessons_for_invoice(request):
     }
     """
     try:
-        data = request.data.copy()
+        # Handle malformed JSON
+        try:
+            data = request.data.copy()
+        except Exception as e:
+            return Response({'error': 'Invalid JSON format'}, status=status.HTTP_400_BAD_REQUEST)
+        
         lessons_data = data.get('lessons', [])
         
         if not lessons_data:
@@ -218,9 +223,40 @@ def submit_lessons_for_invoice(request):
         created_lessons = []
         
         for lesson_data in lessons_data:
-            # Handle student lookup/creation
-            student_name = lesson_data.get('student_name')
+            # Validate lesson data
+            student_name = lesson_data.get('student_name', '').strip()
             student_email = lesson_data.get('student_email')
+            duration = lesson_data.get('duration', 0)
+            
+            # Validate required fields
+            if not student_name:
+                return Response({'error': 'Student name is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate duration
+            if duration is None:
+                return Response({'error': 'Duration is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                duration = float(duration)
+            except (ValueError, TypeError):
+                return Response({'error': 'Duration must be a valid number'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if duration <= 0:
+                return Response({'error': 'Duration must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate duration is reasonable (not too high)
+            if duration > 24:  # More than 24 hours seems unreasonable
+                return Response({'error': 'Duration is too high (maximum 24 hours)'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate student name length (more reasonable limit)
+            if len(student_name) > 150:
+                return Response({'error': 'Student name is too long (maximum 150 characters)'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate rate if provided
+            rate = lesson_data.get('rate')
+            if rate is not None:
+                if rate <= 0:
+                    return Response({'error': 'Rate must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
             
             if student_email:
                 # Try to find existing student by email
@@ -237,13 +273,31 @@ def submit_lessons_for_invoice(request):
                     )
             else:
                 # Create student with just name (no email)
-                student = User.objects.create(
-                    email=f"{student_name.lower().replace(' ', '.')}@temp.com",  # Temporary email
-                    first_name=student_name.split()[0] if student_name else '',
-                    last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                    user_type='student',
-                    is_approved=True
-                )
+                # First try to find existing student by name
+                try:
+                    student = User.objects.get(
+                        first_name=student_name.split()[0] if student_name else '',
+                        last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                        user_type='student'
+                    )
+                except User.DoesNotExist:
+                    # Create new student with unique temporary email
+                    base_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
+                    counter = 1
+                    unique_email = base_email
+                    
+                    # Ensure email is unique by adding counter if needed
+                    while User.objects.filter(email=unique_email).exists():
+                        unique_email = f"{student_name.lower().replace(' ', '.')}{counter}@temp.com"
+                        counter += 1
+                    
+                    student = User.objects.create(
+                        email=unique_email,
+                        first_name=student_name.split()[0] if student_name else '',
+                        last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                        user_type='student',
+                        is_approved=True
+                    )
             
             # Create lesson
             lesson = Lesson.objects.create(

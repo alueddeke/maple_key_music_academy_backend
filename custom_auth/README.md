@@ -159,7 +159,7 @@ Authorization: Bearer <access_token>
         "address": "123 Music St",
         "bio": "Piano teacher with 10 years experience",
         "instruments": "Piano, Guitar",
-        "hourly_rate": 80.00
+        "hourly_rate": 65.00
     }
 }
 ```
