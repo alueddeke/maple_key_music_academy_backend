@@ -9,8 +9,8 @@ class InvoiceEmailService:
     def send_invoice_email(invoice, pdf_content, recipient_email=None):
         """Send invoice email with PDF attachment"""
         try:
-            # Use provided recipient or default to a.lueddeke@hotmail.com
-            email_recipient = recipient_email or 'a.lueddeke@hotmail.com'
+            # Use provided recipient or default to configurable test email
+            email_recipient = recipient_email or getattr(settings, 'TEST_EMAIL_RECIPIENT', 'antonilueddeke@gmail.com')
             
             # Create email subject
             subject = f'New invoice submitted by {invoice.teacher.get_full_name()} for ${invoice.payment_balance:.2f}'

@@ -255,9 +255,17 @@ REST_FRAMEWORK = {
 AUTH_USER_MODEL = 'billing.User'
 
 # Email Configuration
-# For testing - emails will be printed to console
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'noreply@maplekey.com'
+# For testing - using Gmail SMTP
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='antonilueddeke@gmail.com')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='antonilueddeke@gmail.com')
+
+# Test email configuration - easily changeable
+TEST_EMAIL_RECIPIENT = config('TEST_EMAIL_RECIPIENT', default='antonilueddeke@gmail.com')
 
 # drf-spectacular settings for OpenAPI/Swagger documentation
 SPECTACULAR_SETTINGS = {
