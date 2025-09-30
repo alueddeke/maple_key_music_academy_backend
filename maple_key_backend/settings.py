@@ -251,3 +251,8 @@ REST_FRAMEWORK = {
 
 # Custom User Model
 AUTH_USER_MODEL = 'billing.User'
+
+# Email Configuration
+# For testing - emails will be printed to console
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'noreply@maplekey.com'

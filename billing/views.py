@@ -10,6 +10,10 @@ from custom_auth.decorators import (
     role_required, teacher_required, management_required, 
     teacher_or_management_required, owns_resource_or_management
 )
+from .services.invoice_service import InvoiceProcessor
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 #run when url endpoints are hit
@@ -305,7 +309,7 @@ def submit_lessons_for_invoice(request):
                 student=student,
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
                 duration=lesson_data.get('duration', 1.0),
-                rate=lesson_data.get('rate', request.user.hourly_rate),
+                rate=lesson_data.get('rate', 65.00),  # Use default rate of 65.00 instead of teacher's hourly_rate
                 status='completed',  # Mark as completed since teacher is submitting for payment
                 completed_date=timezone.now(),
                 teacher_notes=lesson_data.get('teacher_notes', '')
@@ -318,7 +322,7 @@ def submit_lessons_for_invoice(request):
             invoice_type='teacher_payment',
             teacher=request.user,
             status='pending',  # Ready for management approval
-            due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=30)),
+            # due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=30)),  # Commented out
             created_by=request.user,
             payment_balance=0  # Will be calculated after lessons are added
         )
@@ -329,6 +333,16 @@ def submit_lessons_for_invoice(request):
         # Recalculate payment balance
         invoice.payment_balance = invoice.calculate_payment_balance()
         invoice.save()
+        
+        # Generate PDF and send email
+        try:
+            success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
+            if success:
+                logger.info(f"PDF generated and email sent for invoice {invoice.id}")
+            else:
+                logger.warning(f"Failed to generate PDF or send email for invoice {invoice.id}: {message}")
+        except Exception as e:
+            logger.error(f"Error generating PDF or sending email for invoice {invoice.id}: {str(e)}")
         
         # Return the created invoice with lesson details
         serializer = InvoiceSerializer(invoice)

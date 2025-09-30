@@ -171,7 +171,6 @@ class BillingUnitTests(TestCase):
             invoice_type='teacher_payment',
             teacher=self.teacher,
             status='pending',
-            due_date=timezone.now() + timedelta(days=30),
             created_by=self.teacher,
             payment_balance=0
         )
@@ -249,7 +248,6 @@ class BillingUnitTests(TestCase):
             invoice_type='teacher_payment',
             teacher=self.teacher,
             status='draft',
-            due_date=timezone.now() + timedelta(days=30),
             created_by=self.teacher,
             payment_balance=0
         )

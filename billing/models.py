@@ -132,8 +132,8 @@ class Lesson(models.Model):
         self.clean()
         
         # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
-        if self.rate == 65.00 and self.teacher and self.teacher.hourly_rate != 65.00:
-            self.rate = self.teacher.hourly_rate
+        # if self.rate == 65.00 and self.teacher and self.teacher.hourly_rate != 65.00:
+        #     self.rate = self.teacher.hourly_rate
         super().save(*args, **kwargs)
     
     def __str__(self):
@@ -166,7 +166,7 @@ class Invoice(models.Model):
     # Invoice details
     payment_balance = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
-    due_date = models.DateTimeField()
+    # due_date = models.DateTimeField()  # Commented out for now
     
     # Tracking
     created_at = models.DateTimeField(auto_now_add=True)
