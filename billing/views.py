@@ -334,15 +334,15 @@ def submit_lessons_for_invoice(request):
         invoice.payment_balance = invoice.calculate_payment_balance()
         invoice.save()
         
-        # Generate PDF and send email
+        # Generate PDFs and send combined email (teacher + student invoices)
         try:
-            success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
+            success, message, pdf_content = InvoiceProcessor.generate_and_send_combined_invoices(invoice)
             if success:
-                logger.info(f"PDF generated and email sent for invoice {invoice.id}")
+                logger.info(f"Combined PDFs generated and email sent for invoice {invoice.id}")
             else:
-                logger.warning(f"Failed to generate PDF or send email for invoice {invoice.id}: {message}")
+                logger.warning(f"Failed to generate combined PDFs or send email for invoice {invoice.id}: {message}")
         except Exception as e:
-            logger.error(f"Error generating PDF or sending email for invoice {invoice.id}: {str(e)}")
+            logger.error(f"Error generating combined PDFs or sending email for invoice {invoice.id}: {str(e)}")
         
         # Return the created invoice with lesson details
         serializer = InvoiceSerializer(invoice)

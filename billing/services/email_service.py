@@ -59,3 +59,72 @@ Maple Key Music Academy System
         except Exception as e:
             logger.error(f"Failed to send invoice {invoice.id}: {str(e)}")
             return False, f"Failed to send email: {str(e)}"
+    
+    @staticmethod
+    def send_combined_invoices_email(invoice, teacher_pdf_content, student_pdfs, recipient_email=None):
+        """Send email with teacher invoice and multiple student invoices"""
+        try:
+            # Use provided recipient or default to configurable test email
+            email_recipient = recipient_email or getattr(settings, 'TEST_EMAIL_RECIPIENT', 'antonilueddeke@gmail.com')
+            
+            # Create email subject
+            subject = f'Invoices for {invoice.teacher.get_full_name()} - Teacher + {len(student_pdfs)} Student Invoices'
+            
+            # Create email body
+            body = f"""
+Dear Management,
+
+A new teacher invoice has been submitted along with corresponding student invoices.
+
+Invoice Details:
+- Teacher Invoice ID: #{invoice.id}
+- Teacher: {invoice.teacher.get_full_name()}
+- Email: {invoice.teacher.email}
+- Total Amount: ${invoice.payment_balance:.2f}
+- Number of Lessons: {invoice.lessons.count()}
+- Student Invoices: {len(student_pdfs)} invoices generated
+
+Attachments:
+1. Teacher Invoice: {invoice.teacher.get_full_name().lower().replace(' ', '')}_teacher_invoice_{invoice.id}.pdf
+2. Student Invoices: {len(student_pdfs)} individual student invoices
+
+Please review and distribute the student invoices to the respective students.
+
+Best regards,
+Maple Key Music Academy System
+            """.strip()
+            
+            # Create email
+            email = EmailMessage(
+                subject=subject,
+                body=body,
+                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@maplekey.com'),
+                to=[email_recipient],
+            )
+            
+            # Attach teacher invoice PDF
+            teacher_name = invoice.teacher.get_full_name().lower().replace(' ', '')
+            email.attach(
+                filename=f'{teacher_name}_teacher_invoice_{invoice.id}.pdf',
+                content=teacher_pdf_content,
+                mimetype='application/pdf'
+            )
+            
+            # Attach student invoice PDFs
+            for student_name, student_pdf_content in student_pdfs.items():
+                safe_student_name = student_name.lower().replace(' ', '')
+                email.attach(
+                    filename=f'{safe_student_name}_student_invoice_{invoice.id}.pdf',
+                    content=student_pdf_content,
+                    mimetype='application/pdf'
+                )
+            
+            # Send email
+            email.send()
+            
+            logger.info(f"Successfully sent combined invoices for {invoice.id} to {email_recipient}")
+            return True, f"Combined invoices sent successfully to {email_recipient}"
+            
+        except Exception as e:
+            logger.error(f"Failed to send combined invoices for {invoice.id}: {str(e)}")
+            return False, f"Failed to send combined invoices: {str(e)}"
