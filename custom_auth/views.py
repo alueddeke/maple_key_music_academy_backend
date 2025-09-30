@@ -12,6 +12,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.http import HttpResponseRedirect
 from urllib.parse import urlencode
+from drf_spectacular.utils import extend_schema, OpenApiExample
+from drf_spectacular.types import OpenApiTypes
 import requests
 
 
@@ -201,6 +203,167 @@ def oauth_success(request):
 
  
 
+@extend_schema(
+    operation_id='get_jwt_token',
+    summary='Get JWT Authentication Token',
+    description='''
+    Authenticate users with email and password to receive JWT tokens for API access.
+    
+    ## Authentication Flow
+    1. **Login**: Submit email and password
+    2. **Token Generation**: Receive access and refresh tokens
+    3. **API Access**: Use access token in Authorization header
+    4. **Token Refresh**: Use refresh token to get new access tokens
+    
+    ## Token Details
+    - **Access Token**: Valid for 60 minutes, used for API requests
+    - **Refresh Token**: Valid for 24 hours, used to get new access tokens
+    - **Authorization Header**: `Authorization: Bearer <access_token>`
+    
+    ## User Types
+    - **Teachers**: Can access teacher-specific endpoints
+    - **Management**: Can access all administrative endpoints
+    - **Students**: Can access student-specific endpoints (future feature)
+    
+    ## Security
+    - Passwords are validated against Django's authentication system
+    - Tokens are signed with the application's secret key
+    - Invalid credentials return 401 Unauthorized
+    ''',
+    tags=['Authentication'],
+    request={
+        'application/json': {
+            'type': 'object',
+            'properties': {
+                'email': {
+                    'type': 'string',
+                    'format': 'email',
+                    'description': 'User email address',
+                    'example': 'teacher@example.com'
+                },
+                'password': {
+                    'type': 'string',
+                    'format': 'password',
+                    'description': 'User password',
+                    'example': 'securepassword123'
+                }
+            },
+            'required': ['email', 'password']
+        }
+    },
+    responses={
+        200: {
+            'description': 'Authentication successful',
+            'content': {
+                'application/json': {
+                    'schema': {
+                        'type': 'object',
+                        'properties': {
+                            'access_token': {
+                                'type': 'string',
+                                'description': 'JWT access token (valid for 60 minutes)',
+                                'example': 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...'
+                            },
+                            'refresh_token': {
+                                'type': 'string',
+                                'description': 'JWT refresh token (valid for 24 hours)',
+                                'example': 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...'
+                            },
+                            'user': {
+                                'type': 'object',
+                                'properties': {
+                                    'email': {'type': 'string', 'format': 'email'},
+                                    'name': {'type': 'string'},
+                                    'user_id': {'type': 'integer'},
+                                    'user_type': {'type': 'string', 'enum': ['teacher', 'management', 'student']},
+                                    'is_approved': {'type': 'boolean'}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Missing email or password',
+            'content': {
+                'application/json': {
+                    'schema': {
+                        'type': 'object',
+                        'properties': {
+                            'error': {'type': 'string'}
+                        }
+                    }
+                }
+            }
+        },
+        401: {
+            'description': 'Invalid credentials',
+            'content': {
+                'application/json': {
+                    'schema': {
+                        'type': 'object',
+                        'properties': {
+                            'error': {'type': 'string'}
+                        }
+                    }
+                }
+            }
+        },
+        403: {
+            'description': 'Invalid account type',
+            'content': {
+                'application/json': {
+                    'schema': {
+                        'type': 'object',
+                        'properties': {
+                            'error': {'type': 'string'},
+                            'message': {'type': 'string'}
+                        }
+                    }
+                }
+            }
+        }
+    },
+    examples=[
+        OpenApiExample(
+            'Login Request',
+            summary='Teacher login',
+            description='Example login request for a teacher account',
+            value={
+                "email": "john.doe@example.com",
+                "password": "teacherpassword123"
+            },
+            request_only=True,
+        ),
+        OpenApiExample(
+            'Login Response',
+            summary='Successful authentication',
+            description='Response with JWT tokens and user information',
+            value={
+                "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImpvaG4uZG9lQGV4YW1wbGUuY29tIiwidXNlcl90eXBlIjoidGVhY2hlciIsImlzX2FwcHJvdmVkIjp0cnVlLCJleHAiOjE3MDU0NzI4MDB9.signature",
+                "refresh_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoxLCJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6MTcwNTU1OTIwMH0.signature",
+                "user": {
+                    "email": "john.doe@example.com",
+                    "name": "John Doe",
+                    "user_id": 1,
+                    "user_type": "teacher",
+                    "is_approved": True
+                }
+            },
+            response_only=True,
+        ),
+        OpenApiExample(
+            'Invalid Credentials',
+            summary='Authentication failure',
+            description='Response when email or password is incorrect',
+            value={
+                "error": "Invalid email or password"
+            },
+            response_only=True,
+        )
+    ]
+)
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def get_jwt_token(request):

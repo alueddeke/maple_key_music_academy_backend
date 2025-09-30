@@ -1,193 +1,486 @@
-# Billing API Testing Guide
+# Maple Key Music Academy - Comprehensive Testing Guide
 
-## Overview
+This guide covers all testing approaches for the Maple Key Music Academy API, including unit tests, integration tests, Swagger contract testing, and API documentation validation.
 
-This guide explains the comprehensive unit tests created for the billing API and how to run them.
+## Table of Contents
+1. [Quick Start](#quick-start)
+2. [Testing Environment Setup](#testing-environment-setup)
+3. [Running Tests](#running-tests)
+4. [Test Categories](#test-categories)
+5. [Swagger Documentation Testing](#swagger-documentation-testing)
+6. [API Testing Workflows](#api-testing-workflows)
+7. [Coverage Reports](#coverage-reports)
+8. [Docker Testing Commands](#docker-testing-commands)
+9. [CI/CD Integration](#cicd-integration)
+10. [Troubleshooting](#troubleshooting)
 
-## Test Structure
+## Quick Start
 
-### 1. Unit Tests (`BillingUnitTests`)
-Tests individual functions and business logic in isolation:
-- Student creation logic
-- Lesson cost calculations
-- Invoice payment balance calculations
-- Data validation
-
-### 2. API Tests (`BillingAPITests`)
-Tests the full API endpoints with real HTTP requests:
-- Authentication and authorization
-- Request/response handling
-- Error scenarios
-- Edge cases
-
-## Edge Cases Covered
-
-### Student Creation Edge Cases
-1. **Duplicate Names**: What happens when two students have the same name?
-2. **Duplicate Emails**: Handling when temporary emails already exist
-3. **Special Characters**: Names with apostrophes, hyphens, accents
-4. **Unicode Characters**: International names (Chinese, Arabic, etc.)
-5. **Very Long Names**: Extremely long student names
-6. **Empty Names**: Handling empty or whitespace-only names
-
-### Lesson Data Edge Cases
-1. **Negative Duration**: What happens with negative lesson durations?
-2. **Zero Duration**: Handling zero-duration lessons
-3. **Very High Duration**: Extremely long lesson durations
-4. **Invalid Data Types**: Non-numeric duration values
-5. **Missing Required Fields**: Requests without required data
-
-### Authentication & Authorization Edge Cases
-1. **No Authentication**: Requests without auth tokens
-2. **Invalid Tokens**: Malformed or expired tokens
-3. **Wrong User Types**: Students trying to submit teacher invoices
-4. **Unauthorized Access**: Accessing endpoints without proper permissions
-
-### Data Validation Edge Cases
-1. **Malformed JSON**: Invalid JSON in request bodies
-2. **Missing Fields**: Requests with missing required fields
-3. **Invalid Field Values**: Out-of-range or invalid data types
-4. **SQL Injection**: Attempts to inject malicious SQL
-5. **XSS Attempts**: Cross-site scripting attempts in text fields
-
-### Business Logic Edge Cases
-1. **Empty Lesson Lists**: Submitting invoices with no lessons
-2. **Mixed Student Types**: Mix of new and existing students
-3. **Rate Calculations**: Edge cases in cost calculations
-4. **Invoice Status Transitions**: Valid and invalid status changes
-5. **Concurrent Access**: Multiple users accessing same resources
-
-## Running the Tests
-
-### Install Dependencies
-```bash
-cd maple_key_music_academy_backend
-pip install -r requirements.txt
-```
+### Prerequisites
+- Docker and Docker Compose installed
+- Access to the orchestrator repository (`maple_key_music_academy_docker`)
 
 ### Run All Tests
 ```bash
-pytest billing/tests.py -v
+# From the orchestrator directory
+cd maple_key_music_academy_docker
+docker-compose --profile testing up api-tests
 ```
 
-### Run Specific Test Categories
+### Access Swagger Documentation
+```bash
+# Start development environment
+docker-compose up --build
+
+# Access documentation
+# Swagger UI: http://localhost:8000/api/docs/
+# ReDoc: http://localhost:8000/api/redoc/
+# OpenAPI Schema: http://localhost:8000/api/schema/
+```
+
+## Testing Environment Setup
+
+### Docker Testing Service
+The testing environment is configured in `docker-compose.yaml`:
+
+```yaml
+api-tests:
+  build:
+    context: ../maple_key_music_academy_backend
+    dockerfile: Dockerfile
+  container_name: maple_key_api_tests
+  env_file:
+    - ./.envs/env.dev
+  depends_on:
+    db:
+      condition: service_healthy
+  volumes:
+    - ../maple_key_music_academy_backend:/usr/app/
+    - test_reports:/usr/app/test_reports/
+  command: |
+    bash -c "
+    python3 manage.py migrate --no-input &&
+    python3 manage.py collectstatic --noinput &&
+    pytest --cov=. --cov-report=html --cov-report=term --junitxml=test_reports/junit.xml --html=test_reports/report.html --self-contained-html
+    "
+  profiles:
+    - testing
+```
+
+### Test Directory Structure
+```
+maple_key_music_academy_backend/
+├── tests/
+│   ├── test_swagger_basic.py          # Swagger functionality tests
+│   ├── test_swagger_contracts.py      # Contract testing (advanced)
+│   ├── test_swagger_simple.py         # Simple Swagger tests
+│   └── factories.py                    # Test data factories
+├── testing/
+│   ├── swagger/
+│   │   ├── run_swagger_tests.py       # Swagger test runner
+│   │   └── SWAGGER_IMPLEMENTATION.md  # Swagger documentation
+│   ├── coverage/                       # Coverage reports
+│   └── pytest.ini                     # pytest configuration
+└── billing/
+    └── test_services.py               # Service-specific tests
+```
+
+## Running Tests
+
+### 1. Full Test Suite with Coverage
+```bash
+# Run all tests with comprehensive reporting
+docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-report=html --cov-report=term --junitxml=test_reports/junit.xml --html=test_reports/report.html --self-contained-html
+
+# Run with verbose output
+docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-report=html --cov-report=term -v
+```
+
+### 2. Specific Test Categories
 ```bash
 # Run only unit tests
-pytest billing/tests.py::BillingUnitTests -v
+docker-compose --profile testing run --rm api-tests pytest tests/ -k "not integration"
 
-# Run only API tests
-pytest billing/tests.py::BillingAPITests -v
+# Run only integration tests
+docker-compose --profile testing run --rm api-tests pytest tests/ -k "integration"
 
-# Run tests with specific markers
-pytest billing/tests.py -m unit -v
+# Run only Swagger tests
+docker-compose --profile testing run --rm api-tests pytest tests/test_swagger_basic.py -v
+
+# Run Swagger contract tests
+docker-compose --profile testing run --rm api-tests pytest tests/test_swagger_contracts.py -v
 ```
 
-### Run Tests with Coverage
+### 3. Django Test Runner
 ```bash
-# Install coverage tools
-pip install pytest-cov coverage
+# Use Django's built-in test runner
+docker-compose --profile testing run --rm api-tests python manage.py test --verbosity=2
 
+# Run specific test modules
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic --verbosity=2
+
+# Run specific test classes
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic.SwaggerBasicTests --verbosity=2
+```
+
+### 4. Individual Test Files
+```bash
+# Run specific test files
+docker-compose --profile testing run --rm api-tests pytest tests/test_swagger_basic.py::SwaggerBasicTests::test_swagger_ui_accessible -v
+
+# Run with debug output
+docker-compose --profile testing run --rm api-tests pytest tests/test_swagger_basic.py -v -s --tb=long
+```
+
+## Test Categories
+
+### 1. Unit Tests
+- **Location**: `tests/` directory
+- **Purpose**: Test individual components in isolation
+- **Coverage**: Models, serializers, services, utilities
+- **Command**: `pytest tests/ -k "not integration"`
+
+### 2. Integration Tests
+- **Location**: `tests/` directory (marked with `@pytest.mark.integration`)
+- **Purpose**: Test component interactions
+- **Coverage**: API endpoints, database operations, external services
+- **Command**: `pytest tests/ -k "integration"`
+
+### 3. Swagger Contract Tests
+- **Location**: `tests/test_swagger_basic.py`, `tests/test_swagger_contracts.py`
+- **Purpose**: Validate API documentation and schema compliance
+- **Coverage**: OpenAPI schema generation, endpoint documentation, authentication flows
+- **Command**: `pytest tests/test_swagger_basic.py -v`
+
+### 4. Service Tests
+- **Location**: `billing/test_services.py`
+- **Purpose**: Test business logic services
+- **Coverage**: Invoice processing, email services, PDF generation
+- **Command**: `pytest billing/test_services.py -v`
+
+### 5. API Endpoint Tests
+- **Location**: `tests/` directory
+- **Purpose**: Test API endpoints and business logic
+- **Coverage**: Authentication, CRUD operations, business workflows
+- **Command**: `pytest tests/ -k "api"`
+
+## Swagger Documentation Testing
+
+### Access Swagger Documentation
+1. **Start Development Environment**:
+   ```bash
+   cd maple_key_music_academy_docker
+   docker-compose up --build
+   ```
+
+2. **Access Documentation**:
+   - **Swagger UI**: http://localhost:8000/api/docs/
+   - **ReDoc**: http://localhost:8000/api/redoc/
+   - **OpenAPI Schema**: http://localhost:8000/api/schema/
+
+### Test Swagger Functionality
+```bash
+# Test basic Swagger functionality
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic --verbosity=2
+
+# Test Swagger UI accessibility
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic.SwaggerBasicTests.test_swagger_ui_accessible --verbosity=2
+
+# Test OpenAPI schema generation
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic.SwaggerBasicTests.test_openapi_schema_accessible --verbosity=2
+```
+
+### Interactive Testing
+1. **Authentication Testing**:
+   - Use `/api/auth/token/` endpoint in Swagger UI
+   - Test JWT token generation and validation
+   - Test OAuth flow with `/api/auth/google/`
+
+2. **Endpoint Testing**:
+   - Test all documented endpoints
+   - Verify request/response schemas
+   - Test error handling scenarios
+
+3. **Business Logic Testing**:
+   - Test teacher approval workflows
+   - Test lesson submission and invoice creation
+   - Test management approval processes
+
+## API Testing Workflows
+
+### 1. Authentication Flow Testing
+```bash
+# Test JWT authentication
+curl -X POST http://localhost:8000/api/auth/token/ \
+  -H "Content-Type: application/json" \
+  -d '{"email": "test@example.com", "password": "password123"}'
+
+# Test OAuth initiation
+curl http://localhost:8000/api/auth/google/
+```
+
+### 2. Teacher Management Testing
+```bash
+# Test teacher list (public)
+curl http://localhost:8000/api/billing/teachers/
+
+# Test teacher creation (requires management auth)
+curl -X POST http://localhost:8000/api/billing/teachers/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "teacher@example.com", "first_name": "John", "last_name": "Doe", "password": "password123"}'
+```
+
+### 3. Lesson Management Testing
+```bash
+# Test lesson submission (requires teacher auth)
+curl -X POST http://localhost:8000/api/billing/invoices/teacher/submit-lessons/ \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "month": "January 2024",
+    "lessons": [
+      {
+        "student_name": "John Smith",
+        "scheduled_date": "2024-01-15T14:00:00Z",
+        "duration": 1.0,
+        "rate": 65.00,
+        "teacher_notes": "Great lesson on scales"
+      }
+    ]
+  }'
+```
+
+### 4. Invoice Management Testing
+```bash
+# Test invoice approval (requires management auth)
+curl -X POST http://localhost:8000/api/billing/invoices/teacher/1/approve/ \
+  -H "Authorization: Bearer <token>"
+```
+
+## Coverage Reports
+
+### Generate Coverage Reports
+```bash
 # Run tests with coverage
-pytest billing/tests.py --cov=billing --cov-report=html --cov-report=term
+docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-report=html --cov-report=term
 
-# Generate detailed coverage report
-coverage run --source=billing manage.py test billing.tests
-coverage report
-coverage html  # Creates htmlcov/index.html
+# Run with specific coverage targets
+docker-compose --profile testing run --rm api-tests pytest --cov=billing --cov=custom_auth --cov-report=html --cov-report=term
+
+# View coverage report
+docker-compose --profile testing run --rm api-tests ls -la test_reports/
 ```
 
-### Coverage Commands Explained
+### Coverage Report Locations
+- **HTML Report**: `test_reports/coverage_html/index.html`
+- **Terminal Report**: Displayed in console output
+- **XML Report**: `test_reports/coverage.xml` (for CI/CD)
+- **JUnit Report**: `test_reports/junit.xml`
+
+### Coverage Goals
+- **Overall Coverage**: >80%
+- **Critical Business Logic**: >90%
+- **API Endpoints**: >85%
+- **Authentication**: >95%
+
+## Docker Testing Commands
+
+### Basic Testing Commands
 ```bash
-# Basic coverage
-pytest billing/tests.py --cov=billing
+# Run all tests
+docker-compose --profile testing run --rm api-tests pytest
 
-# Coverage with HTML report
-pytest billing/tests.py --cov=billing --cov-report=html
+# Run with coverage
+docker-compose --profile testing run --rm api-tests pytest --cov=.
 
-# Coverage with terminal and HTML reports
-pytest billing/tests.py --cov=billing --cov-report=term --cov-report=html
+# Run specific tests
+docker-compose --profile testing run --rm api-tests pytest tests/test_swagger_basic.py
 
-# Coverage with minimum threshold (fail if below 80%)
-pytest billing/tests.py --cov=billing --cov-fail-under=80
+# Run with verbose output
+docker-compose --profile testing run --rm api-tests pytest -v
 
-# Coverage for specific modules
-pytest billing/tests.py --cov=billing.views --cov=billing.models
+# Run with debug output
+docker-compose --profile testing run --rm api-tests pytest -v -s --tb=long
 ```
 
-## Test Data Setup
+### Django Test Commands
+```bash
+# Run Django tests
+docker-compose --profile testing run --rm api-tests python manage.py test
 
-The tests use Django's test database, which is created fresh for each test run. Test data includes:
+# Run specific Django tests
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic
 
-- **Users**: Teachers, students, and management users
-- **Authentication**: JWT tokens for API testing
-- **Lessons**: Sample lessons with various durations and rates
-- **Invoices**: Test invoices in different states
-
-## Key Testing Principles
-
-### 1. **Isolation**
-Each test is independent and doesn't affect others.
-
-### 2. **Mocking**
-External dependencies (like database queries) are mocked when testing business logic.
-
-### 3. **Edge Cases**
-Tests cover both happy paths and error conditions.
-
-### 4. **Realistic Data**
-Tests use realistic data that matches production scenarios.
-
-### 5. **Performance**
-Tests run quickly (unit tests should complete in milliseconds).
-
-## Common Test Patterns
-
-### Testing API Endpoints
-```python
-def test_endpoint_success(self):
-    response = self.client.post('/api/endpoint/', data, format='json')
-    self.assertEqual(response.status_code, 201)
-    self.assertIn('expected_field', response.data)
+# Run with verbosity
+docker-compose --profile testing run --rm api-tests python manage.py test --verbosity=2
 ```
 
-### Testing Business Logic
-```python
-def test_calculation_logic(self):
-    result = calculate_something(input_data)
-    self.assertEqual(result, expected_result)
+### Swagger Testing Commands
+```bash
+# Test Swagger functionality
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic --verbosity=2
+
+# Test Swagger UI
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic.SwaggerBasicTests.test_swagger_ui_accessible --verbosity=2
+
+# Test OpenAPI schema
+docker-compose --profile testing run --rm api-tests python manage.py test tests.test_swagger_basic.SwaggerBasicTests.test_openapi_schema_accessible --verbosity=2
 ```
 
-### Testing Error Handling
-```python
-def test_invalid_input(self):
-    with self.assertRaises(ValueError):
-        process_invalid_data(invalid_input)
+### Service Testing Commands
+```bash
+# Test billing services
+docker-compose --profile testing run --rm api-tests pytest billing/test_services.py -v
+
+# Test with coverage
+docker-compose --profile testing run --rm api-tests pytest billing/test_services.py --cov=billing --cov-report=html
 ```
 
-## Benefits of This Testing Approach
+## CI/CD Integration
 
-1. **Early Bug Detection**: Catches issues before they reach production
-2. **Regression Prevention**: Ensures fixes don't break existing functionality
-3. **Documentation**: Tests serve as living documentation of expected behavior
-4. **Confidence**: Allows safe refactoring and feature additions
-5. **Edge Case Coverage**: Identifies and handles unusual scenarios
+### GitHub Actions Example
+```yaml
+name: Test Suite
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Run Tests
+        run: |
+          cd maple_key_music_academy_docker
+          docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-report=xml
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v1
+        with:
+          file: test_reports/coverage.xml
+```
 
-## Next Steps
+### Test Reports
+- **JUnit XML**: `test_reports/junit.xml`
+- **HTML Report**: `test_reports/report.html`
+- **Coverage XML**: `test_reports/coverage.xml`
 
-1. **Run the tests** to ensure they pass
-2. **Add more edge cases** as you discover them
-3. **Set up CI/CD** to run tests automatically
-4. **Add integration tests** for full workflow testing
-5. **Add performance tests** for load testing
+### Continuous Integration Commands
+```bash
+# Run tests in CI
+docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-report=xml --junitxml=test_reports/junit.xml
+
+# Run with specific coverage thresholds
+docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-fail-under=80
+```
 
 ## Troubleshooting
 
 ### Common Issues
-- **Database errors**: Ensure test database is properly configured
-- **Authentication failures**: Check that test users are created correctly
-- **Import errors**: Verify all dependencies are installed
 
-### Debug Tips
-- Use `pytest -s` to see print statements
-- Use `pytest --pdb` to drop into debugger on failures
-- Check test database state with Django shell
+#### 1. Database Connection Issues
+```bash
+# Check database health
+docker-compose logs db
+
+# Restart database
+docker-compose restart db
+
+# Check database connectivity
+docker-compose exec db psql -U maple_key_user -d maple_key_dev -c "SELECT 1;"
+```
+
+#### 2. Test Environment Issues
+```bash
+# Rebuild test container
+docker-compose --profile testing build api-tests
+
+# Run with fresh database
+docker-compose --profile testing run --rm api-tests python manage.py migrate --run-syncdb
+
+# Clear test database
+docker-compose --profile testing run --rm api-tests python manage.py flush --noinput
+```
+
+#### 3. Coverage Issues
+```bash
+# Clear coverage data
+docker-compose --profile testing run --rm api-tests coverage erase
+
+# Run with fresh coverage
+docker-compose --profile testing run --rm api-tests pytest --cov=. --cov-report=html
+
+# Check coverage files
+docker-compose --profile testing run --rm api-tests ls -la test_reports/
+```
+
+#### 4. Swagger Issues
+```bash
+# Test Swagger endpoints directly
+curl http://localhost:8000/api/schema/
+curl http://localhost:8000/api/docs/
+curl http://localhost:8000/api/redoc/
+
+# Check Swagger configuration
+docker-compose --profile testing run --rm api-tests python manage.py shell -c "from drf_spectacular.utils import extend_schema; print('Swagger configured')"
+```
+
+### Debug Mode
+```bash
+# Run tests with debug output
+docker-compose --profile testing run --rm api-tests pytest -v -s --tb=long
+
+# Run specific test with debug
+docker-compose --profile testing run --rm api-tests pytest tests/test_swagger_basic.py::SwaggerBasicTests::test_swagger_ui_accessible -v -s --tb=long
+
+# Run with maximum verbosity
+docker-compose --profile testing run --rm api-tests pytest -vvv -s --tb=long
+```
+
+### Performance Testing
+```bash
+# Run tests with timing
+docker-compose --profile testing run --rm api-tests pytest --durations=10
+
+# Run with performance profiling
+docker-compose --profile testing run --rm api-tests pytest --profile --profile-svg
+```
+
+## Best Practices
+
+### 1. Test Organization
+- Keep tests close to the code they test
+- Use descriptive test names
+- Group related tests in classes
+- Use factories for test data generation
+
+### 2. Test Data
+- Use factories for test data generation
+- Clean up test data after each test
+- Use database transactions for isolation
+- Mock external services
+
+### 3. Coverage Goals
+- Aim for >80% code coverage
+- Focus on critical business logic
+- Test error scenarios and edge cases
+- Test authentication and authorization
+
+### 4. Performance
+- Keep tests fast (< 1 second per test)
+- Use database transactions for isolation
+- Mock external services
+- Use parallel test execution when possible
+
+### 5. Documentation
+- Document complex test scenarios
+- Keep test documentation up to date
+- Use meaningful test descriptions
+- Document test data requirements
+
+## Additional Resources
+
+- **Django Testing**: https://docs.djangoproject.com/en/stable/topics/testing/
+- **pytest Documentation**: https://docs.pytest.org/
+- **Coverage.py**: https://coverage.readthedocs.io/
+- **Swagger/OpenAPI**: https://swagger.io/docs/
+- **Docker Testing**: https://docs.docker.com/compose/
+- **Factory Boy**: https://factoryboy.readthedocs.io/

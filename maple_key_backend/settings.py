@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders', 
+    'drf_spectacular',  # OpenAPI/Swagger documentation
     
     # Django Allauth - Required for OAuth authentication
     'django.contrib.sites',  # Required by django-allauth for multi-site support
@@ -247,6 +248,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require authentication for write operations
     ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',  # Use drf-spectacular for API schema generation
 }
 
 # Custom User Model
@@ -256,3 +258,67 @@ AUTH_USER_MODEL = 'billing.User'
 # For testing - emails will be printed to console
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 DEFAULT_FROM_EMAIL = 'noreply@maplekey.com'
+
+# drf-spectacular settings for OpenAPI/Swagger documentation
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Maple Key Music Academy API',
+    'DESCRIPTION': '''
+    # Maple Key Music Academy API Documentation
+    
+    This API manages the complete music school ecosystem including:
+    
+    ## Authentication
+    - **JWT Token Authentication**: Use email/password to get JWT tokens
+    - **Google OAuth**: Social login with Google accounts
+    - **Role-based Access**: Teachers, Students, and Management roles
+    
+    ## Core Features
+    - **User Management**: Teacher and student profiles with approval workflows
+    - **Lesson Management**: Schedule, confirm, and complete music lessons
+    - **Invoice System**: Teacher payment invoices with lesson submission
+    - **Billing Workflows**: Complete payment and approval processes
+    
+    ## Business Logic
+    - Teachers can submit completed lessons for payment
+    - Management approves teacher invoices
+    - Students can request lessons from approved teachers
+    - OAuth users require management approval before access
+    
+    ## Getting Started
+    1. **Authentication**: Use `/api/auth/token/` for JWT tokens or `/api/auth/google/` for OAuth
+    2. **Authorization**: Include `Authorization: Bearer <token>` in request headers
+    3. **Role Permissions**: Check endpoint documentation for required user types
+    ''',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'COMPONENT_NO_READ_ONLY_REQUIRED': True,
+    'ENUM_NAME_OVERRIDES': {
+        'UserTypeEnum': 'billing.models.User.USER_TYPES',
+        'LessonStatusEnum': 'billing.models.Lesson.LESSON_STATUS',
+        'InvoiceTypeEnum': 'billing.models.Invoice.INVOICE_TYPES',
+        'InvoiceStatusEnum': 'billing.models.Invoice.STATUS_CHOICES',
+    },
+    'SCHEMA_PATH_PREFIX': '/api/',
+    'AUTHENTICATION_WHITELIST': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'SERVERS': [
+        {
+            'url': 'http://localhost:8000',
+            'description': 'Development server'
+        },
+    ],
+    'TAGS': [
+        {'name': 'Authentication', 'description': 'JWT and OAuth authentication endpoints'},
+        {'name': 'Users', 'description': 'Teacher and student management'},
+        {'name': 'Lessons', 'description': 'Lesson scheduling and management'},
+        {'name': 'Invoices', 'description': 'Teacher payment and billing system'},
+        {'name': 'Management', 'description': 'Administrative functions'},
+    ],
+    'EXTERNAL_DOCS': {
+        'description': 'Maple Key Music Academy Frontend',
+        'url': 'http://localhost:5173',
+    },
+}
