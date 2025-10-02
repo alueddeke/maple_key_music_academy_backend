@@ -104,7 +104,7 @@ DATABASES = {
         "NAME": config('POSTGRES_DB', default='maple_key_dev'),
         "USER": config('POSTGRES_USER', default='maple_key_user'),
         "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
-        "HOST": config('POSTGRES_HOST', default='db'),
+        "HOST": config('POSTGRES_HOST', default='127.0.0.1'),
         "PORT": config('POSTGRES_PORT', default='5432'),
     }
 }
