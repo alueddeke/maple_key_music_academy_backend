@@ -90,7 +90,7 @@ jobs:
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
-              -p 8000:8000 \
+              --network host \
               -e DATABASE_URL="postgres://maple_key_user@127.0.0.1:5432/maple_key_db" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               -e DEBUG="False" \
