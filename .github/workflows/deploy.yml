@@ -91,7 +91,7 @@ jobs:
               --name maple-key-backend \
               --restart unless-stopped \
               --network host \
-              -e DATABASE_URL="postgres://maple_key_user@127.0.0.1:5432/maple_key_db" \
+              -e DATABASE_URL="{{ secrets.DATABASE_URL}}" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               -e DEBUG="False" \
               -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
