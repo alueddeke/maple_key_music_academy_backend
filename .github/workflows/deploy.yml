@@ -86,12 +86,12 @@ jobs:
             docker stop maple-key-backend || true
             docker rm maple-key-backend || true
             
-            # Run new container
+            # Run new container with passwordless DATABASE_URL pointing to 127.0.0.1
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
               -p 8000:8000 \
-              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              -e DATABASE_URL="postgres://maple_key_user@127.0.0.1:5432/maple_key_db" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               -e DEBUG="False" \
               -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
