@@ -12,7 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from decouple import config  # For reading environment variables from .env file
-import dj_database_url
+from urllib.parse import urlparse
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -99,13 +99,24 @@ WSGI_APPLICATION = "maple_key_backend.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-# Database configuration - PostgreSQL everywhere
+
+
+# Try to get DATABASE_URL first (for production), fall back to individual vars (for local dev)
 DATABASE_URL = config('DATABASE_URL', default=None)
 
 if DATABASE_URL:
-    # Production: Use DATABASE_URL (from Docker environment)
+    # Production: Parse DATABASE_URL (from Docker environment)
+    # Format: postgresql://user:password@host:port/dbname
+    url = urlparse(DATABASE_URL)
     DATABASES = {
-        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': url.path[1:],  # Remove leading slash
+            'USER': url.username,
+            'PASSWORD': url.password,
+            'HOST': url.hostname,
+            'PORT': url.port or 5432,
+        }
     }
 else:
     # Local development: Use individual environment variables
