@@ -1,5 +1,4 @@
 name: Deploy Backend Prod
-
 on:
   push:
     branches:
@@ -8,7 +7,6 @@ on:
     branches:
       - deploy
   workflow_dispatch:
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -32,7 +30,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
   build_and_push:
     needs: test
     runs-on: ubuntu-latest
@@ -41,16 +38,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -61,7 +55,6 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
   deploy:
     needs: build_and_push
     runs-on: ubuntu-latest
@@ -79,22 +72,42 @@ jobs:
             # Login to Docker Hub
             echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
             
-            # Pull latest image
+            # Create Docker volume for PostgreSQL if it doesn't exist
+            docker volume create postgres_data || true
+            
+            # Pull latest images
+            docker pull postgres:15
             docker pull ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
             
-            # Stop and remove existing container
-            docker stop maple-key-backend || true
-            docker rm maple-key-backend || true
+            # Stop and remove existing containers
+            docker stop maple-key-backend postgres || true
+            docker rm maple-key-backend postgres || true
             
-            # Run new container with passwordless DATABASE_URL pointing to 127.0.0.1
+            # Run PostgreSQL container with persistent volume
+            docker run -d \
+              --name postgres \
+              --restart unless-stopped \
+              --network maple-key-network \
+              -e POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
+              -e POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
+              -e POSTGRES_DB="${{ secrets.POSTGRES_DB }}" \
+              -v postgres_data:/var/lib/postgresql/data \
+              postgres:15
+            
+            # Wait for PostgreSQL to be ready
+            echo "Waiting for PostgreSQL to be ready..."
+            sleep 10
+            
+            # Run backend container
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
-              --network host \
-              -e DATABASE_URL="{{ secrets.DATABASE_URL}}" \
+              --network maple-key-network \
+              -p 8000:8000 \
+              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               -e DEBUG="False" \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
+              -e ALLOWED_HOSTS="*" \
               -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
               -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
@@ -104,10 +117,13 @@ jobs:
             
             # Verify deployment
             sleep 5
-            if docker ps | grep -q maple-key-backend; then
-              echo "✅ Backend deployed successfully!"
+            if docker ps | grep -q maple-key-backend && docker ps | grep -q postgres; then
+              echo "✅ Backend and PostgreSQL deployed successfully!"
             else
               echo "❌ Deployment failed!"
+              echo "Backend logs:"
               docker logs maple-key-backend
+              echo "PostgreSQL logs:"
+              docker logs postgres
               exit 1
             fi
