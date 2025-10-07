@@ -98,6 +98,18 @@ jobs:
             echo "Waiting for PostgreSQL to be ready..."
             sleep 10
             
+            # Test PostgreSQL connection
+            docker run --rm --network maple-key-network postgres:15 \
+              pg_isready -h postgres -U ${{ secrets.POSTGRES_USER }} || sleep 5
+            
+            # Run migrations
+            docker run --rm \
+              --network maple-key-network \
+              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
+              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              python manage.py migrate
+            
             # Run backend container
             docker run -d \
               --name maple-key-backend \
