@@ -101,9 +101,9 @@ WSGI_APPLICATION = "maple_key_backend.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": config('POSTGRES_DB', default='maple_key_dev'),
+        "NAME": config('POSTGRES_DB', default='maple_key_db'),
         "USER": config('POSTGRES_USER', default='maple_key_user'),
-        "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
+        "PASSWORD": config('POSTGRES_PASSWORD', default='password'),
         "HOST": config('POSTGRES_HOST', default='127.0.0.1'),
         "PORT": config('POSTGRES_PORT', default='5432'),
     }
