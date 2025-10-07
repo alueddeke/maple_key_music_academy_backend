@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from decouple import config  # For reading environment variables from .env file
+import dj_database_url
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -98,16 +100,25 @@ WSGI_APPLICATION = "maple_key_backend.wsgi.application"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 # Database configuration - PostgreSQL everywhere
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": config('POSTGRES_DB', default='maple_key_db'),
-        "USER": config('POSTGRES_USER', default='maple_key_user'),
-        "PASSWORD": config('POSTGRES_PASSWORD', default='password'),
-        "HOST": config('POSTGRES_HOST', default='127.0.0.1'),
-        "PORT": config('POSTGRES_PORT', default='5432'),
+DATABASE_URL = config('DATABASE_URL', default=None)
+
+if DATABASE_URL:
+    # Production: Use DATABASE_URL (from Docker environment)
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
     }
-}
+else:
+    # Local development: Use individual environment variables
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": config('POSTGRES_DB', default='maple_key_dev'),
+            "USER": config('POSTGRES_USER', default='maple_key_user'),
+            "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
+            "HOST": config('POSTGRES_HOST', default='127.0.0.1'),
+            "PORT": config('POSTGRES_PORT', default='5432'),
+        }
+    }
 
 
 
