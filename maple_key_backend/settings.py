@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 from decouple import config  # For reading environment variables from .env file
 from urllib.parse import urlparse
+import os
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
