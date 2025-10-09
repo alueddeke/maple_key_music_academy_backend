@@ -67,4 +67,4 @@ RUN python manage.py collectstatic --noinput || true
 EXPOSE 8000
 
 # Use Gunicorn instead of runserver
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "120", "your_project.wsgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "120", "maple_key_backend.wsgi:application"]
