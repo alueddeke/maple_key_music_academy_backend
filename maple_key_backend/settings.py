@@ -31,7 +31,13 @@ SECRET_KEY = config('SECRET_KEY')
 # DEBUG should be False in production for security
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver']
+# ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver']
+
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',')
+
+# For production
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
