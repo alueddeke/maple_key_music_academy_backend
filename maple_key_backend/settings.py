@@ -34,8 +34,24 @@ DEBUG = config('DEBUG', default=True, cast=bool)
 
 # ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver']
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',')
+# ALLOWED_HOSTS configuration
+allowed_hosts_str = os.getenv('ALLOWED_HOSTS', '*')
+if allowed_hosts_str == '*':
+    ALLOWED_HOSTS = ['*']
+else:
+    ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_str.split(',')]
+
+# CORS configuration
+cors_allowed_str = os.getenv('CORS_ALLOWED_ORIGINS', '')
+if cors_allowed_str:
+    if cors_allowed_str == '*':
+        CORS_ALLOW_ALL_ORIGINS = True
+    else:
+        CORS_ALLOWED_ORIGINS = [host.strip() for host in cors_allowed_str.split(',')]
+else:
+    # Default: Allow your frontend domain
+    CORS_ALLOWED_ORIGINS = []
+
 
 # For production
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
