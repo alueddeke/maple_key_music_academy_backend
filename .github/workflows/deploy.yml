@@ -130,7 +130,7 @@ jobs:
               --network maple-key-network \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
-              -e DEBUG="False" \
+              -e DEBUG="True" \
               -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
               -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
               -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
