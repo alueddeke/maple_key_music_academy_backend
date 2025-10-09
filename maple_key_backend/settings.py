@@ -35,11 +35,8 @@ DEBUG = config('DEBUG', default=True, cast=bool)
 # ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver']
 
 # ALLOWED_HOSTS configuration
-allowed_hosts_str = os.getenv('ALLOWED_HOSTS', '*')
-if allowed_hosts_str == '*':
-    ALLOWED_HOSTS = ['*']
-else:
-    ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_str.split(',')]
+ALLOWED_HOSTS = ['159.203.173.226', 'localhost', '127.0.0.1', '*']
+
 
 # CORS configuration
 cors_allowed_str = os.getenv('CORS_ALLOWED_ORIGINS', '')
