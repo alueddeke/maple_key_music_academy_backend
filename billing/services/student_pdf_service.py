@@ -5,6 +5,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_RIGHT, TA_LEFT
 from django.conf import settings
 import logging
 from datetime import datetime, timedelta
@@ -20,42 +21,78 @@ class StudentInvoicePDFGenerator:
     def generate_pdf(self):
         """Generate PDF and return success status and PDF content"""
         try:
-            # Create PDF document
+            # Wave invoice red color
+            wave_red = colors.HexColor('#E31E24')
+            
+            # Create PDF document with smaller margins
             doc = SimpleDocTemplate(
                 self.buffer,
                 pagesize=A4,
-                rightMargin=72,
-                leftMargin=72,
-                topMargin=72,
-                bottomMargin=18
+                rightMargin=36,
+                leftMargin=36,
+                topMargin=36,
+                bottomMargin=36
             )
             
             # Build PDF content
             story = []
             styles = getSampleStyleSheet()
             
-            # Create custom styles
-            title_style = ParagraphStyle(
-                'CustomTitle',
-                parent=styles['Title'],
-                fontSize=18,
-                spaceAfter=30,
-                alignment=1  # Center alignment
+            # Create custom styles - Using Helvetica-Bold (ReportLab standard)
+            invoice_title_style = ParagraphStyle(
+                'InvoiceTitle',
+                parent=styles['Normal'],
+                fontSize=36,
+                fontName='Helvetica-Bold',
+                textColor=colors.black,
+                alignment=TA_RIGHT,
+                spaceAfter=15,  # Add bottom margin
+                leading=36  # Set line height to match font size
+            )
+            
+            school_brand_style = ParagraphStyle(
+                'SchoolBrand',
+                parent=styles['Normal'],
+                fontSize=14,
+                fontName='Helvetica-Bold',
+                textColor=colors.black,  # Changed from red to black
+                alignment=TA_RIGHT,
+                spaceAfter=5,  # Add small bottom margin
+                leading=14  # Set line height to match font size
+            )
+            
+            country_style = ParagraphStyle(
+                'Country',
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName='Helvetica',
+                alignment=TA_RIGHT,
+                spaceAfter=20,
+                leading=10  # Set line height to match font size
             )
             
             heading_style = ParagraphStyle(
                 'CustomHeading',
-                parent=styles['Heading2'],
-                fontSize=14,
-                spaceAfter=12,
-                textColor=colors.darkblue
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName='Helvetica-Bold',
+                spaceAfter=6,
+                textColor=colors.grey
             )
             
             bold_style = ParagraphStyle(
                 'BoldStyle',
                 parent=styles['Normal'],
-                fontSize=12,
+                fontSize=10,
                 fontName='Helvetica-Bold'
+            )
+            
+            normal_style = ParagraphStyle(
+                'NormalWrapped',
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName='Helvetica',
+                wordWrap='CJK'
             )
             
             # Calculate due date (14 days from generation)
@@ -67,105 +104,187 @@ class StudentInvoicePDFGenerator:
             # Get student info
             student = self.student_lessons[0].student if self.student_lessons else None
             
-            # Header with school branding
-            story.append(Paragraph("Maple Key Music Academy", ParagraphStyle(
-                'SchoolBrand',
-                parent=styles['Normal'],
-                fontSize=16,
-                fontName='Helvetica-Bold',
-                textColor=colors.darkblue,
-                alignment=2  # Right alignment
-            )))
+            # Header section with INVOICE title and school branding
+            # Use table structure to match billing section alignment
+            header_table_data = [
+                ['', '', '', 'INVOICE'],
+                ['', '', '', 'Maple Key Music Academy'],
+                ['', '', '', 'Canada']
+            ]
+            
+            header_table = Table(header_table_data, colWidths=[4.5*inch, 1.2*inch, 1.2*inch, 1.2*inch])
+            header_table.setStyle(TableStyle([
+                ('FONTSIZE', (3, 0), (3, 0), 36),
+                ('FONTNAME', (3, 0), (3, 0), 'Helvetica-Bold'),
+                ('TEXTCOLOR', (3, 0), (3, 0), colors.black),
+                ('ALIGN', (3, 0), (3, 0), 'RIGHT'),
+                ('VALIGN', (3, 0), (3, 0), 'TOP'),
+                ('BOTTOMPADDING', (3, 0), (3, 0), 45),  # Add bottom margin to INVOICE
+                
+                ('FONTSIZE', (3, 1), (3, 1), 14),
+                ('FONTNAME', (3, 1), (3, 1), 'Helvetica-Bold'),
+                ('TEXTCOLOR', (3, 1), (3, 1), colors.black),
+                ('ALIGN', (3, 1), (3, 1), 'RIGHT'),
+                ('VALIGN', (3, 1), (3, 1), 'TOP'),
+                ('BOTTOMPADDING', (3, 1), (3, 1), 5),  # Add small bottom margin
+                
+                ('FONTSIZE', (3, 2), (3, 2), 10),
+                ('TEXTCOLOR', (3, 2), (3, 2), colors.black),
+                ('ALIGN', (3, 2), (3, 2), 'RIGHT'),
+                ('VALIGN', (3, 2), (3, 2), 'TOP'),
+                
+                # Remove all borders and spacing for other cells
+                ('TOPPADDING', (0, 0), (-1, -1), 0),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ]))
+            
+            story.append(header_table)
+            
+            # Add divider line under header
+            divider_table_data = [['']]
+            divider_table = Table(divider_table_data, colWidths=[8.1*inch])
+            divider_table.setStyle(TableStyle([
+                ('LINEBELOW', (0, 0), (0, 0), 1, colors.lightgrey),  # Single line in very light grey
+                ('TOPPADDING', (0, 0), (0, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (0, 0), 10),
+            ]))
+            story.append(divider_table)
             story.append(Spacer(1, 20))
             
-            # Title
-            story.append(Paragraph("STUDENT INVOICE", title_style))
-            story.append(Spacer(1, 20))
+            # Create two-column layout for Bill To and Invoice Details
+            left_column = []
+            right_column = []
             
-            # Bill To section
-            story.append(Paragraph("BILL TO", heading_style))
+            # Left column - Bill To
+            left_column.append(Paragraph("BILL TO", heading_style))
             if student:
-                story.append(Paragraph(f"{student.get_full_name()}", styles['Normal']))
+                left_column.append(Paragraph(f"<b>{student.get_full_name()}</b>", normal_style))
+                left_column.append(Paragraph(f"{student.get_full_name()}", normal_style))
                 if student.address:
-                    story.append(Paragraph(f"{student.address}", styles['Normal']))
+                    # Split address by commas or newlines for better formatting
+                    address_lines = student.address.replace(',', '<br/>').replace('\n', '<br/>')
+                    left_column.append(Paragraph(address_lines, normal_style))
                 if student.phone_number:
-                    story.append(Paragraph(f"{student.phone_number}", styles['Normal']))
+                    left_column.append(Paragraph(f"{student.phone_number}", normal_style))
                 if student.email:
-                    story.append(Paragraph(f"{student.email}", styles['Normal']))
-            story.append(Spacer(1, 20))
+                    left_column.append(Paragraph(f"{student.email}", normal_style))
             
-            # Invoice details
-            story.append(Paragraph(f"Invoice Number: {self.invoice.id}", styles['Normal']))
-            story.append(Paragraph(f"Invoice Date: {datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
-            story.append(Paragraph(f"Payment Due: {due_date.strftime('%B %d, %Y')}", bold_style))
-            story.append(Paragraph(f"Amount Due (CAD): ${student_total:.2f}", bold_style))
-            story.append(Spacer(1, 20))
+            # Right column - Invoice Details (right-aligned to match totals)
+            right_align_style = ParagraphStyle('RightAlign', parent=normal_style, alignment=TA_RIGHT)
+            right_align_bold = ParagraphStyle('RightAlignBold', parent=bold_style, alignment=TA_RIGHT)
+            
+            right_column.append(Paragraph(f"<b>Invoice Number:</b> {self.invoice.id}", right_align_style))
+            right_column.append(Paragraph(f"<b>Invoice Date:</b> {datetime.now().strftime('%B %d, %Y')}", right_align_style))
+            right_column.append(Paragraph(f"<b>Payment Due:</b> {due_date.strftime('%B %d, %Y')}", right_align_bold))
+            right_column.append(Paragraph(f"<b>Amount Due (CAD):</b> ${student_total:.2f}", right_align_bold))
+            
+            # Combine columns into a table - Aligned with main table width
+            info_table_data = []
+            max_rows = max(len(left_column), len(right_column))
+            for i in range(max_rows):
+                left_cell = left_column[i] if i < len(left_column) else Paragraph("", normal_style)
+                right_cell = right_column[i] if i < len(right_column) else Paragraph("", normal_style)
+                info_table_data.append([left_cell, right_cell])
+            
+            # Use same total width as main table (4.5 + 1.2 + 1.2 + 1.2 = 8.1 inches)
+            info_table = Table(info_table_data, colWidths=[4.5*inch, 3.6*inch])
+            info_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ]))
+            
+            story.append(info_table)
+            story.append(Spacer(1, 25))
             
             # Items table
-            story.append(Paragraph("Items", heading_style))
-            
             # Table data
             data = [['Items', 'Quantity', 'Price', 'Amount']]
             
-            # Group lessons by instrument/type
-            lesson_groups = {}
-            for lesson in self.student_lessons:
-                # Create a key for grouping (you can customize this logic)
-                key = f"Music Lessons"
-                if key not in lesson_groups:
-                    lesson_groups[key] = {
-                        'quantity': 0,
-                        'total_hours': 0,
-                        'rate': lesson.rate,
-                        'description': f"Music Lessons<br/>{lesson.teacher.get_full_name()}, {lesson.duration:.1f} hour lessons"
-                    }
-                lesson_groups[key]['quantity'] += 1
-                lesson_groups[key]['total_hours'] += lesson.duration
+            # Calculate total hours and format lessons
+            total_hours = sum(lesson.duration for lesson in self.student_lessons)
+            rate = self.student_lessons[0].rate if self.student_lessons else 65.00
             
-            # Add grouped lessons to table
-            for group_name, group_data in lesson_groups.items():
-                data.append([
-                    group_data['description'],
-                    f"{group_data['quantity']}",
-                    f"${group_data['rate']:.2f}",
-                    f"${group_data['total_hours'] * group_data['rate']:.2f}"
-                ])
+            # Create the items description
+            # Check if instrument is available (once frontend adds it)
+            instrument_text = ""  # Will be populated when frontend adds instrument selection
             
-            # Add total row
-            data.append(['', '', 'Total:', f"${student_total:.2f}"])
-            data.append(['', '', 'Amount Due (CAD):', f"${student_total:.2f}"])
+            # Format: "Music Lessons" (bold) + duration below
+            items_text = f"<b>Music Lessons</b><br/>"
+            if instrument_text:
+                items_text += f"{instrument_text}, "
+            items_text += f"{total_hours:.1f} hour lessons"
             
-            # Create table
-            table = Table(data, colWidths=[3*inch, 1*inch, 1*inch, 1*inch])
+            data.append([
+                Paragraph(items_text, normal_style),
+                "1",
+                f"${student_total:.2f}",
+                f"${student_total:.2f}"
+            ])
+            
+            # Create table with wrapping enabled (NO totals inside) - Full width, no borders
+            table = Table(data, colWidths=[4.5*inch, 1.2*inch, 1.2*inch, 1.2*inch])
             table.setStyle(TableStyle([
-                # Header row styling
-                ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                # Header row styling - RED theme
+                ('BACKGROUND', (0, 0), (-1, 0), wave_red),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+                ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 12),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('TOPPADDING', (0, 0), (-1, 0), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
                 
                 # Data rows styling
-                ('BACKGROUND', (0, 1), (-1, -3), colors.beige),
-                ('FONTSIZE', (0, 1), (-1, -3), 10),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -3), [colors.white, colors.lightgrey]),
+                ('FONTSIZE', (0, 1), (-1, -1), 10),
+                ('TOPPADDING', (0, 1), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+                ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 
-                # Total rows styling
-                ('BACKGROUND', (0, -2), (-1, -1), colors.lightblue),
-                ('FONTNAME', (0, -2), (-1, -1), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, -2), (-1, -1), 12),
+                # Add grey border bottom to each data row
+                ('LINEBELOW', (0, 1), (-1, -1), 1, colors.grey),
                 
-                # Grid
-                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                # Add very light grey border around entire table
+                ('BOX', (0, 0), (-1, -1), 1, colors.lightgrey),
             ]))
             
             story.append(table)
-            story.append(Spacer(1, 20))
+            story.append(Spacer(1, 15))
             
-            # Notes section
-            story.append(Paragraph("Notes / Terms", heading_style))
-            story.append(Paragraph("E-Transfer - maplekeymusic.academy@gmail.com", styles['Normal']))
+            # Totals section - OUTSIDE the table (like Wave example) - Aligned with table
+            totals_table_data = [
+                ['', '', 'Total:', f"${student_total:.2f}"],
+                ['', '', 'Amount Due (CAD):', f"${student_total:.2f}"]
+            ]
+            
+            totals_table = Table(totals_table_data, colWidths=[4.5*inch, 1.2*inch, 1.2*inch, 1.2*inch])
+            totals_table.setStyle(TableStyle([
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('FONTNAME', (2, 0), (-1, -1), 'Helvetica-Bold'),
+                ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+                ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            
+            story.append(totals_table)
+            story.append(Spacer(1, 25))
+            
+            # Notes section - Aligned with table width
+            notes_table_data = [
+                [Paragraph("Notes / Terms", heading_style), ''],
+                [Paragraph("E-Transfer - maplekeymusic.academy@gmail.com", normal_style), '']
+            ]
+            
+            notes_table = Table(notes_table_data, colWidths=[4.5*inch, 3.6*inch])
+            notes_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ]))
+            
+            story.append(notes_table)
             
             # Build PDF
             doc.build(story)
