@@ -291,14 +291,17 @@ CSRF_TRUSTED_ORIGINS = [
     "https://api.maplekeymusic.com",  # Production HTTPS domain
 ]
 
-# CORS settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
-]
+# CORS settings (only used if CORS_ALLOWED_ORIGINS env var is not set - see line 42-50)
+# In production, CORS_ALLOWED_ORIGINS is set via environment variable
+# These are fallback values for local development
+if not CORS_ALLOWED_ORIGINS:  # Only set if not already set by environment variable
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
 
 # Django REST Framework settings
 REST_FRAMEWORK = {
