@@ -50,8 +50,26 @@ else:
     CORS_ALLOWED_ORIGINS = []
 
 
-# For production
+# SSL/HTTPS Security Settings
+# These settings ensure your Django app works properly behind an HTTPS proxy (Nginx)
+
+# Trust the X-Forwarded-Proto header from Nginx to determine if request was HTTPS
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Only enable these in production (when DEBUG=False)
+if not DEBUG:
+    # Redirect all HTTP requests to HTTPS
+    SECURE_SSL_REDIRECT = True
+
+    # Use secure cookies (only sent over HTTPS)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+    # HTTP Strict Transport Security (HSTS)
+    # Tells browsers to always use HTTPS for this domain (for 1 year)
+    SECURE_HSTS_SECONDS = 31536000  # 1 year in seconds
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Apply to all subdomains
+    SECURE_HSTS_PRELOAD = True  # Allow preloading in browsers
 
 
 # Application definition
@@ -266,9 +284,11 @@ LOGIN_REDIRECT_URL = 'http://localhost:8000/dashboard'  # Your frontend dashboar
 SOCIALACCOUNT_LOGIN_ON_GET = True
 
 # CSRF settings
+# Add both HTTP (for local dev) and HTTPS (for production)
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "https://api.maplekeymusic.com",  # Production HTTPS domain
 ]
 
 # CORS settings

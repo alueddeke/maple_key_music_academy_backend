@@ -190,12 +190,20 @@ jobs:
               sudo apt update
               sudo apt install -y nginx
             fi
+
+            # Install Certbot for SSL certificates
+            if ! command -v certbot &> /dev/null; then
+              echo "Installing Certbot..."
+              sudo apt update
+              sudo apt install -y certbot python3-certbot-nginx
+            fi
             
             # Enable and start Nginx
             sudo systemctl enable nginx
             sudo systemctl start nginx
             
             # Create Nginx configuration for api.maplekeymusic.com
+            # Note: Certbot will automatically add SSL configuration and HTTPS redirect
             sudo tee /etc/nginx/sites-available/api.maplekeymusic.com > /dev/null << 'NGINX_EOF'
             server {
                 listen 80;
@@ -209,6 +217,11 @@ jobs:
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                     proxy_set_header X-Forwarded-Proto $scheme;
                     proxy_redirect off;
+
+                    # WebSocket support (if needed in the future)
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
                 }
             }
             NGINX_EOF
@@ -221,9 +234,36 @@ jobs:
             
             # Test Nginx configuration
             sudo nginx -t
-            
+
             # Reload Nginx
             sudo systemctl reload nginx
+
+            # ===== SETUP SSL WITH CERTBOT =====
+            echo "Setting up SSL certificate..."
+
+            # Check if certificate already exists
+            if ! sudo certbot certificates 2>/dev/null | grep -q "api.maplekeymusic.com"; then
+              echo "Obtaining new SSL certificate from Let's Encrypt..."
+              # Obtain SSL certificate (non-interactive)
+              # --nginx: Use Nginx plugin to auto-configure
+              # --non-interactive: Don't prompt for input
+              # --agree-tos: Agree to Let's Encrypt terms
+              # --redirect: Automatically redirect HTTP to HTTPS
+              # --email: Contact email for urgent renewal/security notices
+              sudo certbot --nginx \
+                --non-interactive \
+                --agree-tos \
+                --redirect \
+                --email ${{ secrets.CERTBOT_EMAIL }} \
+                -d api.maplekeymusic.com
+
+              echo "✅ SSL certificate obtained and configured!"
+            else
+              echo "SSL certificate already exists. Checking for renewal..."
+              # Try to renew if it's close to expiration (certbot handles the check)
+              sudo certbot renew --quiet
+              echo "✅ SSL certificate is up to date!"
+            fi
             
             # Configure firewall
             sudo ufw allow 80/tcp || true
