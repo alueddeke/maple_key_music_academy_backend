@@ -20,15 +20,15 @@ import requests
 def google_oauth(request):
     """redirect to google for oauth flow"""
     # Store frontend redirect URI in session for later use
-    frontend_redirect_uri = request.GET.get('redirect_uri', 'http://maplekeymusic.com/oauth-callback')
+    frontend_redirect_uri = request.GET.get('redirect_uri', 'https://maplekeymusic.com/oauth-callback')
     request.session['frontend_redirect_uri'] = frontend_redirect_uri
-    
+
     # Build Google OAuth URL manually
     from urllib.parse import urlencode
     google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {
         'client_id': '578681672265-r7jpu2dumv6129pkapljb7j8ftk29it5.apps.googleusercontent.com',
-        'redirect_uri': 'http://api.maplekeymusic.com/api/auth/google/callback/',
+        'redirect_uri': 'https://api.maplekeymusic.com/api/auth/google/callback/',
         'scope': 'email profile',
         'response_type': 'code',
         'access_type': 'online'
@@ -60,10 +60,10 @@ def google_oauth_callback(request):
         token_url = 'https://oauth2.googleapis.com/token'
         token_data = {
             'client_id': app.client_id,
-            'client_secret': app.secret,  
+            'client_secret': app.secret,
             'code': code,
             'grant_type': 'authorization_code',
-            'redirect_uri': 'http://api.maplekeymusic.com/api/auth/google/callback/'
+            'redirect_uri': 'https://api.maplekeymusic.com/api/auth/google/callback/'
         }
         
         token_response = requests.post(token_url, data=token_data)
@@ -94,7 +94,7 @@ def google_oauth_callback(request):
         if settings.ALLOWED_EMAILS and user_email not in settings.ALLOWED_EMAILS:
             print(f"DEBUG: Email {user_email} not in whitelist")
             # Redirect to frontend with error
-            error_redirect = request.session.get('frontend_redirect_uri', 'http://maplekeymusic.com/oauth-callback')
+            error_redirect = request.session.get('frontend_redirect_uri', 'https://maplekeymusic.com/oauth-callback')
             error_url = f"{error_redirect}?error=unauthorized_email&message=Your email is not authorized. Please contact support."
             return HttpResponseRedirect(error_url)
 
@@ -131,7 +131,7 @@ def google_oauth_callback(request):
             user_name = user_data.get('name', user.email)  # Use Google's name or email
         
         # Get redirect URI from session (stored during OAuth initiation)
-        redirect_uri = request.session.get('frontend_redirect_uri', 'http://maplekeymusic.com/oauth-callback')
+        redirect_uri = request.session.get('frontend_redirect_uri', 'https://maplekeymusic.com/oauth-callback')
         
         # Prepare user data for URL encoding
         user_data = {
@@ -170,7 +170,7 @@ def oauth_success(request):
             return HttpResponseRedirect('/login?error=not_authenticated')
         
         # Get frontend redirect URI from session
-        frontend_redirect_uri = request.session.get('frontend_redirect_uri', 'http://maplekeymusic.com/oauth-callback')
+        frontend_redirect_uri = request.session.get('frontend_redirect_uri', 'https://maplekeymusic.com/oauth-callback')
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(request.user)
