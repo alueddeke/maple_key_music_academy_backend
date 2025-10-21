@@ -19,21 +19,29 @@ import requests
 @permission_classes([AllowAny])
 def google_oauth(request):
     """redirect to google for oauth flow"""
-    # Store frontend redirect URI in session for later use
+    # Get frontend redirect URI - pass it via OAuth state parameter instead of session
+    # This avoids session cookie issues that cause redirect loops
     frontend_redirect_uri = request.GET.get('redirect_uri', 'https://maplekeymusic.com/oauth-callback')
-    request.session['frontend_redirect_uri'] = frontend_redirect_uri
 
     # Build Google OAuth URL manually
     from urllib.parse import urlencode
+    import json
+    import base64
+
+    # Encode frontend redirect URI in state parameter (OAuth standard approach)
+    state_data = {'redirect_uri': frontend_redirect_uri}
+    state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+
     google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {
         'client_id': '578681672265-r7jpu2dumv6129pkapljb7j8ftk29it5.apps.googleusercontent.com',
         'redirect_uri': 'https://api.maplekeymusic.com/api/auth/google/callback/',
         'scope': 'email profile',
         'response_type': 'code',
-        'access_type': 'online'
+        'access_type': 'online',
+        'state': state  # Pass redirect URI via state parameter
     }
-    
+
     redirect_url = f"{google_oauth_url}?{urlencode(params)}"
     return HttpResponseRedirect(redirect_url)
 
@@ -44,10 +52,21 @@ def google_oauth(request):
 def google_oauth_callback(request):
     """Google OAuth callback endpoint"""
     try:
-        # Step 1: Get the authorization code from the request
+        # Step 1: Get the authorization code and state from the request
         code = request.GET.get('code')
+        state = request.GET.get('state')
+
         if not code:
             return Response({'error': 'No authorization code provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Decode state parameter to get frontend redirect URI
+        import json
+        import base64
+        try:
+            state_data = json.loads(base64.urlsafe_b64decode(state).decode()) if state else {}
+            frontend_redirect_uri = state_data.get('redirect_uri', 'https://maplekeymusic.com/oauth-callback')
+        except:
+            frontend_redirect_uri = 'https://maplekeymusic.com/oauth-callback'
         
         # Step 2: Get Google OAuth app configuration
         from allauth.socialaccount.models import SocialApp
@@ -93,9 +112,8 @@ def google_oauth_callback(request):
         user_email = user_data.get('email', '').lower()
         if settings.ALLOWED_EMAILS and user_email not in settings.ALLOWED_EMAILS:
             print(f"DEBUG: Email {user_email} not in whitelist")
-            # Redirect to frontend with error
-            error_redirect = request.session.get('frontend_redirect_uri', 'https://maplekeymusic.com/oauth-callback')
-            error_url = f"{error_redirect}?error=unauthorized_email&message=Your email is not authorized. Please contact support."
+            # Redirect to frontend with error (using frontend_redirect_uri from state)
+            error_url = f"{frontend_redirect_uri}?error=unauthorized_email&message=Your email is not authorized. Please contact support."
             return HttpResponseRedirect(error_url)
 
         # Step 5: Get or create User (unified model)
@@ -129,28 +147,25 @@ def google_oauth_callback(request):
         user_name = f"{user.first_name} {user.last_name}".strip()
         if not user_name:
             user_name = user_data.get('name', user.email)  # Use Google's name or email
-        
-        # Get redirect URI from session (stored during OAuth initiation)
-        redirect_uri = request.session.get('frontend_redirect_uri', 'https://maplekeymusic.com/oauth-callback')
-        
+
         # Prepare user data for URL encoding
-        user_data = {
+        user_data_dict = {
             'email': user.email,
             'name': user_name,
             'user_id': user.id,
             'user_type': user.user_type,
             'is_approved': user.is_approved
         }
-        
-        # Build redirect URL with tokens and user data
+
+        # Build redirect URL with tokens and user data (using frontend_redirect_uri from state)
         from urllib.parse import urlencode
         params = {
             'access_token': str(refresh.access_token),
             'refresh_token': str(refresh),
-            'user': urlencode(user_data)
+            'user': urlencode(user_data_dict)
         }
-        
-        redirect_url = f"{redirect_uri}?{urlencode(params)}"
+
+        redirect_url = f"{frontend_redirect_uri}?{urlencode(params)}"
         
         # Redirect to frontend with tokens
         from django.http import HttpResponseRedirect

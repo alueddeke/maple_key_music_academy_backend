@@ -65,6 +65,10 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
+    # Session cookie settings for OAuth flow
+    SESSION_COOKIE_SAMESITE = 'Lax'  # Allow cookies in OAuth redirects
+    CSRF_COOKIE_SAMESITE = 'Lax'
+
     # HTTP Strict Transport Security (HSTS)
     # Tells browsers to always use HTTPS for this domain (for 1 year)
     SECURE_HSTS_SECONDS = 31536000  # 1 year in seconds
