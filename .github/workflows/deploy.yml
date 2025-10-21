@@ -206,27 +206,27 @@ jobs:
             # Note: Certbot will automatically add SSL configuration and HTTPS redirect
             # We don't overwrite if file exists to preserve SSL config
             if [ ! -f /etc/nginx/sites-available/api.maplekeymusic.com ]; then
-              sudo tee /etc/nginx/sites-available/api.maplekeymusic.com > /dev/null << 'NGINX_EOF'
-server {
-    listen 80;
-    server_name api.maplekeymusic.com;
-    client_max_body_size 10M;
+              sudo tee /etc/nginx/sites-available/api.maplekeymusic.com > /dev/null <<'NGINX_EOF'
+            server {
+                listen 80;
+                server_name api.maplekeymusic.com;
+                client_max_body_size 10M;
 
-    location / {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect off;
+                location / {
+                    proxy_pass http://localhost:8000;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_redirect off;
 
-        # WebSocket support (if needed in the future)
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-NGINX_EOF
+                    # WebSocket support (if needed in the future)
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                }
+            }
+            NGINX_EOF
             fi
             
             # Enable the site
