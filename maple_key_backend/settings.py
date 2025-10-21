@@ -105,6 +105,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "custom_auth.middleware.EmailWhitelistMiddleware",  # Email whitelist check (must be after AuthenticationMiddleware)
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",  # Required by django-allauth
@@ -316,3 +317,9 @@ REST_FRAMEWORK = {
 
 # Custom User Model
 AUTH_USER_MODEL = 'billing.User'
+
+# Email Whitelist
+# Comma-separated list of allowed email addresses for authentication
+# Only these emails can login to the system (prevents spam/unauthorized access)
+ALLOWED_EMAILS_STR = config('ALLOWED_EMAILS', default='')
+ALLOWED_EMAILS = [email.strip().lower() for email in ALLOWED_EMAILS_STR.split(',') if email.strip()]
