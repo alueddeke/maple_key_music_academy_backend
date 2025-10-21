@@ -132,6 +132,7 @@ jobs:
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               -e DEBUG="False" \
               -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
+              -e ALLOWED_EMAILS="${{ secrets.ALLOWED_EMAILS }}" \
               -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
               -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
               -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \

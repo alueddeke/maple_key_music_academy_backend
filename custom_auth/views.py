@@ -88,7 +88,16 @@ def google_oauth_callback(request):
         
         user_data = user_response.json()
         print(f"DEBUG: User data from Google: {user_data}")
-        
+
+        # Check email whitelist
+        user_email = user_data.get('email', '').lower()
+        if settings.ALLOWED_EMAILS and user_email not in settings.ALLOWED_EMAILS:
+            print(f"DEBUG: Email {user_email} not in whitelist")
+            # Redirect to frontend with error
+            error_redirect = request.session.get('frontend_redirect_uri', 'http://maplekeymusic.com/oauth-callback')
+            error_url = f"{error_redirect}?error=unauthorized_email&message=Your email is not authorized. Please contact support."
+            return HttpResponseRedirect(error_url)
+
         # Step 5: Get or create User (unified model)
         User = get_user_model()
         try:
@@ -242,10 +251,16 @@ def get_jwt_token(request):
             'error': 'Email and password are required'
         }, status=status.HTTP_400_BAD_REQUEST)
     
+    # Check email whitelist before authentication
+    if settings.ALLOWED_EMAILS and email.lower() not in settings.ALLOWED_EMAILS:
+        return Response({
+            'error': 'Your email is not authorized. Please contact support.'
+        }, status=status.HTTP_403_FORBIDDEN)
+
     # Authenticate user using Django's built-in authentication
     # This checks the email/password against the database
     user = authenticate(request, username=email, password=password)
-    
+
     if user is None:
         return Response({
             'error': 'Invalid email or password'
