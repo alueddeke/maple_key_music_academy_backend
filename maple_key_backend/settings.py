@@ -285,7 +285,9 @@ SOCIALACCOUNT_PROVIDERS = {
 }
 
 # Django Allauth settings
-LOGIN_REDIRECT_URL = 'http://localhost:8000/dashboard'  # Your frontend dashboard
+# Dynamic redirect based on environment
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')
+LOGIN_REDIRECT_URL = f'{FRONTEND_URL}/dashboard'
 SOCIALACCOUNT_LOGIN_ON_GET = True
 
 # CSRF settings

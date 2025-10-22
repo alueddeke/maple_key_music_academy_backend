@@ -14,6 +14,11 @@ from django.http import HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
 from urllib.parse import urlencode
 import requests
+import os
+
+# Get URLs from environment
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+# For backend callback URL, construct from request in the view since it needs to match environment
 
 
 @csrf_exempt
@@ -23,7 +28,8 @@ def google_oauth(request):
     """redirect to google for oauth flow"""
     # Get frontend redirect URI - pass it via OAuth state parameter instead of session
     # This avoids session cookie issues that cause redirect loops
-    frontend_redirect_uri = request.GET.get('redirect_uri', 'https://maplekeymusic.com/oauth-callback')
+    default_frontend_redirect = f'{FRONTEND_URL}/oauth-callback'
+    frontend_redirect_uri = request.GET.get('redirect_uri', default_frontend_redirect)
 
     # Build Google OAuth URL manually
     import json
@@ -33,10 +39,17 @@ def google_oauth(request):
     state_data = {'redirect_uri': frontend_redirect_uri}
     state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
+    # Construct backend callback URL from request to match environment
+    backend_callback_url = request.build_absolute_uri('/api/auth/google/callback/')
+
+    print(f"DEBUG: Backend callback URL: {backend_callback_url}")
+    print(f"DEBUG: Request host: {request.get_host()}")
+    print(f"DEBUG: Request scheme: {request.scheme}")
+
     google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {
         'client_id': '578681672265-r7jpu2dumv6129pkapljb7j8ftk29it5.apps.googleusercontent.com',
-        'redirect_uri': 'https://api.maplekeymusic.com/api/auth/google/callback/',
+        'redirect_uri': backend_callback_url,
         'scope': 'email profile',
         'response_type': 'code',
         'access_type': 'online',
@@ -44,6 +57,7 @@ def google_oauth(request):
     }
 
     redirect_url = f"{google_oauth_url}?{urlencode(params)}"
+    print(f"DEBUG: Full OAuth URL: {redirect_url}")
     return HttpResponseRedirect(redirect_url)
 
 
@@ -53,10 +67,21 @@ def google_oauth(request):
 @permission_classes([AllowAny])
 def google_oauth_callback(request):
     """Google OAuth callback endpoint"""
+    import logging
+    import sys
+    logger = logging.getLogger(__name__)
+
+    # Force output to stderr immediately
+    sys.stderr.write(f"=== OAuth Callback Started ===\n")
+    sys.stderr.flush()
+
     try:
         # Step 1: Get the authorization code and state from the request
         code = request.GET.get('code')
         state = request.GET.get('state')
+
+        sys.stderr.write(f"Code present: {bool(code)}\n")
+        sys.stderr.flush()
 
         if not code:
             return Response({'error': 'No authorization code provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -64,37 +89,50 @@ def google_oauth_callback(request):
         # Decode state parameter to get frontend redirect URI
         import json
         import base64
+        default_frontend_redirect = f'{FRONTEND_URL}/oauth-callback'
         try:
             state_data = json.loads(base64.urlsafe_b64decode(state).decode()) if state else {}
-            frontend_redirect_uri = state_data.get('redirect_uri', 'https://maplekeymusic.com/oauth-callback')
+            frontend_redirect_uri = state_data.get('redirect_uri', default_frontend_redirect)
         except:
-            frontend_redirect_uri = 'https://maplekeymusic.com/oauth-callback'
-        
+            frontend_redirect_uri = default_frontend_redirect
+
         # Step 2: Get Google OAuth app configuration
         from allauth.socialaccount.models import SocialApp
         try:
             app = SocialApp.objects.get(provider='google')
         except SocialApp.DoesNotExist:
             return Response({'error': 'Google OAuth app not configured. Please set up in Django admin.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+
         # Step 3: Exchange code for tokens using Google API directly
+        # Construct backend callback URL to match environment
+        backend_callback_url = request.build_absolute_uri('/api/auth/google/callback/')
+
+        sys.stderr.write(f"Backend callback URL for token exchange: {backend_callback_url}\n")
+        sys.stderr.flush()
+
         token_url = 'https://oauth2.googleapis.com/token'
         token_data = {
             'client_id': app.client_id,
             'client_secret': app.secret,
             'code': code,
             'grant_type': 'authorization_code',
-            'redirect_uri': 'https://api.maplekeymusic.com/api/auth/google/callback/'
+            'redirect_uri': backend_callback_url
         }
-        
+
+        sys.stderr.write(f"Sending token request to Google...\n")
+        sys.stderr.flush()
+
         token_response = requests.post(token_url, data=token_data)
-        print(f"DEBUG: Token exchange status: {token_response.status_code}")
-        print(f"DEBUG: Token response: {token_response.text[:200]}...")
-        
+
+        sys.stderr.write(f"Token exchange status: {token_response.status_code}\n")
+        sys.stderr.write(f"Token response: {token_response.text}\n")
+        sys.stderr.flush()
+
         if token_response.status_code != 200:
-            print(f"DEBUG: Token exchange failed with status {token_response.status_code}")
-            print(f"DEBUG: Error response: {token_response.text}")
-            return Response({'error': 'Failed to exchange code for token'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                'error': 'Failed to exchange code for token',
+                'details': token_response.text
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         token_info = token_response.json()
         access_token = token_info.get('access_token')
@@ -183,9 +221,10 @@ def oauth_success(request):
         # Check if user is authenticated (Django Allauth should have logged them in)
         if not request.user.is_authenticated:
             return HttpResponseRedirect('/login?error=not_authenticated')
-        
+
         # Get frontend redirect URI from session
-        frontend_redirect_uri = request.session.get('frontend_redirect_uri', 'https://maplekeymusic.com/oauth-callback')
+        default_frontend_redirect = f'{FRONTEND_URL}/oauth-callback'
+        frontend_redirect_uri = request.session.get('frontend_redirect_uri', default_frontend_redirect)
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(request.user)

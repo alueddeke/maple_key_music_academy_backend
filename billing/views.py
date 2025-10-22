@@ -237,13 +237,19 @@ def submit_lessons_for_invoice(request):
                     )
             else:
                 # Create student with just name (no email)
-                student = User.objects.create(
-                    email=f"{student_name.lower().replace(' ', '.')}@temp.com",  # Temporary email
-                    first_name=student_name.split()[0] if student_name else '',
-                    last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                    user_type='student',
-                    is_approved=True
-                )
+                # Try to find existing student by name first
+                temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
+                try:
+                    student = User.objects.get(email=temp_email, user_type='student')
+                except User.DoesNotExist:
+                    # Create new student if not found
+                    student = User.objects.create(
+                        email=temp_email,
+                        first_name=student_name.split()[0] if student_name else '',
+                        last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                        user_type='student',
+                        is_approved=True
+                    )
             
             # Create lesson
             lesson = Lesson.objects.create(
@@ -285,6 +291,11 @@ def submit_lessons_for_invoice(request):
         }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
+        import traceback
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Invoice submission failed: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return Response({
             'error': 'Failed to create invoice',
             'details': str(e)
