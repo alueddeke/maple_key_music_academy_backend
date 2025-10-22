@@ -39,6 +39,13 @@ def google_oauth(request):
     state_data = {'redirect_uri': frontend_redirect_uri}
     state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
 
+    # Get Google OAuth app configuration
+    from allauth.socialaccount.models import SocialApp
+    try:
+        app = SocialApp.objects.get(provider='google')
+    except SocialApp.DoesNotExist:
+        return Response({'error': 'Google OAuth app not configured. Please set up in Django admin.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     # Construct backend callback URL from request to match environment
     backend_callback_url = request.build_absolute_uri('/api/auth/google/callback/')
 
@@ -48,7 +55,7 @@ def google_oauth(request):
 
     google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {
-        'client_id': '578681672265-r7jpu2dumv6129pkapljb7j8ftk29it5.apps.googleusercontent.com',
+        'client_id': app.client_id,
         'redirect_uri': backend_callback_url,
         'scope': 'email profile',
         'response_type': 'code',

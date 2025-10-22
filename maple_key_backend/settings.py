@@ -32,10 +32,10 @@ SECRET_KEY = config('SECRET_KEY')
 # DEBUG should be False in production for security
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-# ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver']
-
 # ALLOWED_HOSTS configuration
-ALLOWED_HOSTS = ['159.203.173.226', 'localhost', '127.0.0.1', '*']
+# Read from environment variable or use safe defaults for development
+ALLOWED_HOSTS_STR = config('ALLOWED_HOSTS', default='localhost,127.0.0.1')
+ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_STR.split(',') if host.strip()]
 
 
 # CORS configuration
