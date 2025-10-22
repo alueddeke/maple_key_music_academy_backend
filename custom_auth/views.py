@@ -22,9 +22,8 @@ def google_oauth(request):
     # Store frontend redirect URI in session for later use
     frontend_redirect_uri = request.GET.get('redirect_uri', 'http://maplekeymusic.com/oauth-callback')
     request.session['frontend_redirect_uri'] = frontend_redirect_uri
-    
+
     # Build Google OAuth URL manually
-    from urllib.parse import urlencode
     google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {
         'client_id': '578681672265-r7jpu2dumv6129pkapljb7j8ftk29it5.apps.googleusercontent.com',
@@ -141,9 +140,8 @@ def google_oauth_callback(request):
             'user_type': user.user_type,
             'is_approved': user.is_approved
         }
-        
+
         # Build redirect URL with tokens and user data
-        from urllib.parse import urlencode
         params = {
             'access_token': str(refresh.access_token),
             'refresh_token': str(refresh),
@@ -151,9 +149,8 @@ def google_oauth_callback(request):
         }
         
         redirect_url = f"{redirect_uri}?{urlencode(params)}"
-        
+
         # Redirect to frontend with tokens
-        from django.http import HttpResponseRedirect
         return HttpResponseRedirect(redirect_url)
         
     except Exception as e:
