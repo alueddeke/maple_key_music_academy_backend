@@ -2,10 +2,10 @@ name: Deploy Backend Prod
 on:
   push:
     branches:
-      - deploy
+      - production
   pull_request:
     branches:
-      - deploy
+      - production
   workflow_dispatch:
 jobs:
   # test:
@@ -136,6 +136,7 @@ jobs:
               -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
               -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
               -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
+              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
             
@@ -165,7 +166,9 @@ jobs:
                     proxy_set_header Host $host;
                     proxy_set_header X-Real-IP $remote_addr;
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto $scheme;
+                    # Preserve X-Forwarded-Proto from Host Nginx (if set), otherwise use $scheme
+                    # This allows SSL termination at Host Nginx to work correctly
+                    proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
                     proxy_redirect off;
                     proxy_buffering off;
                 }
@@ -268,7 +271,7 @@ jobs:
               sudo certbot renew --quiet
               echo "✅ SSL certificate is up to date!"
             fi
-            
+
             # Configure firewall
             sudo ufw allow 80/tcp || true
             sudo ufw allow 443/tcp || true

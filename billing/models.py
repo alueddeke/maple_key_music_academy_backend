@@ -99,9 +99,9 @@ class Lesson(models.Model):
     
     # Lesson details
     rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
-    scheduled_date = models.DateTimeField()
+    scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
-    duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0)
+    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)  # Increased from 4 to 6 to allow values up to 9999.99
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
     
     # Notes
@@ -151,7 +151,7 @@ class Invoice(models.Model):
     # Invoice details
     payment_balance = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
-    due_date = models.DateTimeField()
+    due_date = models.DateTimeField(null=True, blank=True)  # Made optional to allow migration
     
     # Tracking
     created_at = models.DateTimeField(auto_now_add=True)
