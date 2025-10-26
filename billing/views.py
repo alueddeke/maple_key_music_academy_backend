@@ -223,33 +223,29 @@ def submit_lessons_for_invoice(request):
             student_email = lesson_data.get('student_email')
             
             if student_email:
-                # Try to find existing student by email
-                try:
-                    student = User.objects.get(email=student_email, user_type='student')
-                except User.DoesNotExist:
-                    # Create new student if not found
-                    student = User.objects.create(
-                        email=student_email,
-                        first_name=student_name.split()[0] if student_name else '',
-                        last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        user_type='student',
-                        is_approved=True  # Auto-approve students created by teachers
-                    )
+                # Find or create student by email using get_or_create for atomicity
+                student, created = User.objects.get_or_create(
+                    email=student_email,
+                    user_type='student',
+                    defaults={
+                        'first_name': student_name.split()[0] if student_name else '',
+                        'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                        'is_approved': True  # Auto-approve students created by teachers
+                    }
+                )
             else:
                 # Create student with just name (no email)
-                # Try to find existing student by name first
+                # Generate temp email and use get_or_create for atomicity
                 temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
-                try:
-                    student = User.objects.get(email=temp_email, user_type='student')
-                except User.DoesNotExist:
-                    # Create new student if not found
-                    student = User.objects.create(
-                        email=temp_email,
-                        first_name=student_name.split()[0] if student_name else '',
-                        last_name=' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        user_type='student',
-                        is_approved=True
-                    )
+                student, created = User.objects.get_or_create(
+                    email=temp_email,
+                    user_type='student',
+                    defaults={
+                        'first_name': student_name.split()[0] if student_name else '',
+                        'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                        'is_approved': True
+                    }
+                )
             
             # Create lesson
             lesson = Lesson.objects.create(
