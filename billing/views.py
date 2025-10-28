@@ -7,9 +7,13 @@ from django.utils import timezone
 from .models import Invoice, Lesson
 from .serializers import UserSerializer, LessonSerializer, InvoiceSerializer
 from custom_auth.decorators import (
-    role_required, teacher_required, management_required, 
+    role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
 )
+from .services.invoice_service import InvoiceProcessor
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 #run when url endpoints are hit
@@ -200,6 +204,7 @@ def submit_lessons_for_invoice(request):
                 "student_email": "john@example.com",  # Optional, for student lookup
                 "scheduled_date": "2024-01-15T14:00:00Z",
                 "duration": 1.0,
+                "lesson_type": "online", 
                 "rate": 80.00,  # Optional, defaults to teacher's hourly rate
                 "teacher_notes": "Worked on scales and arpeggios"
             }
@@ -248,12 +253,17 @@ def submit_lessons_for_invoice(request):
                 )
             
             # Create lesson
+            from decimal import Decimal
+            duration_value = lesson_data.get('duration', 1.0)
+            rate_value = lesson_data.get('rate', request.user.hourly_rate)
+
             lesson = Lesson.objects.create(
                 teacher=request.user,
                 student=student,
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
-                duration=lesson_data.get('duration', 1.0),
-                rate=lesson_data.get('rate', request.user.hourly_rate),
+                duration=Decimal(str(duration_value)),
+                lesson_type=lesson_data.get('lesson_type', 'in_person'),
+                rate=Decimal(str(rate_value)) if not isinstance(rate_value, Decimal) else rate_value,
                 status='completed',  # Mark as completed since teacher is submitting for payment
                 completed_date=timezone.now(),
                 teacher_notes=lesson_data.get('teacher_notes', '')
@@ -277,19 +287,54 @@ def submit_lessons_for_invoice(request):
         # Recalculate payment balance
         invoice.payment_balance = invoice.calculate_payment_balance()
         invoice.save()
-        
+
+        # Create student invoices
+        # Group lessons by student
+        from collections import defaultdict
+        lessons_by_student = defaultdict(list)
+        for lesson in created_lessons:
+            lessons_by_student[lesson.student].append(lesson)
+
+        student_invoices_created = []
+        for student, student_lessons in lessons_by_student.items():
+            # Calculate total for this student
+            student_total = sum(lesson.total_cost() for lesson in student_lessons)
+
+            # Create student invoice
+            student_invoice = Invoice.objects.create(
+                invoice_type='student_billing',
+                student=student,
+                status='pending',  # Waiting for student payment
+                due_date=timezone.now() + timezone.timedelta(days=14),  # 14 days payment term
+                created_by=request.user,
+                payment_balance=student_total
+            )
+
+            # Add lessons to student invoice
+            student_invoice.lessons.set(student_lessons)
+            student_invoices_created.append(student_invoice)
+
+        # Generate PDF and send email
+        try:
+            success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
+            if success:
+                logger.info(f"PDF generated and email sent for invoice {invoice.id} with {len(student_invoices_created)} student invoices")
+            else:
+                logger.warning(f"Failed to generate PDF or send email for invoice {invoice.id}: {message}")
+        except Exception as e:
+            logger.error(f"Error generating PDF or sending email for invoice {invoice.id}: {str(e)}")
+
         # Return the created invoice with lesson details
         serializer = InvoiceSerializer(invoice)
         return Response({
             'message': 'Lessons submitted and invoice created successfully',
             'invoice': serializer.data,
-            'lessons_created': len(created_lessons)
+            'lessons_created': len(created_lessons),
+            'student_invoices_created': len(student_invoices_created)
         }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
         import traceback
-        import logging
-        logger = logging.getLogger(__name__)
         logger.error(f"Invoice submission failed: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return Response({

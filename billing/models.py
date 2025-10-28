@@ -84,6 +84,12 @@ class User(AbstractUser):
 
 
 class Lesson(models.Model):
+    ONLINE = 'online'
+    IN_PERSON = 'in_person'
+    LESSON_TYPE_CHOICES = [
+        (ONLINE, 'Online'),
+        (IN_PERSON, 'In_person')
+    ]
     LESSON_STATUS = [
         ('requested', 'Requested'),
         ('confirmed', 'Confirmed'), 
@@ -97,11 +103,13 @@ class Lesson(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_taking',
                                limit_choices_to={'user_type': 'student'})
     
+    lesson_type = models.CharField( max_length=20, choices=LESSON_TYPE_CHOICES, default=IN_PERSON,help_text='Type of lesson: online or in-person')
+
     # Lesson details
     rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
-    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)  # Increased from 4 to 6 to allow values up to 9999.99
+    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.00)  # Increased from 4 to 6 to allow values up to 9999.99
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
     
     # Notes
@@ -113,13 +121,16 @@ class Lesson(models.Model):
     
     def total_cost(self):
         from decimal import Decimal
-        return float(self.rate * self.duration)
-    
+        return self.rate * self.duration
+
     def save(self, *args, **kwargs):
-        # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
-        if self.rate == 80.00 and self.teacher and self.teacher.hourly_rate != 80.00:
-            self.rate = self.teacher.hourly_rate
-        super().save(*args, **kwargs)
+      from decimal import Decimal
+      if self.rate == Decimal('80.00'):
+          if self.lesson_type == self.ONLINE:
+              self.rate = Decimal('45.00')  # Online rate
+          elif self.teacher and self.teacher.hourly_rate != Decimal('80.00'):
+              self.rate = self.teacher.hourly_rate  # Teacher's custom in-person rate
+      super().save(*args, **kwargs)
     
     def __str__(self):
         return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}"

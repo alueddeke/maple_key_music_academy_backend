@@ -32,8 +32,8 @@ class UserAdmin(BaseUserAdmin):
 
 @admin.register(Lesson)
 class LessonAdmin(admin.ModelAdmin):
-    list_display = ('student', 'teacher', 'scheduled_date', 'status', 'total_cost')
-    list_filter = ('status', 'teacher', 'created_at')
+    list_display = ('student', 'teacher', 'scheduled_date', 'lesson_type', 'status', 'total_cost')
+    list_filter = ('status', 'lesson_type', 'teacher', 'created_at')
     search_fields = ('student__email', 'teacher__email')
 
 @admin.register(Invoice)
