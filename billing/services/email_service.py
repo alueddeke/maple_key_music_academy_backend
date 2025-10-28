@@ -34,11 +34,11 @@ Teacher Invoice Details:
 - Number of Lessons: {invoice.lessons.count()}
 
 Attached Files:
-- 1 Teacher Invoice (to PAY the teacher)
+- 1 Teacher Invoice 
 """
 
             if student_count > 0:
-                body += f"- {student_count} Student Invoice(s) (to COLLECT payment from students)\n\n"
+                body += f"- {student_count} Student Invoice(s) \n\n"
                 body += "Student Invoices:\n"
                 for student_pdf in student_pdfs:
                     student = student_pdf['student']
@@ -50,7 +50,7 @@ Attached Files:
 Please review and process accordingly.
 
 Best regards,
-Maple Key Music Academy System
+Maple Key Music Academy
             """.strip()
 
             # Create email
