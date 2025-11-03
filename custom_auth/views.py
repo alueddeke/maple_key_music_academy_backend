@@ -155,33 +155,77 @@ def google_oauth_callback(request):
         user_data = user_response.json()
         print(f"DEBUG: User data from Google: {user_data}")
 
-        # Check email whitelist
-        user_email = user_data.get('email', '').lower()
-        if settings.ALLOWED_EMAILS and user_email not in settings.ALLOWED_EMAILS:
-            print(f"DEBUG: Email {user_email} not in whitelist")
-            # Redirect to frontend with error (using frontend_redirect_uri from state)
-            error_url = f"{frontend_redirect_uri}?error=unauthorized_email&message=Your email is not authorized. Please contact support."
+        # Step 5: Hybrid approval system - Check ApprovedEmail OR create registration request
+        User = get_user_model()
+        from billing.models import ApprovedEmail, UserRegistrationRequest
+
+        user_email = user_data.get('email')
+        user = None
+
+        try:
+            # Try to get existing user
+            user = User.objects.get(email=user_email)
+            print(f"DEBUG: Existing user found: {user.email}")
+        except User.DoesNotExist:
+            # User doesn't exist - check if email is pre-approved
+            try:
+                approved_email = ApprovedEmail.objects.get(email=user_email)
+                # Email is pre-approved - create user with approved status
+                user = User.objects.create(
+                    email=user_email,
+                    first_name=user_data.get('given_name', ''),
+                    last_name=user_data.get('family_name', ''),
+                    user_type=approved_email.user_type,
+                    oauth_provider='google',
+                    oauth_id=user_data.get('id'),
+                    is_approved=True  # Pre-approved
+                )
+                print(f"DEBUG: User created from pre-approved email: {user.email}")
+            except ApprovedEmail.DoesNotExist:
+                # Not pre-approved - check for existing registration request
+                try:
+                    reg_request = UserRegistrationRequest.objects.get(email=user_email)
+                    if reg_request.status == 'approved':
+                        # Registration request was approved - create user
+                        user = User.objects.create(
+                            email=user_email,
+                            first_name=user_data.get('given_name', ''),
+                            last_name=user_data.get('family_name', ''),
+                            user_type=reg_request.user_type,
+                            oauth_provider='google',
+                            oauth_id=user_data.get('id'),
+                            is_approved=True
+                        )
+                        print(f"DEBUG: User created from approved registration: {user.email}")
+                    elif reg_request.status == 'rejected':
+                        error_url = f"{frontend_redirect_uri}?error=registration_rejected&message=Your registration request was rejected. Please contact support."
+                        return HttpResponseRedirect(error_url)
+                    else:  # pending
+                        error_url = f"{frontend_redirect_uri}?error=approval_pending&message=Your registration is pending management approval. You will be able to login once approved."
+                        return HttpResponseRedirect(error_url)
+                except UserRegistrationRequest.DoesNotExist:
+                    # No registration request - create one
+                    UserRegistrationRequest.objects.create(
+                        email=user_email,
+                        first_name=user_data.get('given_name', ''),
+                        last_name=user_data.get('family_name', ''),
+                        user_type='teacher',  # Default
+                        oauth_provider='google',
+                        oauth_id=user_data.get('id'),
+                        status='pending'
+                    )
+                    print(f"DEBUG: Registration request created for: {user_email}")
+                    error_url = f"{frontend_redirect_uri}?error=approval_required&message=Thank you for registering! Your request is pending management approval. You will be able to login once approved."
+                    return HttpResponseRedirect(error_url)
+        except Exception as e:
+            print(f"DEBUG: Error in approval flow: {str(e)}")
+            return Response({'error': f'Approval flow error: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Make sure we have a user object (could be None if registration request was created)
+        if not user:
+            error_url = f"{frontend_redirect_uri}?error=no_user&message=Unable to complete login. Please try again."
             return HttpResponseRedirect(error_url)
 
-        # Step 5: Get or create User (unified model)
-        User = get_user_model()
-        try:
-            user, created = User.objects.get_or_create(
-                email=user_data.get('email'),
-                defaults={
-                    'first_name': user_data.get('given_name', ''),
-                    'last_name': user_data.get('family_name', ''),
-                    'user_type': 'teacher',  # Default to teacher for OAuth
-                    'oauth_provider': 'google',
-                    'oauth_id': user_data.get('id'),
-                    'is_approved': False,  # Requires management approval
-                }
-            )
-            print(f"DEBUG: User {'created' if created else 'found'}: {user.email}")
-        except Exception as e:
-            print(f"DEBUG: User creation failed: {str(e)}")
-            return Response({'error': f'User creation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
         # Step 7: Generate JWT tokens
         try:
             refresh = RefreshToken.for_user(user)
@@ -311,12 +355,6 @@ def get_jwt_token(request):
         return Response({
             'error': 'Email and password are required'
         }, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Check email whitelist before authentication
-    if settings.ALLOWED_EMAILS and email.lower() not in settings.ALLOWED_EMAILS:
-        return Response({
-            'error': 'Your email is not authorized. Please contact support.'
-        }, status=status.HTTP_403_FORBIDDEN)
 
     # Authenticate user using Django's built-in authentication
     # This checks the email/password against the database

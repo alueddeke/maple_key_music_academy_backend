@@ -468,3 +468,289 @@ def invoice_detail(request, pk):
     elif request.method == 'DELETE':
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# MANAGEMENT ENDPOINTS FOR USER APPROVAL SYSTEM
+
+@api_view(['GET', 'POST'])
+@management_required
+def approved_email_list(request):
+    """Management can view and add pre-approved emails"""
+    from .models import ApprovedEmail
+    from .serializers import ApprovedEmailSerializer
+
+    if request.method == 'GET':
+        approved_emails = ApprovedEmail.objects.all()
+        serializer = ApprovedEmailSerializer(approved_emails, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        data['approved_by'] = request.user.id
+        serializer = ApprovedEmailSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['DELETE'])
+@management_required
+def approved_email_delete(request, pk):
+    """Management can delete pre-approved emails"""
+    from .models import ApprovedEmail
+
+    try:
+        approved_email = ApprovedEmail.objects.get(pk=pk)
+        approved_email.delete()
+        return Response({'message': 'Approved email deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
+    except ApprovedEmail.DoesNotExist:
+        return Response({'error': 'Approved email not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+@management_required
+def registration_request_list(request):
+    """Management can view all registration requests"""
+    from .models import UserRegistrationRequest
+    from .serializers import UserRegistrationRequestSerializer
+
+    # Filter by status if provided
+    status_filter = request.GET.get('status')
+    if status_filter:
+        requests = UserRegistrationRequest.objects.filter(status=status_filter)
+    else:
+        requests = UserRegistrationRequest.objects.all()
+
+    serializer = UserRegistrationRequestSerializer(requests, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@management_required
+def approve_registration_request(request, pk):
+    """Management approves a registration request"""
+    from .models import UserRegistrationRequest
+
+    try:
+        reg_request = UserRegistrationRequest.objects.get(pk=pk)
+
+        if reg_request.status != 'pending':
+            return Response({
+                'error': 'Only pending requests can be approved'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mark as approved
+        reg_request.status = 'approved'
+        reg_request.reviewed_by = request.user
+        reg_request.reviewed_at = timezone.now()
+        reg_request.notes = request.data.get('notes', '')
+        reg_request.save()
+
+        return Response({
+            'message': 'Registration request approved',
+            'email': reg_request.email,
+            'user_type': reg_request.user_type
+        })
+
+    except UserRegistrationRequest.DoesNotExist:
+        return Response({'error': 'Registration request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@management_required
+def reject_registration_request(request, pk):
+    """Management rejects a registration request"""
+    from .models import UserRegistrationRequest
+
+    try:
+        reg_request = UserRegistrationRequest.objects.get(pk=pk)
+
+        if reg_request.status != 'pending':
+            return Response({
+                'error': 'Only pending requests can be rejected'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mark as rejected
+        reg_request.status = 'rejected'
+        reg_request.reviewed_by = request.user
+        reg_request.reviewed_at = timezone.now()
+        reg_request.notes = request.data.get('notes', '')
+        reg_request.save()
+
+        return Response({
+            'message': 'Registration request rejected',
+            'email': reg_request.email
+        })
+
+    except UserRegistrationRequest.DoesNotExist:
+        return Response({'error': 'Registration request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+@management_required
+def management_all_users(request):
+    """Management can view all users with detailed information"""
+    from .serializers import DetailedUserSerializer
+
+    # Filter by user_type if provided
+    user_type = request.GET.get('user_type')
+    approval_status = request.GET.get('is_approved')
+
+    users = User.objects.all()
+
+    if user_type:
+        users = users.filter(user_type=user_type)
+    if approval_status is not None:
+        users = users.filter(is_approved=approval_status.lower() == 'true')
+
+    serializer = DetailedUserSerializer(users, many=True)
+    return Response(serializer.data)
+
+
+# MANAGEMENT ENDPOINTS FOR INVOICE MANAGEMENT
+
+@api_view(['GET'])
+@management_required
+def management_all_invoices(request):
+    """Management can view all invoices with detailed information"""
+    from .serializers import DetailedInvoiceSerializer
+
+    # Filters
+    invoice_type = request.GET.get('invoice_type')
+    status_filter = request.GET.get('status')
+    teacher_id = request.GET.get('teacher_id')
+
+    invoices = Invoice.objects.all()
+
+    if invoice_type:
+        invoices = invoices.filter(invoice_type=invoice_type)
+    if status_filter:
+        invoices = invoices.filter(status=status_filter)
+    if teacher_id:
+        invoices = invoices.filter(teacher_id=teacher_id)
+
+    serializer = DetailedInvoiceSerializer(invoices, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['PUT'])
+@management_required
+def management_update_invoice(request, pk):
+    """Management can update invoice details"""
+    from .serializers import DetailedInvoiceSerializer
+
+    try:
+        invoice = Invoice.objects.get(pk=pk)
+
+        if not invoice.can_be_edited():
+            return Response({
+                'error': 'This invoice cannot be edited',
+                'message': f'Invoices with status "{invoice.status}" cannot be edited'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Track edit
+        data = request.data.copy()
+        invoice.last_edited_by = request.user
+        invoice.last_edited_at = timezone.now()
+
+        serializer = DetailedInvoiceSerializer(invoice, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['PUT'])
+@management_required
+def management_update_invoice_status(request, pk):
+    """Management can update invoice status"""
+    try:
+        invoice = Invoice.objects.get(pk=pk)
+        new_status = request.data.get('status')
+
+        if new_status not in dict(Invoice.STATUS_CHOICES):
+            return Response({
+                'error': 'Invalid status'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        invoice.status = new_status
+        invoice.last_edited_by = request.user
+        invoice.last_edited_at = timezone.now()
+
+        # If approving, set approval fields
+        if new_status == 'approved':
+            invoice.approved_by = request.user
+            invoice.approved_at = timezone.now()
+
+        invoice.save()
+
+        return Response({
+            'message': 'Invoice status updated',
+            'status': invoice.status
+        })
+
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@management_required
+def management_recalculate_invoice(request, pk):
+    """Management can recalculate invoice totals"""
+    try:
+        invoice = Invoice.objects.get(pk=pk)
+
+        if not invoice.can_be_edited():
+            return Response({
+                'error': 'This invoice cannot be recalculated',
+                'message': f'Invoices with status "{invoice.status}" cannot be edited'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Recalculate
+        old_balance = invoice.payment_balance
+        invoice.payment_balance = invoice.calculate_payment_balance()
+        invoice.last_edited_by = request.user
+        invoice.last_edited_at = timezone.now()
+        invoice.save()
+
+        return Response({
+            'message': 'Invoice recalculated',
+            'old_balance': old_balance,
+            'new_balance': invoice.payment_balance
+        })
+
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@management_required
+def management_regenerate_invoice_pdf(request, pk):
+    """Management can regenerate and resend invoice PDF"""
+    try:
+        invoice = Invoice.objects.get(pk=pk)
+
+        # Get recipient email if provided
+        recipient_email = request.data.get('recipient_email')
+
+        # Regenerate PDF and send email
+        success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(
+            invoice, recipient_email
+        )
+
+        if success:
+            return Response({
+                'message': 'Invoice PDF regenerated and sent successfully'
+            })
+        else:
+            return Response({
+                'error': 'Failed to regenerate invoice',
+                'details': message
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)

@@ -158,14 +158,25 @@ class Invoice(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, 
                                   related_name='invoices_created')
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='invoices_approved', 
+                                   related_name='invoices_approved',
                                    limit_choices_to={'user_type': 'management'})
     approved_at = models.DateTimeField(null=True, blank=True)
-    
+
+    # Management editing tracking
+    notes = models.TextField(blank=True, help_text="Management notes about this invoice")
+    last_edited_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='invoices_edited',
+                                      limit_choices_to={'user_type': 'management'})
+    last_edited_at = models.DateTimeField(null=True, blank=True)
+
     def calculate_payment_balance(self):
         total = sum(lesson.total_cost() for lesson in self.lessons.all())
         return total
-    
+
+    def can_be_edited(self):
+        """Check if invoice can be edited by management"""
+        return self.status in ['draft', 'pending']
+
     def save(self, *args, **kwargs):
         # Ensure only one of teacher or student is set
         if self.invoice_type == 'teacher_payment' and self.student:
@@ -184,3 +195,52 @@ class Invoice(models.Model):
             return f"Payment to {self.teacher.get_full_name()} - {self.payment_balance}"
         else:
             return f"Bill for {self.student.get_full_name()} - {self.payment_balance}"
+
+
+class ApprovedEmail(models.Model):
+    """Pre-approved email addresses that can register without management review"""
+    email = models.EmailField(unique=True)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPES)
+    approved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='emails_approved')
+    approved_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True, help_text="Optional notes about this pre-approval")
+
+    class Meta:
+        ordering = ['-approved_at']
+
+    def __str__(self):
+        return f"{self.email} ({self.get_user_type_display()})"
+
+
+class UserRegistrationRequest(models.Model):
+    """User registration requests pending management approval"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+
+    # User info
+    email = models.EmailField(unique=True)
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPES)
+
+    # OAuth info (if applicable)
+    oauth_provider = models.CharField(max_length=50, blank=True)  # 'google', etc.
+    oauth_id = models.CharField(max_length=100, blank=True)
+
+    # Approval workflow
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    requested_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='registration_requests_reviewed',
+                                   limit_choices_to={'user_type': 'management'})
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, help_text="Management notes about this request")
+
+    class Meta:
+        ordering = ['-requested_at']
+
+    def __str__(self):
+        return f"{self.email} - {self.get_status_display()} ({self.get_user_type_display()})"
