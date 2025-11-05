@@ -1,6 +1,7 @@
 from django.shortcuts import render
 from rest_framework import status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -478,6 +479,7 @@ def approved_email_list(request):
     """Management can view and add pre-approved emails"""
     from .models import ApprovedEmail
     from .serializers import ApprovedEmailSerializer
+    from .invitation_utils import create_and_send_invitation
 
     if request.method == 'GET':
         approved_emails = ApprovedEmail.objects.all()
@@ -489,8 +491,18 @@ def approved_email_list(request):
         data['approved_by'] = request.user.id
         serializer = ApprovedEmailSerializer(data=data)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            approved_email = serializer.save()
+
+            # Create and send invitation
+            success, message, invitation = create_and_send_invitation(approved_email)
+
+            response_data = serializer.data
+            response_data['invitation_sent'] = success
+            response_data['invitation_message'] = message
+            if invitation:
+                response_data['invitation_token'] = invitation.token
+
+            return Response(response_data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -606,6 +618,138 @@ def management_all_users(request):
 
     serializer = DetailedUserSerializer(users, many=True)
     return Response(serializer.data)
+
+
+@api_view(['DELETE'])
+@management_required
+def management_delete_user(request, pk):
+    """Management can delete users (except themselves)"""
+    try:
+        user = User.objects.get(pk=pk)
+
+        # Prevent self-deletion
+        if user.id == request.user.id:
+            return Response({
+                'error': 'Cannot delete your own account'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Prevent deleting other management users (optional safety check)
+        if user.user_type == 'management':
+            return Response({
+                'error': 'Cannot delete management users'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user_email = user.email
+        user.delete()
+
+        return Response({
+            'message': f'Successfully deleted user {user_email}'
+        }, status=status.HTTP_200_OK)
+
+    except User.DoesNotExist:
+        return Response({
+            'error': 'User not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+
+# INVITATION TOKEN ENDPOINTS
+
+@api_view(['GET'])
+@permission_classes([AllowAny])  # Public endpoint - no authentication required
+def validate_invitation_token(request, token):
+    """Validate invitation token and return email/user_type if valid"""
+    from .models import InvitationToken
+
+    try:
+        invitation = InvitationToken.objects.get(token=token)
+
+        if not invitation.is_valid():
+            return Response({
+                'error': 'Invalid or expired invitation token',
+                'is_used': invitation.is_used,
+                'is_expired': timezone.now() >= invitation.expires_at
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'valid': True,
+            'email': invitation.email,
+            'user_type': invitation.user_type,
+            'user_type_display': invitation.get_user_type_display(),
+            'expires_at': invitation.expires_at
+        })
+
+    except InvitationToken.DoesNotExist:
+        return Response({
+            'error': 'Invalid invitation token'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Public endpoint - no authentication required
+def setup_account_with_invitation(request, token):
+    """Create user account using invitation token"""
+    from .models import InvitationToken, User
+
+    try:
+        invitation = InvitationToken.objects.get(token=token)
+
+        # Validate token
+        if not invitation.is_valid():
+            return Response({
+                'error': 'Invalid or expired invitation token'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if user already exists
+        if User.objects.filter(email=invitation.email).exists():
+            return Response({
+                'error': 'An account with this email already exists'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get user data from request
+        first_name = request.data.get('first_name')
+        last_name = request.data.get('last_name')
+        password = request.data.get('password')
+
+        if not first_name or not last_name:
+            return Response({
+                'error': 'First name and last name are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create user account
+        user = User.objects.create_user(
+            email=invitation.email,
+            password=password if password else None,  # Password is optional (for OAuth users)
+            first_name=first_name,
+            last_name=last_name,
+            user_type=invitation.user_type,
+        )
+        user.is_approved = True  # Pre-approved via invitation
+        user.save()
+
+        # Mark token as used
+        invitation.mark_as_used()
+
+        # Generate JWT tokens for immediate login
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(user)
+
+        return Response({
+            'message': 'Account created successfully',
+            'user': {
+                'email': user.email,
+                'name': user.get_full_name(),
+                'user_id': user.id,
+                'user_type': user.user_type,
+                'is_approved': user.is_approved
+            },
+            'access_token': str(refresh.access_token),
+            'refresh_token': str(refresh)
+        }, status=status.HTTP_201_CREATED)
+
+    except InvitationToken.DoesNotExist:
+        return Response({
+            'error': 'Invalid invitation token'
+        }, status=status.HTTP_404_NOT_FOUND)
 
 
 # MANAGEMENT ENDPOINTS FOR INVOICE MANAGEMENT

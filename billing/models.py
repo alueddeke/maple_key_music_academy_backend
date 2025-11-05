@@ -244,3 +244,34 @@ class UserRegistrationRequest(models.Model):
 
     def __str__(self):
         return f"{self.email} - {self.get_status_display()} ({self.get_user_type_display()})"
+
+
+class InvitationToken(models.Model):
+    """Secure tokens for inviting pre-approved users to set up their accounts"""
+    email = models.EmailField()
+    token = models.CharField(max_length=64, unique=True)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPES)
+    approved_email = models.ForeignKey(ApprovedEmail, on_delete=models.CASCADE, related_name='invitation_tokens')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def is_valid(self):
+        """Check if token is valid (not expired and not used)"""
+        from django.utils import timezone
+        return not self.is_used and timezone.now() < self.expires_at
+
+    def mark_as_used(self):
+        """Mark token as used"""
+        from django.utils import timezone
+        self.is_used = True
+        self.used_at = timezone.now()
+        self.save()
+
+    def __str__(self):
+        return f"Invitation for {self.email} - {'Used' if self.is_used else 'Valid' if self.is_valid() else 'Expired'}"

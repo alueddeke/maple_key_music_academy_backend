@@ -34,6 +34,11 @@ urlpatterns = [
     path('management/registration-requests/<int:pk>/approve/', views.approve_registration_request, name='approve_registration_request'),
     path('management/registration-requests/<int:pk>/reject/', views.reject_registration_request, name='reject_registration_request'),
     path('management/users/', views.management_all_users, name='management_all_users'),
+    path('management/users/<int:pk>/', views.management_delete_user, name='management_delete_user'),
+
+    # Invitation token endpoints (public - no auth required)
+    path('invite/<str:token>/validate/', views.validate_invitation_token, name='validate_invitation_token'),
+    path('invite/<str:token>/setup/', views.setup_account_with_invitation, name='setup_account_with_invitation'),
 
     # Management endpoints for invoice management
     path('management/invoices/', views.management_all_invoices, name='management_all_invoices'),

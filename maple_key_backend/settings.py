@@ -265,6 +265,15 @@ ACCOUNT_EMAIL_VERIFICATION = 'none'                  # Email verification settin
 ACCOUNT_LOGIN_METHODS = {'email'}                    # Use email for authentication instead of username
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']  # Required fields for signup
 
+# Email Configuration
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@maplekeymusic.com')
+
 # Social account settings (for allauth.socialaccount)
 SOCIALACCOUNT_PROVIDERS = {
     'google': {
