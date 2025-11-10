@@ -521,15 +521,15 @@ def user_profile(request):
 def logout(request):
     """
     Logout endpoint
-    
+
     This endpoint blacklists the provided refresh token, effectively logging out the user.
     Once a refresh token is blacklisted, it cannot be used to get new access tokens.
-    
+
     Expected request body:
     {
         "refresh": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."
     }
-    
+
     Returns:
     {
         "message": "Successfully logged out"
@@ -537,24 +537,24 @@ def logout(request):
     """
     from rest_framework_simplejwt.tokens import RefreshToken
     from rest_framework_simplejwt.exceptions import TokenError
-    
+
     # Get refresh token from request
     refresh_token = request.data.get('refresh')
-    
+
     if not refresh_token:
         return Response({
             'error': 'Refresh token is required'
         }, status=status.HTTP_400_BAD_REQUEST)
-    
+
     try:
         # Create RefreshToken object and blacklist it
         refresh = RefreshToken(refresh_token)
         refresh.blacklist()
-        
+
         return Response({
             'message': 'Successfully logged out'
         })
-        
+
     except TokenError as e:
         return Response({
             'error': 'Invalid refresh token'
@@ -563,3 +563,231 @@ def logout(request):
         return Response({
             'error': 'Logout failed'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def password_reset_request(request):
+    """
+    Request password reset endpoint
+
+    Sends a password reset email with a secure token to the user's email address.
+    Only sends email if user exists and email is in the allowed emails list.
+
+    Expected request body:
+    {
+        "email": "user@example.com"
+    }
+
+    Returns:
+    {
+        "message": "If an account exists with this email, you will receive a password reset link."
+    }
+    """
+    from django.contrib.auth.tokens import default_token_generator
+    from django.core.mail import send_mail
+    from django.template.loader import render_to_string
+    from django.utils.http import urlsafe_base64_encode
+    from django.utils.encoding import force_bytes
+
+    email = request.data.get('email', '').strip().lower()
+
+    if not email:
+        return Response({
+            'error': 'Email is required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Check if email is in allowed list
+    if email not in settings.ALLOWED_EMAILS:
+        # Don't reveal if email exists or not for security
+        return Response({
+            'message': 'If an account exists with this email, you will receive a password reset link.'
+        })
+
+    User = get_user_model()
+
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        # Don't reveal if user exists or not for security
+        return Response({
+            'message': 'If an account exists with this email, you will receive a password reset link.'
+        })
+
+    # Generate password reset token
+    token = default_token_generator.make_token(user)
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+    # Build reset link
+    reset_url = f"{FRONTEND_URL}/reset-password?uid={uid}&token={token}"
+
+    # Send email
+    subject = 'Password Reset - Maple Key Music Academy'
+    message = f"""
+Hello {user.first_name or user.email},
+
+You requested to reset your password for your Maple Key Music Academy account.
+
+Click the link below to reset your password:
+{reset_url}
+
+This link will expire in 1 hour.
+
+If you did not request a password reset, please ignore this email.
+
+Best regards,
+Maple Key Music Academy Team
+    """
+
+    try:
+        send_mail(
+            subject,
+            message,
+            settings.EMAIL_HOST_USER or 'noreply@maplekeymusic.com',
+            [email],
+            fail_silently=False,
+        )
+        print(f"DEBUG: Password reset email sent to {email}")
+    except Exception as e:
+        print(f"ERROR: Failed to send password reset email: {str(e)}")
+        return Response({
+            'error': 'Failed to send password reset email. Please try again later.'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({
+        'message': 'If an account exists with this email, you will receive a password reset link.'
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def password_reset_validate_token(request):
+    """
+    Validate password reset token endpoint
+
+    Checks if a password reset token is valid before showing the reset form.
+
+    Expected request body:
+    {
+        "uid": "MQ",
+        "token": "abc123-def456"
+    }
+
+    Returns:
+    {
+        "valid": true,
+        "email": "user@example.com"
+    }
+    """
+    from django.contrib.auth.tokens import default_token_generator
+    from django.utils.http import urlsafe_base64_decode
+    from django.utils.encoding import force_str
+
+    uid = request.data.get('uid')
+    token = request.data.get('token')
+
+    if not uid or not token:
+        return Response({
+            'error': 'Missing uid or token'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Decode user ID
+        user_id = force_str(urlsafe_base64_decode(uid))
+        User = get_user_model()
+        user = User.objects.get(pk=user_id)
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        return Response({
+            'error': 'Invalid or expired reset link',
+            'valid': False
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Validate token
+    if not default_token_generator.check_token(user, token):
+        return Response({
+            'error': 'Invalid or expired reset link',
+            'valid': False
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        'valid': True,
+        'email': user.email
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def password_reset_confirm(request):
+    """
+    Confirm password reset endpoint
+
+    Resets the user's password using the token and new password.
+
+    Expected request body:
+    {
+        "uid": "MQ",
+        "token": "abc123-def456",
+        "password": "newpassword123",
+        "confirm_password": "newpassword123"
+    }
+
+    Returns:
+    {
+        "message": "Password reset successful. You can now login with your new password."
+    }
+    """
+    from django.contrib.auth.tokens import default_token_generator
+    from django.utils.http import urlsafe_base64_decode
+    from django.utils.encoding import force_str
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError
+
+    uid = request.data.get('uid')
+    token = request.data.get('token')
+    password = request.data.get('password')
+    confirm_password = request.data.get('confirm_password')
+
+    if not all([uid, token, password, confirm_password]):
+        return Response({
+            'error': 'All fields are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if password != confirm_password:
+        return Response({
+            'error': 'Passwords do not match'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Decode user ID
+        user_id = force_str(urlsafe_base64_decode(uid))
+        User = get_user_model()
+        user = User.objects.get(pk=user_id)
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        return Response({
+            'error': 'Invalid or expired reset link'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Validate token
+    if not default_token_generator.check_token(user, token):
+        return Response({
+            'error': 'Invalid or expired reset link'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Validate password strength
+    try:
+        validate_password(password, user)
+    except ValidationError as e:
+        return Response({
+            'error': 'Password validation failed',
+            'details': e.messages
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Set new password
+    user.set_password(password)
+    user.save()
+
+    print(f"DEBUG: Password reset successful for user {user.email}")
+
+    return Response({
+        'message': 'Password reset successful. You can now login with your new password.'
+    })

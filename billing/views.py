@@ -8,9 +8,12 @@ from django.utils import timezone
 from .models import Invoice, Lesson
 from .serializers import UserSerializer, LessonSerializer, InvoiceSerializer
 from custom_auth.decorators import (
-    role_required, teacher_required, management_required, 
+    role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 #run when url endpoints are hit
@@ -267,30 +270,69 @@ def submit_lessons_for_invoice(request):
             invoice_type='teacher_payment',
             teacher=request.user,
             status='pending',  # Ready for management approval
-            due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=30)),
+            due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=14)),  # 2 weeks
             created_by=request.user,
             payment_balance=0  # Will be calculated after lessons are added
         )
         
         # Add lessons to invoice
         invoice.lessons.set(created_lessons)
-        
-        # Recalculate payment balance
-        invoice.payment_balance = invoice.calculate_payment_balance()
+
+        # Recalculate payment balance and total amount
+        calculated_total = invoice.calculate_payment_balance()
+        invoice.payment_balance = calculated_total
+        invoice.total_amount = calculated_total
         invoice.save()
-        
+
+        # Create student invoices
+        # Group lessons by student
+        from collections import defaultdict
+        lessons_by_student = defaultdict(list)
+        for lesson in created_lessons:
+            lessons_by_student[lesson.student].append(lesson)
+
+        student_invoices_created = []
+        for student, student_lessons in lessons_by_student.items():
+            # Calculate total for this student
+            student_total = sum(lesson.total_cost() for lesson in student_lessons)
+
+            # Create student invoice
+            student_invoice = Invoice.objects.create(
+                invoice_type='student_billing',
+                student=student,
+                status='pending',  # Waiting for student payment
+                due_date=timezone.now() + timezone.timedelta(days=14),  # 14 days payment term
+                created_by=request.user,
+                payment_balance=student_total,
+                total_amount=student_total
+            )
+
+            # Add lessons to student invoice
+            student_invoice.lessons.set(student_lessons)
+            student_invoices_created.append(student_invoice)
+
+        # Generate PDF and send email
+        try:
+            from billing.services.invoice_service import InvoiceProcessor
+            success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
+            if success:
+                logger.info(f"PDF generated and email sent for invoice {invoice.id} with {len(student_invoices_created)} student invoices")
+            else:
+                logger.warning(f"Failed to generate PDF or send email for invoice {invoice.id}: {message}")
+        except Exception as e:
+            logger.error(f"Error generating PDF or sending email for invoice {invoice.id}: {str(e)}")
+
         # Return the created invoice with lesson details
         serializer = InvoiceSerializer(invoice)
         return Response({
             'message': 'Lessons submitted and invoice created successfully',
             'invoice': serializer.data,
-            'lessons_created': len(created_lessons)
+            'lessons_created': len(created_lessons),
+            'student_invoices_created': len(student_invoices_created)
         }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
         import traceback
-        import logging
-        logger = logging.getLogger(__name__)
         logger.error(f"Invoice submission failed: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return Response({
@@ -765,7 +807,7 @@ def management_all_invoices(request):
     status_filter = request.GET.get('status')
     teacher_id = request.GET.get('teacher_id')
 
-    invoices = Invoice.objects.all()
+    invoices = Invoice.objects.all().order_by('-created_at')  # Newest first
 
     if invoice_type:
         invoices = invoices.filter(invoice_type=invoice_type)
