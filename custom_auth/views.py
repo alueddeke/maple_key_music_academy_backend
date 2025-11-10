@@ -317,19 +317,185 @@ def oauth_success(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+def register_with_email(request):
+    """
+    Register new user with email/password and create registration request
+
+    This endpoint creates a registration request for management approval.
+    Similar to OAuth flow, but for email/password users.
+
+    Expected request body:
+    {
+        "email": "user@example.com",
+        "password": "userpassword",
+        "first_name": "John",
+        "last_name": "Doe",
+        "user_type": "teacher"  # or "student"
+    }
+
+    Returns:
+    {
+        "message": "Registration request submitted. Pending management approval.",
+        "email": "user@example.com"
+    }
+    """
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError
+    from billing.models import ApprovedEmail, UserRegistrationRequest
+
+    User = get_user_model()
+
+    # Get data from request
+    email = request.data.get('email', '').strip().lower()
+    password = request.data.get('password')
+    first_name = request.data.get('first_name', '').strip()
+    last_name = request.data.get('last_name', '').strip()
+    user_type = request.data.get('user_type', 'teacher')  # Default to teacher
+
+    # Validate required fields
+    if not email or not password or not first_name or not last_name:
+        return Response({
+            'error': 'Email, password, first name, and last name are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Validate user_type
+    valid_user_types = ['teacher', 'student']
+    if user_type not in valid_user_types:
+        return Response({
+            'error': f'Invalid user type. Must be one of: {", ".join(valid_user_types)}'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Note: We do NOT check ALLOWED_EMAILS here for registration requests
+    # Anyone should be able to submit a registration request
+    # ALLOWED_EMAILS is only enforced at LOGIN time
+
+    # Validate password strength
+    try:
+        validate_password(password)
+    except ValidationError as e:
+        return Response({
+            'error': 'Password validation failed',
+            'details': e.messages
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Check if user already exists
+    if User.objects.filter(email=email).exists():
+        return Response({
+            'error': 'An account with this email already exists'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Check if email is pre-approved
+    try:
+        approved_email = ApprovedEmail.objects.get(email=email)
+        # Email is pre-approved - create user directly with approved status
+        user = User.objects.create_user(
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name,
+            user_type=approved_email.user_type,
+            is_approved=True
+        )
+
+        # Generate JWT tokens for immediate login
+        refresh = RefreshToken.for_user(user)
+
+        return Response({
+            'message': 'Account created successfully',
+            'user': {
+                'email': user.email,
+                'name': user.get_full_name(),
+                'user_id': user.id,
+                'user_type': user.user_type,
+                'is_approved': user.is_approved
+            },
+            'access_token': str(refresh.access_token),
+            'refresh_token': str(refresh)
+        }, status=status.HTTP_201_CREATED)
+
+    except ApprovedEmail.DoesNotExist:
+        # Not pre-approved - check for existing registration request
+        try:
+            reg_request = UserRegistrationRequest.objects.get(email=email)
+
+            if reg_request.status == 'approved':
+                # Registration was approved - create user
+                user = User.objects.create_user(
+                    email=email,
+                    password=password,
+                    first_name=first_name,
+                    last_name=last_name,
+                    user_type=reg_request.user_type,
+                    is_approved=True
+                )
+
+                # Generate JWT tokens for immediate login
+                refresh = RefreshToken.for_user(user)
+
+                return Response({
+                    'message': 'Account created successfully',
+                    'user': {
+                        'email': user.email,
+                        'name': user.get_full_name(),
+                        'user_id': user.id,
+                        'user_type': user.user_type,
+                        'is_approved': user.is_approved
+                    },
+                    'access_token': str(refresh.access_token),
+                    'refresh_token': str(refresh)
+                }, status=status.HTTP_201_CREATED)
+
+            elif reg_request.status == 'rejected':
+                return Response({
+                    'error': 'Registration rejected',
+                    'message': 'Your registration request was rejected. Please contact support.'
+                }, status=status.HTTP_403_FORBIDDEN)
+            else:  # pending
+                return Response({
+                    'error': 'Approval pending',
+                    'message': 'Your registration is pending management approval. You will be able to login once approved.'
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        except UserRegistrationRequest.DoesNotExist:
+            # No registration request exists - create one with hashed password
+            # Store password temporarily so user can login after approval
+            temp_user = User(email=email)
+            temp_user.set_password(password)
+            hashed_password = temp_user.password
+
+            reg_request = UserRegistrationRequest.objects.create(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                user_type=user_type,
+                status='pending'
+            )
+            # Store hashed password in notes field temporarily (not ideal but works)
+            reg_request.notes = f"HASHED_PASSWORD:{hashed_password}"
+            reg_request.save()
+
+            return Response({
+                'message': 'Registration request submitted successfully',
+                'details': 'Your request is pending management approval. You will be able to login once approved.',
+                'email': email
+            }, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
 def get_jwt_token(request):
     """
     Get JWT token endpoint for username/password authentication
-    
+
     This endpoint allows users to authenticate with email and password
     and receive JWT tokens for API access.
-    
+
     Expected request body:
     {
         "email": "user@example.com",
         "password": "userpassword"
     }
-    
+
     Returns:
     {
         "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
@@ -344,42 +510,105 @@ def get_jwt_token(request):
     from django.contrib.auth import authenticate
     from rest_framework_simplejwt.tokens import RefreshToken
     from django.contrib.auth import get_user_model
-    
+    from billing.models import UserRegistrationRequest
+
     User = get_user_model()
-    
+
     # Get email and password from request
-    email = request.data.get('email')
+    email = request.data.get('email', '').strip().lower()
     password = request.data.get('password')
-    
+
     if not email or not password:
         return Response({
             'error': 'Email and password are required'
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    # Authenticate user using Django's built-in authentication
-    # This checks the email/password against the database
+    # Check if email is in allowed list
+    if email not in settings.ALLOWED_EMAILS:
+        return Response({
+            'error': 'Email not authorized',
+            'message': 'Your email is not in the authorized list. Please contact management.'
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    # Try to authenticate user
     user = authenticate(request, username=email, password=password)
 
     if user is None:
+        # User doesn't exist - check if there's an approved registration request
+        try:
+            reg_request = UserRegistrationRequest.objects.get(email=email)
+
+            if reg_request.status == 'approved':
+                # Registration was approved but user not created yet - create user now
+                # Extract hashed password from notes field
+                if reg_request.notes and reg_request.notes.startswith('HASHED_PASSWORD:'):
+                    # Extract just the hashed password (might have management notes appended)
+                    notes_lines = reg_request.notes.split('\n')
+                    password_line = notes_lines[0]  # First line has the password
+                    hashed_password = password_line.replace('HASHED_PASSWORD:', '', 1).strip()
+
+                    user = User.objects.create(
+                        email=email,
+                        first_name=reg_request.first_name,
+                        last_name=reg_request.last_name,
+                        user_type=reg_request.user_type,
+                        is_approved=True
+                    )
+                    user.password = hashed_password
+                    user.save()
+
+                    # Try to authenticate again
+                    user = authenticate(request, username=email, password=password)
+
+                    if user is None:
+                        return Response({
+                            'error': 'Invalid email or password',
+                            'message': 'Authentication failed after account creation. Please try registering again.'
+                        }, status=status.HTTP_401_UNAUTHORIZED)
+                else:
+                    return Response({
+                        'error': 'Account setup incomplete',
+                        'message': f'Your registration was approved but password data is missing. Please contact support. (Notes: {reg_request.notes[:50] if reg_request.notes else "None"})'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            elif reg_request.status == 'rejected':
+                return Response({
+                    'error': 'Registration rejected',
+                    'message': 'Your registration request was rejected. Please contact support.'
+                }, status=status.HTTP_403_FORBIDDEN)
+            else:  # pending
+                return Response({
+                    'error': 'Approval pending',
+                    'message': 'Your registration is pending management approval. You will be able to login once approved.'
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        except UserRegistrationRequest.DoesNotExist:
+            return Response({
+                'error': 'Invalid email or password'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+    # Check if user is approved
+    if not user.is_approved:
         return Response({
-            'error': 'Invalid email or password'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-    
+            'error': 'Account not approved',
+            'message': 'Your account is pending management approval. You will be able to login once approved.'
+        }, status=status.HTTP_403_FORBIDDEN)
+
     # Generate JWT tokens for the authenticated user
     refresh = RefreshToken.for_user(user)
-    
-    # Check if user has the correct user_type (should be teacher for this endpoint)
-    if not hasattr(user, 'user_type') or user.user_type not in ['teacher', 'management']:
+
+    # Check if user has the correct user_type (should be teacher or management)
+    if not hasattr(user, 'user_type') or user.user_type not in ['teacher', 'management', 'student']:
         return Response({
             'error': 'Invalid account type',
-            'message': 'This endpoint requires a teacher or management account'
+            'message': 'This endpoint requires a teacher, student, or management account'
         }, status=status.HTTP_403_FORBIDDEN)
-    
+
     # Get user name for response
     user_name = f"{user.first_name} {user.last_name}".strip()
     if not user_name:
         user_name = user.email
-    
+
     return Response({
         'access_token': str(refresh.access_token),
         'refresh_token': str(refresh),

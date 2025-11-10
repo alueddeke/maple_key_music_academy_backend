@@ -598,7 +598,17 @@ def approve_registration_request(request, pk):
         reg_request.status = 'approved'
         reg_request.reviewed_by = request.user
         reg_request.reviewed_at = timezone.now()
-        reg_request.notes = request.data.get('notes', '')
+
+        # Preserve hashed password if it exists, append management notes
+        management_notes = request.data.get('notes', '')
+        if reg_request.notes and reg_request.notes.startswith('HASHED_PASSWORD:'):
+            # Keep the hashed password and append management notes
+            if management_notes:
+                reg_request.notes = f"{reg_request.notes}\nMANAGEMENT_NOTES: {management_notes}"
+        else:
+            # No password stored, just set management notes
+            reg_request.notes = management_notes
+
         reg_request.save()
 
         return Response({
