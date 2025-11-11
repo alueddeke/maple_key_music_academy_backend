@@ -137,6 +137,13 @@ jobs:
               -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
               -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
+              -e EMAIL_BACKEND="${{ secrets.EMAIL_BACKEND }}" \
+              -e EMAIL_HOST="${{ secrets.EMAIL_HOST }}" \
+              -e EMAIL_PORT="${{ secrets.EMAIL_PORT }}" \
+              -e EMAIL_USE_TLS="${{ secrets.EMAIL_USE_TLS }}" \
+              -e EMAIL_HOST_USER="${{ secrets.EMAIL_HOST_USER }}" \
+              -e EMAIL_HOST_PASSWORD="${{ secrets.EMAIL_HOST_PASSWORD }}" \
+              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
             
