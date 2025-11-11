@@ -318,6 +318,20 @@ if not CORS_ALLOWED_ORIGINS:  # Only set if not already set by environment varia
         "http://127.0.0.1:8000",
     ]
 
+# Additional CORS settings for credentials and headers
+CORS_ALLOW_CREDENTIALS = True  # Allow cookies/auth headers
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
 # Django REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
