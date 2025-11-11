@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth import get_user_model
-from .models import Lesson, Invoice
+from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, InvitationToken
 
 #manages admin interface
 
@@ -40,7 +40,7 @@ class LessonAdmin(admin.ModelAdmin):
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = ('invoice_type', 'get_recipient', 'payment_balance', 'status', 'created_at')
     list_filter = ('invoice_type', 'status', 'created_at')
-    
+
     def get_recipient(self, obj):
         if obj.teacher:
             return obj.teacher.get_full_name()
@@ -48,3 +48,27 @@ class InvoiceAdmin(admin.ModelAdmin):
             return obj.student.get_full_name()
         return "Unknown"
     get_recipient.short_description = 'Recipient'
+
+@admin.register(ApprovedEmail)
+class ApprovedEmailAdmin(admin.ModelAdmin):
+    list_display = ('email', 'user_type', 'approved_by', 'approved_at')
+    list_filter = ('user_type', 'approved_at')
+    search_fields = ('email',)
+
+@admin.register(UserRegistrationRequest)
+class UserRegistrationRequestAdmin(admin.ModelAdmin):
+    list_display = ('email', 'first_name', 'last_name', 'user_type', 'status', 'requested_at')
+    list_filter = ('status', 'user_type', 'requested_at')
+    search_fields = ('email', 'first_name', 'last_name')
+
+@admin.register(InvitationToken)
+class InvitationTokenAdmin(admin.ModelAdmin):
+    list_display = ('email', 'user_type', 'is_used', 'is_token_valid', 'created_at', 'expires_at')
+    list_filter = ('is_used', 'user_type', 'created_at')
+    search_fields = ('email', 'token')
+    readonly_fields = ('token', 'created_at', 'used_at')
+
+    def is_token_valid(self, obj):
+        return obj.is_valid()
+    is_token_valid.boolean = True
+    is_token_valid.short_description = 'Valid'

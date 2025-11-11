@@ -84,34 +84,32 @@ class User(AbstractUser):
 
 
 class Lesson(models.Model):
-    ONLINE = 'online'
-    IN_PERSON = 'in_person'
-    LESSON_TYPE_CHOICES = [
-        (ONLINE, 'Online'),
-        (IN_PERSON, 'In_person')
-    ]
     LESSON_STATUS = [
         ('requested', 'Requested'),
-        ('confirmed', 'Confirmed'), 
+        ('confirmed', 'Confirmed'),
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
     ]
-    
+
+    LESSON_TYPES = [
+        ('in_person', 'In Person'),
+        ('online', 'Online'),
+    ]
+
     # Updated foreign keys to use User
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_teaching',
                                limit_choices_to={'user_type': 'teacher'})
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_taking',
                                limit_choices_to={'user_type': 'student'})
-    
-    lesson_type = models.CharField( max_length=20, choices=LESSON_TYPE_CHOICES, default=IN_PERSON,help_text='Type of lesson: online or in-person')
 
     # Lesson details
+    lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
-    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.00)  # Increased from 4 to 6 to allow values up to 9999.99
+    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)  # Increased from 4 to 6 to allow values up to 9999.99
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
-    
+
     # Notes
     teacher_notes = models.TextField(blank=True)
     student_notes = models.TextField(blank=True)
@@ -121,16 +119,16 @@ class Lesson(models.Model):
     
     def total_cost(self):
         from decimal import Decimal
-        return self.rate * self.duration
-
+        # Ensure both values are Decimal for proper calculation
+        rate = Decimal(str(self.rate)) if not isinstance(self.rate, Decimal) else self.rate
+        duration = Decimal(str(self.duration)) if not isinstance(self.duration, Decimal) else self.duration
+        return float(rate * duration)
+    
     def save(self, *args, **kwargs):
-      from decimal import Decimal
-      if self.rate == Decimal('80.00'):
-          if self.lesson_type == self.ONLINE:
-              self.rate = Decimal('45.00')  # Online rate
-          elif self.teacher and self.teacher.hourly_rate != Decimal('80.00'):
-              self.rate = self.teacher.hourly_rate  # Teacher's custom in-person rate
-      super().save(*args, **kwargs)
+        # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
+        if self.rate == 80.00 and self.teacher and self.teacher.hourly_rate != 80.00:
+            self.rate = self.teacher.hourly_rate
+        super().save(*args, **kwargs)
     
     def __str__(self):
         return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}"
@@ -143,23 +141,26 @@ class Invoice(models.Model):
     
     STATUS_CHOICES = [
         ('draft', 'Draft'),
-        ('pending', 'Pending'), 
+        ('pending', 'Pending'),
         ('approved', 'Approved'),
-        ('paid', 'Paid'), 
+        ('paid', 'Paid'),
+        ('rejected', 'Rejected'),
         ('overdue', 'Overdue')
     ]
     
     # Core fields
+    invoice_number = models.CharField(max_length=50, unique=True, blank=True, null=True)
     invoice_type = models.CharField(max_length=20, choices=INVOICE_TYPES)
     lessons = models.ManyToManyField(Lesson)
-    
+
     # User relationships (either teacher OR student, not both)
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True,
                                related_name='teacher_invoices', limit_choices_to={'user_type': 'teacher'})
     student = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True,
                                related_name='student_invoices', limit_choices_to={'user_type': 'student'})
-    
+
     # Invoice details
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     payment_balance = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     due_date = models.DateTimeField(null=True, blank=True)  # Made optional to allow migration
@@ -169,25 +170,74 @@ class Invoice(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, 
                                   related_name='invoices_created')
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='invoices_approved', 
+                                   related_name='invoices_approved',
                                    limit_choices_to={'user_type': 'management'})
     approved_at = models.DateTimeField(null=True, blank=True)
-    
+
+    # Rejection tracking
+    rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='invoices_rejected',
+                                   limit_choices_to={'user_type': 'management'})
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, help_text="Reason for rejection (visible to teacher)")
+
+    # Management editing tracking
+    notes = models.TextField(blank=True, help_text="Management notes about this invoice")
+    last_edited_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='invoices_edited',
+                                      limit_choices_to={'user_type': 'management'})
+    last_edited_at = models.DateTimeField(null=True, blank=True)
+
     def calculate_payment_balance(self):
         total = sum(lesson.total_cost() for lesson in self.lessons.all())
         return total
-    
+
+    def can_be_edited(self):
+        """Check if invoice can be edited by management"""
+        return self.status in ['draft', 'pending']
+
+    def generate_invoice_number(self):
+        """Generate unique invoice number: INV-YYYY-MM-NNNN"""
+        from datetime import datetime
+        today = datetime.now()
+        year = today.strftime('%Y')
+        month = today.strftime('%m')
+
+        # Get the count of invoices created this month
+        prefix = f"INV-{year}-{month}"
+        last_invoice = Invoice.objects.filter(
+            invoice_number__startswith=prefix
+        ).order_by('-invoice_number').first()
+
+        if last_invoice and last_invoice.invoice_number:
+            # Extract the sequence number and increment
+            try:
+                last_seq = int(last_invoice.invoice_number.split('-')[-1])
+                new_seq = last_seq + 1
+            except (ValueError, IndexError):
+                new_seq = 1
+        else:
+            new_seq = 1
+
+        return f"{prefix}-{new_seq:04d}"
+
     def save(self, *args, **kwargs):
+        # Generate invoice number if not set
+        if not self.invoice_number:
+            self.invoice_number = self.generate_invoice_number()
+
         # Ensure only one of teacher or student is set
         if self.invoice_type == 'teacher_payment' and self.student:
             self.student = None
         elif self.invoice_type == 'student_billing' and self.teacher:
             self.teacher = None
-            
-        # Calculate payment balance
+
+        # Calculate payment balance and total_amount
         if self.pk:  # Only if instance already exists (has lessons)
-            self.payment_balance = self.calculate_payment_balance()
-        
+            calculated_total = self.calculate_payment_balance()
+            self.payment_balance = calculated_total
+            self.total_amount = calculated_total
+
         super().save(*args, **kwargs)
     
     def __str__(self):
@@ -195,3 +245,83 @@ class Invoice(models.Model):
             return f"Payment to {self.teacher.get_full_name()} - {self.payment_balance}"
         else:
             return f"Bill for {self.student.get_full_name()} - {self.payment_balance}"
+
+
+class ApprovedEmail(models.Model):
+    """Pre-approved email addresses that can register without management review"""
+    email = models.EmailField(unique=True)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPES)
+    approved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='emails_approved')
+    approved_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True, help_text="Optional notes about this pre-approval")
+
+    class Meta:
+        ordering = ['-approved_at']
+
+    def __str__(self):
+        return f"{self.email} ({self.get_user_type_display()})"
+
+
+class UserRegistrationRequest(models.Model):
+    """User registration requests pending management approval"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+
+    # User info
+    email = models.EmailField(unique=True)
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPES)
+
+    # OAuth info (if applicable)
+    oauth_provider = models.CharField(max_length=50, blank=True)  # 'google', etc.
+    oauth_id = models.CharField(max_length=100, blank=True)
+
+    # Approval workflow
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    requested_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='registration_requests_reviewed',
+                                   limit_choices_to={'user_type': 'management'})
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, help_text="Management notes about this request")
+
+    class Meta:
+        ordering = ['-requested_at']
+
+    def __str__(self):
+        return f"{self.email} - {self.get_status_display()} ({self.get_user_type_display()})"
+
+
+class InvitationToken(models.Model):
+    """Secure tokens for inviting pre-approved users to set up their accounts"""
+    email = models.EmailField()
+    token = models.CharField(max_length=64, unique=True)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPES)
+    approved_email = models.ForeignKey(ApprovedEmail, on_delete=models.CASCADE, related_name='invitation_tokens')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def is_valid(self):
+        """Check if token is valid (not expired and not used)"""
+        from django.utils import timezone
+        return not self.is_used and timezone.now() < self.expires_at
+
+    def mark_as_used(self):
+        """Mark token as used"""
+        from django.utils import timezone
+        self.is_used = True
+        self.used_at = timezone.now()
+        self.save()
+
+    def __str__(self):
+        return f"Invitation for {self.email} - {'Used' if self.is_used else 'Valid' if self.is_valid() else 'Expired'}"
