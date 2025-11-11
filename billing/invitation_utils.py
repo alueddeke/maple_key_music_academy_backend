@@ -73,6 +73,11 @@ If you have any questions, please contact the academy management.
 
 Best regards,
 Maple Key Music Academy Team
+
+---
+Maple Key Music Academy
+This is a one-time invitation email. You will not receive further emails until you create your account.
+Contact: {frontend_url}/contact
 """
 
         # HTML version (optional)
@@ -113,6 +118,12 @@ Maple Key Music Academy Team
         If you have any questions, please contact the academy management.<br>
         Best regards,<br>
         Maple Key Music Academy Team
+    </p>
+
+    <p style="color: #999; font-size: 11px; margin-top: 20px;">
+        Maple Key Music Academy<br>
+        This is a one-time invitation email. You will not receive further emails until you create your account.<br>
+        <a href="{frontend_url}/contact" style="color: #999;">Contact Us</a>
     </p>
 </body>
 </html>
