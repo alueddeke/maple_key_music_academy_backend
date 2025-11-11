@@ -106,6 +106,7 @@ class DetailedInvoiceSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
     last_edited_by_name = serializers.CharField(source='last_edited_by.get_full_name', read_only=True)
     lessons = LessonSerializer(many=True, read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)

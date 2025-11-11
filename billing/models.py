@@ -141,9 +141,10 @@ class Invoice(models.Model):
     
     STATUS_CHOICES = [
         ('draft', 'Draft'),
-        ('pending', 'Pending'), 
+        ('pending', 'Pending'),
         ('approved', 'Approved'),
-        ('paid', 'Paid'), 
+        ('paid', 'Paid'),
+        ('rejected', 'Rejected'),
         ('overdue', 'Overdue')
     ]
     
@@ -172,6 +173,13 @@ class Invoice(models.Model):
                                    related_name='invoices_approved',
                                    limit_choices_to={'user_type': 'management'})
     approved_at = models.DateTimeField(null=True, blank=True)
+
+    # Rejection tracking
+    rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='invoices_rejected',
+                                   limit_choices_to={'user_type': 'management'})
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, help_text="Reason for rejection (visible to teacher)")
 
     # Management editing tracking
     notes = models.TextField(blank=True, help_text="Management notes about this invoice")

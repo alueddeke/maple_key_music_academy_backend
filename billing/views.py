@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from .models import Invoice, Lesson
-from .serializers import UserSerializer, LessonSerializer, InvoiceSerializer
+from .serializers import UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
@@ -167,11 +167,12 @@ def teacher_invoice_list(request):
     """Teacher payment invoices"""
     if request.method == 'GET':
         if request.user.user_type == 'management':
-            invoices = Invoice.objects.filter(invoice_type='teacher_payment')
+            invoices = Invoice.objects.filter(invoice_type='teacher_payment').order_by('-created_at')
         else:  # teacher
-            invoices = Invoice.objects.filter(invoice_type='teacher_payment', teacher=request.user)
-        
-        serializer = InvoiceSerializer(invoices, many=True)
+            invoices = Invoice.objects.filter(invoice_type='teacher_payment', teacher=request.user).order_by('-created_at')
+
+        # Use DetailedInvoiceSerializer to include lesson details
+        serializer = DetailedInvoiceSerializer(invoices, many=True)
         return Response(serializer.data)
     
     elif request.method == 'POST':
@@ -188,6 +189,63 @@ def teacher_invoice_list(request):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@teacher_required
+def teacher_invoice_stats(request):
+    """Get teacher's invoice statistics including rejected count"""
+    teacher = request.user
+
+    # Get counts by status
+    pending_count = Invoice.objects.filter(
+        invoice_type='teacher_payment',
+        teacher=teacher,
+        status='pending'
+    ).count()
+
+    rejected_count = Invoice.objects.filter(
+        invoice_type='teacher_payment',
+        teacher=teacher,
+        status='rejected'
+    ).count()
+
+    approved_count = Invoice.objects.filter(
+        invoice_type='teacher_payment',
+        teacher=teacher,
+        status='approved'
+    ).count()
+
+    paid_count = Invoice.objects.filter(
+        invoice_type='teacher_payment',
+        teacher=teacher,
+        status='paid'
+    ).count()
+
+    # Get most recent rejected invoices
+    recent_rejected = Invoice.objects.filter(
+        invoice_type='teacher_payment',
+        teacher=teacher,
+        status='rejected'
+    ).order_by('-rejected_at')[:5]
+
+    rejected_invoices = []
+    for invoice in recent_rejected:
+        rejected_invoices.append({
+            'id': invoice.id,
+            'invoice_number': invoice.invoice_number,
+            'total_amount': str(invoice.total_amount),
+            'rejected_at': invoice.rejected_at,
+            'rejected_by_name': invoice.rejected_by.get_full_name() if invoice.rejected_by else None,
+            'rejection_reason': invoice.rejection_reason,
+        })
+
+    return Response({
+        'pending_count': pending_count,
+        'rejected_count': rejected_count,
+        'approved_count': approved_count,
+        'paid_count': paid_count,
+        'recent_rejected': rejected_invoices,
+    })
 
 @api_view(['POST'])
 @teacher_required
@@ -917,6 +975,44 @@ def management_recalculate_invoice(request, pk):
             'message': 'Invoice recalculated',
             'old_balance': old_balance,
             'new_balance': invoice.payment_balance
+        })
+
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@management_required
+def management_reject_invoice(request, pk):
+    """Management can reject an invoice with a reason"""
+    try:
+        invoice = Invoice.objects.get(pk=pk)
+        rejection_reason = request.data.get('rejection_reason', '').strip()
+
+        if not rejection_reason:
+            return Response({
+                'error': 'Rejection reason is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if invoice.status not in ['pending', 'draft']:
+            return Response({
+                'error': 'Only pending or draft invoices can be rejected',
+                'current_status': invoice.status
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update invoice with rejection details
+        invoice.status = 'rejected'
+        invoice.rejected_by = request.user
+        invoice.rejected_at = timezone.now()
+        invoice.rejection_reason = rejection_reason
+        invoice.save()
+
+        logger.info(f"Invoice {invoice.invoice_number} rejected by {request.user.email}")
+
+        return Response({
+            'message': 'Invoice rejected successfully',
+            'rejection_reason': rejection_reason,
+            'rejected_at': invoice.rejected_at
         })
 
     except Invoice.DoesNotExist:
