@@ -677,15 +677,10 @@ def approve_registration_request(request, pk):
 
         # Generate invitation token and send email
         token = generate_invitation_token(approved_email)
-        success = send_invitation_email(
-            email=reg_request.email,
-            token=token.token,
-            user_type=reg_request.user_type,
-            first_name=reg_request.first_name
-        )
+        success, message = send_invitation_email(token)
 
         if not success:
-            print(f"WARNING: Failed to send invitation email to {reg_request.email}")
+            print(f"WARNING: Failed to send invitation email to {reg_request.email}: {message}")
 
         return Response({
             'message': 'Registration approved and invitation email sent',
@@ -751,7 +746,7 @@ def management_all_users(request):
 @api_view(['DELETE'])
 @management_required
 def management_delete_user(request, pk):
-    """Management can delete users (except themselves)"""
+    """Management can delete any user (except themselves)"""
     try:
         user = User.objects.get(pk=pk)
 
@@ -759,12 +754,6 @@ def management_delete_user(request, pk):
         if user.id == request.user.id:
             return Response({
                 'error': 'Cannot delete your own account'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        # Prevent deleting other management users (optional safety check)
-        if user.user_type == 'management':
-            return Response({
-                'error': 'Cannot delete management users'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         user_email = user.email

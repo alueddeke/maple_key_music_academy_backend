@@ -79,7 +79,7 @@ if not DEBUG:
 # Application definition
 
 INSTALLED_APPS = [
-    'billing',  # Move this to the top - must come before admin
+    'billing.apps.Test1Config',  # Use full app config path to trigger ready() method for signals
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
