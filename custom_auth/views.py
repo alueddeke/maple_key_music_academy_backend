@@ -523,13 +523,6 @@ def get_jwt_token(request):
             'error': 'Email and password are required'
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    # Check if email is in allowed list
-    if email not in settings.ALLOWED_EMAILS:
-        return Response({
-            'error': 'Email not authorized',
-            'message': 'Your email is not in the authorized list. Please contact management.'
-        }, status=status.HTTP_403_FORBIDDEN)
-
     # Try to authenticate user
     user = authenticate(request, username=email, password=password)
 
@@ -825,13 +818,6 @@ def password_reset_request(request):
         return Response({
             'error': 'Email is required'
         }, status=status.HTTP_400_BAD_REQUEST)
-
-    # Check if email is in allowed list
-    if email not in settings.ALLOWED_EMAILS:
-        # Don't reveal if email exists or not for security
-        return Response({
-            'message': 'If an account exists with this email, you will receive a password reset link.'
-        })
 
     User = get_user_model()
 
