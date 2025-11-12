@@ -67,10 +67,12 @@ class ResendEmailBackend(BaseEmailBackend):
                 params["text"] = message.body
 
             # If there are alternatives (like HTML version of plain text), use them
-            for alternative in message.alternatives:
-                content, mimetype = alternative
-                if mimetype == 'text/html':
-                    params["html"] = content
+            # Note: Only EmailMultiAlternatives has .alternatives, not EmailMessage
+            if hasattr(message, 'alternatives') and message.alternatives:
+                for alternative in message.alternatives:
+                    content, mimetype = alternative
+                    if mimetype == 'text/html':
+                        params["html"] = content
 
             # Send via Resend API
             response = resend.Emails.send(params)

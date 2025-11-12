@@ -848,7 +848,7 @@ def password_reset_request(request):
     uid = urlsafe_base64_encode(force_bytes(user.pk))
 
     # Build reset link
-    reset_url = f"{FRONTEND_URL}/reset-password?uid={uid}&token={token}"
+    reset_url = f"{settings.FRONTEND_URL}/reset-password?uid={uid}&token={token}"
 
     # Send email
     subject = 'Password Reset - Maple Key Music Academy'
@@ -872,7 +872,7 @@ Maple Key Music Academy Team
         send_mail(
             subject,
             message,
-            settings.EMAIL_HOST_USER or 'noreply@maplekeymusic.com',
+            settings.DEFAULT_FROM_EMAIL,
             [email],
             fail_silently=False,
         )
