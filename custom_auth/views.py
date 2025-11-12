@@ -319,15 +319,14 @@ def oauth_success(request):
 @permission_classes([AllowAny])
 def register_with_email(request):
     """
-    Register new user with email/password and create registration request
+    Register new user and create registration request for management approval
 
-    This endpoint creates a registration request for management approval.
-    Similar to OAuth flow, but for email/password users.
+    This endpoint creates a registration request. No password required -
+    users will set password via invitation email after approval.
 
     Expected request body:
     {
         "email": "user@example.com",
-        "password": "userpassword",
         "first_name": "John",
         "last_name": "Doe",
         "user_type": "teacher"  # or "student"
@@ -339,23 +338,20 @@ def register_with_email(request):
         "email": "user@example.com"
     }
     """
-    from django.contrib.auth.password_validation import validate_password
-    from django.core.exceptions import ValidationError
     from billing.models import ApprovedEmail, UserRegistrationRequest
 
     User = get_user_model()
 
     # Get data from request
     email = request.data.get('email', '').strip().lower()
-    password = request.data.get('password')
     first_name = request.data.get('first_name', '').strip()
     last_name = request.data.get('last_name', '').strip()
     user_type = request.data.get('user_type', 'teacher')  # Default to teacher
 
     # Validate required fields
-    if not email or not password or not first_name or not last_name:
+    if not email or not first_name or not last_name:
         return Response({
-            'error': 'Email, password, first name, and last name are required'
+            'error': 'Email, first name, and last name are required'
         }, status=status.HTTP_400_BAD_REQUEST)
 
     # Validate user_type
@@ -363,19 +359,6 @@ def register_with_email(request):
     if user_type not in valid_user_types:
         return Response({
             'error': f'Invalid user type. Must be one of: {", ".join(valid_user_types)}'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    # Note: We do NOT check ALLOWED_EMAILS here for registration requests
-    # Anyone should be able to submit a registration request
-    # ALLOWED_EMAILS is only enforced at LOGIN time
-
-    # Validate password strength
-    try:
-        validate_password(password)
-    except ValidationError as e:
-        return Response({
-            'error': 'Password validation failed',
-            'details': e.messages
         }, status=status.HTTP_400_BAD_REQUEST)
 
     # Check if user already exists
@@ -387,31 +370,11 @@ def register_with_email(request):
     # Check if email is pre-approved
     try:
         approved_email = ApprovedEmail.objects.get(email=email)
-        # Email is pre-approved - create user directly with approved status
-        user = User.objects.create_user(
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name,
-            user_type=approved_email.user_type,
-            is_approved=True
-        )
-
-        # Generate JWT tokens for immediate login
-        refresh = RefreshToken.for_user(user)
-
+        # Email is pre-approved - they already have an invitation
         return Response({
-            'message': 'Account created successfully',
-            'user': {
-                'email': user.email,
-                'name': user.get_full_name(),
-                'user_id': user.id,
-                'user_type': user.user_type,
-                'is_approved': user.is_approved
-            },
-            'access_token': str(refresh.access_token),
-            'refresh_token': str(refresh)
-        }, status=status.HTTP_201_CREATED)
+            'error': 'Email already pre-approved',
+            'message': 'This email is already pre-approved. Please check your email for the invitation link to set up your account.'
+        }, status=status.HTTP_400_BAD_REQUEST)
 
     except ApprovedEmail.DoesNotExist:
         # Not pre-approved - check for existing registration request
@@ -419,31 +382,10 @@ def register_with_email(request):
             reg_request = UserRegistrationRequest.objects.get(email=email)
 
             if reg_request.status == 'approved':
-                # Registration was approved - create user
-                user = User.objects.create_user(
-                    email=email,
-                    password=password,
-                    first_name=first_name,
-                    last_name=last_name,
-                    user_type=reg_request.user_type,
-                    is_approved=True
-                )
-
-                # Generate JWT tokens for immediate login
-                refresh = RefreshToken.for_user(user)
-
                 return Response({
-                    'message': 'Account created successfully',
-                    'user': {
-                        'email': user.email,
-                        'name': user.get_full_name(),
-                        'user_id': user.id,
-                        'user_type': user.user_type,
-                        'is_approved': user.is_approved
-                    },
-                    'access_token': str(refresh.access_token),
-                    'refresh_token': str(refresh)
-                }, status=status.HTTP_201_CREATED)
+                    'error': 'Registration already approved',
+                    'message': 'Your registration was approved. Please check your email for the invitation link to set up your account.'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
             elif reg_request.status == 'rejected':
                 return Response({
@@ -452,17 +394,12 @@ def register_with_email(request):
                 }, status=status.HTTP_403_FORBIDDEN)
             else:  # pending
                 return Response({
-                    'error': 'Approval pending',
-                    'message': 'Your registration is pending management approval. You will be able to login once approved.'
-                }, status=status.HTTP_403_FORBIDDEN)
+                    'error': 'Registration already submitted',
+                    'message': 'Your registration is pending management approval. Please wait for approval.'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         except UserRegistrationRequest.DoesNotExist:
-            # No registration request exists - create one with hashed password
-            # Store password temporarily so user can login after approval
-            temp_user = User(email=email)
-            temp_user.set_password(password)
-            hashed_password = temp_user.password
-
+            # No registration request exists - create one (no password needed)
             reg_request = UserRegistrationRequest.objects.create(
                 email=email,
                 first_name=first_name,
@@ -470,13 +407,10 @@ def register_with_email(request):
                 user_type=user_type,
                 status='pending'
             )
-            # Store hashed password in notes field temporarily (not ideal but works)
-            reg_request.notes = f"HASHED_PASSWORD:{hashed_password}"
-            reg_request.save()
 
             return Response({
                 'message': 'Registration request submitted successfully',
-                'details': 'Your request is pending management approval. You will be able to login once approved.',
+                'details': 'Your request is pending management approval. You will receive an invitation email once approved.',
                 'email': email
             }, status=status.HTTP_202_ACCEPTED)
 

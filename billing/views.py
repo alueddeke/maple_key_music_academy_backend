@@ -641,8 +641,9 @@ def registration_request_list(request):
 @api_view(['POST'])
 @management_required
 def approve_registration_request(request, pk):
-    """Management approves a registration request"""
-    from .models import UserRegistrationRequest
+    """Management approves a registration request and sends invitation email"""
+    from .models import UserRegistrationRequest, ApprovedEmail, InvitationToken
+    from .invitation_utils import generate_invitation_token, send_invitation_email
 
     try:
         reg_request = UserRegistrationRequest.objects.get(pk=pk)
@@ -657,20 +658,37 @@ def approve_registration_request(request, pk):
         reg_request.reviewed_by = request.user
         reg_request.reviewed_at = timezone.now()
 
-        # Preserve hashed password if it exists, append management notes
+        # Store management notes
         management_notes = request.data.get('notes', '')
-        if reg_request.notes and reg_request.notes.startswith('HASHED_PASSWORD:'):
-            # Keep the hashed password and append management notes
-            if management_notes:
-                reg_request.notes = f"{reg_request.notes}\nMANAGEMENT_NOTES: {management_notes}"
-        else:
-            # No password stored, just set management notes
+        if management_notes:
             reg_request.notes = management_notes
 
         reg_request.save()
 
+        # Create ApprovedEmail entry
+        approved_email, created = ApprovedEmail.objects.get_or_create(
+            email=reg_request.email,
+            defaults={
+                'user_type': reg_request.user_type,
+                'approved_by': request.user,
+                'notes': f'Approved from registration request'
+            }
+        )
+
+        # Generate invitation token and send email
+        token = generate_invitation_token(approved_email)
+        success = send_invitation_email(
+            email=reg_request.email,
+            token=token.token,
+            user_type=reg_request.user_type,
+            first_name=reg_request.first_name
+        )
+
+        if not success:
+            print(f"WARNING: Failed to send invitation email to {reg_request.email}")
+
         return Response({
-            'message': 'Registration request approved',
+            'message': 'Registration approved and invitation email sent',
             'email': reg_request.email,
             'user_type': reg_request.user_type
         })
