@@ -48,4 +48,8 @@ urlpatterns = [
     path('management/invoices/<int:pk>/recalculate/', views.management_recalculate_invoice, name='management_recalculate_invoice'),
     path('management/invoices/<int:pk>/reject/', views.management_reject_invoice, name='management_reject_invoice'),
     path('management/invoices/<int:pk>/regenerate-pdf/', views.management_regenerate_invoice_pdf, name='management_regenerate_invoice_pdf'),
+
+    # Management endpoints for system settings
+    path('management/settings/', views.get_system_settings, name='get_system_settings'),
+    path('management/settings/update/', views.update_system_settings, name='update_system_settings'),
 ]

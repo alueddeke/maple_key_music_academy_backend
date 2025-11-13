@@ -325,3 +325,32 @@ class InvitationToken(models.Model):
 
     def __str__(self):
         return f"Invitation for {self.email} - {'Used' if self.is_used else 'Valid' if self.is_valid() else 'Expired'}"
+
+
+class SystemSettings(models.Model):
+    """System-wide settings configurable from the management UI"""
+    # Singleton pattern - only one instance should exist
+    invoice_recipient_email = models.EmailField(
+        default='antonilueddeke@gmail.com',
+        help_text='Email address where invoice PDFs are sent'
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='settings_updates')
+
+    class Meta:
+        verbose_name = 'System Settings'
+        verbose_name_plural = 'System Settings'
+
+    def save(self, *args, **kwargs):
+        # Ensure only one instance exists (singleton pattern)
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_settings(cls):
+        """Get or create the singleton settings instance"""
+        settings, created = cls.objects.get_or_create(pk=1)
+        return settings
+
+    def __str__(self):
+        return 'System Settings'

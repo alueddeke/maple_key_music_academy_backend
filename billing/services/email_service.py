@@ -9,8 +9,14 @@ class InvoiceEmailService:
     def send_invoice_email(invoice, teacher_pdf_content, student_pdfs=None, recipient_email=None):
         """Send invoice email with teacher and student PDF attachments"""
         try:
-            # Use provided recipient or default to configurable test email
-            email_recipient = recipient_email or getattr(settings, 'TEST_EMAIL_RECIPIENT', 'antonilueddeke@gmail.com')
+            # Use provided recipient or get from database settings
+            if recipient_email:
+                email_recipient = recipient_email
+            else:
+                # Get from database SystemSettings
+                from billing.models import SystemSettings
+                system_settings = SystemSettings.get_settings()
+                email_recipient = system_settings.invoice_recipient_email
 
             # Count unique students
             student_count = len(student_pdfs) if student_pdfs else 0
