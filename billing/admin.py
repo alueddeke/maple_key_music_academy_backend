@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth import get_user_model
-from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, InvitationToken
+from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, InvitationToken, SystemSettings, InvoiceRecipientEmail
 
 #manages admin interface
 
@@ -72,3 +72,23 @@ class InvitationTokenAdmin(admin.ModelAdmin):
         return obj.is_valid()
     is_token_valid.boolean = True
     is_token_valid.short_description = 'Valid'
+
+@admin.register(SystemSettings)
+class SystemSettingsAdmin(admin.ModelAdmin):
+    list_display = ('invoice_recipient_email', 'updated_at', 'updated_by')
+    readonly_fields = ('updated_at',)
+
+    def has_add_permission(self, request):
+        # Only allow one SystemSettings instance (singleton)
+        return not SystemSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        # Don't allow deletion of the singleton
+        return False
+
+@admin.register(InvoiceRecipientEmail)
+class InvoiceRecipientEmailAdmin(admin.ModelAdmin):
+    list_display = ('email', 'created_at', 'created_by')
+    list_filter = ('created_at',)
+    search_fields = ('email',)
+    readonly_fields = ('created_at', 'created_by')
