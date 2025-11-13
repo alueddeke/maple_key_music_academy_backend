@@ -52,4 +52,9 @@ urlpatterns = [
     # Management endpoints for system settings
     path('management/settings/', views.get_system_settings, name='get_system_settings'),
     path('management/settings/update/', views.update_system_settings, name='update_system_settings'),
+
+    # Management endpoints for invoice recipient emails
+    path('management/invoice-recipients/', views.list_invoice_recipients, name='list_invoice_recipients'),
+    path('management/invoice-recipients/add/', views.add_invoice_recipient, name='add_invoice_recipient'),
+    path('management/invoice-recipients/<int:pk>/delete/', views.delete_invoice_recipient, name='delete_invoice_recipient'),
 ]

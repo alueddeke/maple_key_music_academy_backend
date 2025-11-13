@@ -9,14 +9,21 @@ class InvoiceEmailService:
     def send_invoice_email(invoice, teacher_pdf_content, student_pdfs=None, recipient_email=None):
         """Send invoice email with teacher and student PDF attachments"""
         try:
-            # Use provided recipient or get from database settings
+            # Use provided recipient or get from database
             if recipient_email:
-                email_recipient = recipient_email
+                # Single recipient provided - wrap in list
+                email_recipients = [recipient_email]
             else:
-                # Get from database SystemSettings
-                from billing.models import SystemSettings
-                system_settings = SystemSettings.get_settings()
-                email_recipient = system_settings.invoice_recipient_email
+                # Get all recipients from database
+                from billing.models import InvoiceRecipientEmail, SystemSettings
+                recipients = InvoiceRecipientEmail.objects.all()
+
+                if recipients.exists():
+                    email_recipients = list(recipients.values_list('email', flat=True))
+                else:
+                    # Fallback to SystemSettings if no recipients configured
+                    system_settings = SystemSettings.get_settings()
+                    email_recipients = [system_settings.invoice_recipient_email]
 
             # Count unique students
             student_count = len(student_pdfs) if student_pdfs else 0
@@ -64,7 +71,7 @@ Maple Key Music Academy
                 subject=subject,
                 body=body,
                 from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@maplekey.com'),
-                to=[email_recipient],
+                to=email_recipients,
             )
 
             # Attach teacher PDF
@@ -90,8 +97,9 @@ Maple Key Music Academy
             # Send email
             email.send()
 
-            logger.info(f"Successfully sent invoice {invoice.id} with {student_count} student invoices to {email_recipient}")
-            return True, f"Invoice sent successfully to {email_recipient}"
+            recipients_str = ', '.join(email_recipients)
+            logger.info(f"Successfully sent invoice {invoice.id} with {student_count} student invoices to {recipients_str}")
+            return True, f"Invoice sent successfully to {len(email_recipients)} recipient(s)"
 
         except Exception as e:
             logger.error(f"Failed to send invoice {invoice.id}: {str(e)}")

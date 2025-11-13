@@ -354,3 +354,24 @@ class SystemSettings(models.Model):
 
     def __str__(self):
         return 'System Settings'
+
+
+class InvoiceRecipientEmail(models.Model):
+    """Email addresses that receive invoice PDFs when teachers submit"""
+    email = models.EmailField(unique=True, help_text='Recipient email address for invoice PDFs')
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_recipient_emails'
+    )
+
+    class Meta:
+        verbose_name = 'Invoice Recipient Email'
+        verbose_name_plural = 'Invoice Recipient Emails'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return self.email

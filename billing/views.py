@@ -1085,3 +1085,57 @@ def update_system_settings(request):
         return Response(serializer.data)
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@management_required
+def list_invoice_recipients(request):
+    """List all invoice recipient emails (management only)"""
+    from .models import InvoiceRecipientEmail
+    from .serializers import InvoiceRecipientEmailSerializer
+
+    recipients = InvoiceRecipientEmail.objects.all()
+    serializer = InvoiceRecipientEmailSerializer(recipients, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@management_required
+def add_invoice_recipient(request):
+    """Add a new invoice recipient email (management only)"""
+    from .models import InvoiceRecipientEmail
+    from .serializers import InvoiceRecipientEmailSerializer
+
+    serializer = InvoiceRecipientEmailSerializer(data=request.data)
+
+    if serializer.is_valid():
+        # Check if email already exists
+        email = serializer.validated_data['email']
+        if InvoiceRecipientEmail.objects.filter(email=email).exists():
+            return Response(
+                {'error': 'This email is already in the recipient list'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Set created_by to current user
+        serializer.save(created_by=request.user)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['DELETE'])
+@management_required
+def delete_invoice_recipient(request, pk):
+    """Delete an invoice recipient email (management only)"""
+    from .models import InvoiceRecipientEmail
+
+    try:
+        recipient = InvoiceRecipientEmail.objects.get(pk=pk)
+        recipient.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    except InvoiceRecipientEmail.DoesNotExist:
+        return Response(
+            {'error': 'Recipient not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
