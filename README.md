@@ -2,6 +2,24 @@
 
 A Django REST API backend for a music school management system with role-based authentication, lesson scheduling, and invoicing.
 
+---
+
+## 🚀 New Developer? Start Here!
+
+**This is the backend repository.** For complete setup instructions including all three repositories (backend, frontend, docker), see:
+
+**📖 [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md)** - Complete guide from first-time setup to production deployment
+
+**Quick Links:**
+- [First-Time Setup](../DEVELOPER_WORKFLOW.md#first-time-setup) - Get up and running (includes Django admin setup)
+- [Working on a Feature](../DEVELOPER_WORKFLOW.md#working-on-a-new-feature) - Daily development workflow
+- [Database Migrations](../DEVELOPER_WORKFLOW.md#handling-database-migrations) - How to handle model changes
+- [Deployment Guide](../DEVELOPER_WORKFLOW.md#submitting-to-production) - Deploying to production
+
+**Important:** This backend runs inside Docker. Don't run `pip install` locally - use the Docker workflow!
+
+---
+
 ## 🏗️ System Architecture
 
 ### Core Components
@@ -22,15 +40,29 @@ maple_key_music_academy_backend/
 └── requirements.txt   # Python dependencies
 ```
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Docker - Recommended)
 
-### Prerequisites
+**Note:** We use Docker for development. See [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md) for complete setup.
 
-- Python 3.11+
-- Virtual environment
-- Google OAuth credentials (for OAuth login)
+```bash
+# Navigate to the docker repository
+cd ../maple_key_music_academy_docker
 
-### Installation
+# Start all services (backend + frontend + database)
+docker compose up
+
+# The backend will be running at http://localhost:8000
+# API endpoints at http://localhost:8000/api/
+# Django Admin at http://localhost:8000/admin/
+```
+
+**After first startup, you must configure Django admin:**
+- See [docs/DJANGO_ADMIN_SETUP.md](docs/DJANGO_ADMIN_SETUP.md) for required steps
+- This includes setting up Site ID=2 and Google OAuth configuration
+
+## Alternative: Local Development (Without Docker)
+
+Only use this if you cannot use Docker:
 
 ```bash
 # Clone repository
@@ -154,6 +186,16 @@ Access the admin interface at: `http://localhost:8000/admin/`
 
 ## 📖 Documentation
 
+**Essential Guides:**
+- [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md) - Complete developer workflow from setup to deployment
+- [DJANGO_ADMIN_SETUP.md](docs/DJANGO_ADMIN_SETUP.md) - Required Django admin configuration
+- [EMAIL_PASSWORD_REGISTRATION.md](docs/EMAIL_PASSWORD_REGISTRATION.md) - User registration flow
+
+**Project Documentation:**
+- [CLAUDE.md](../CLAUDE.md) - Complete project overview and architecture
+- [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md) - Development workflow and deployment guide
+
+**App-Specific:**
 - [Billing App README](billing/README.md) - User management, lessons, invoices
 - [Custom Auth App README](custom_auth/README.md) - Authentication and authorization
 
