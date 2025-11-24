@@ -1,17 +1,21 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail
+from .models import (
+    Lesson, Invoice, ApprovedEmail, UserRegistrationRequest,
+    SystemSettings, InvoiceRecipientEmail, Student, BillableContact
+)
 
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
-    
+
     class Meta:
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'user_type',
-            'phone_number', 'address', 'is_approved', 'bio', 
+            'phone_number', 'address', 'city', 'province_state',
+            'postal_code', 'country', 'is_approved', 'bio',
             'instruments', 'hourly_rate', 'assigned_teacher',
             'parent_email', 'parent_phone', 'password'
         ]
@@ -44,18 +48,118 @@ class InvoiceSerializer(serializers.ModelSerializer):
         model = Invoice
         fields = '__all__'
 
-# Legacy serializers for backward compatibility (deprecated)
+# Student Management Serializers
+
+class BillableContactSerializer(serializers.ModelSerializer):
+    """Serializer for billable contacts (parents/guardians)"""
+    contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+    full_address = serializers.CharField(source='get_full_address', read_only=True)
+
+    class Meta:
+        model = BillableContact
+        fields = [
+            'id', 'student', 'contact_type', 'contact_type_display',
+            'relationship_notes', 'first_name', 'last_name', 'full_name',
+            'email', 'phone', 'address_line1', 'address_line2',
+            'city', 'province_state', 'postal_code', 'country',
+            'full_address', 'payment_preferences', 'is_primary',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate(self, data):
+        """Ensure at least one billable contact is primary per student"""
+        student = data.get('student')
+        is_primary = data.get('is_primary', False)
+
+        # If this is the first contact for a student, it must be primary
+        if student and not self.instance:
+            existing_contacts = BillableContact.objects.filter(student=student)
+            if not existing_contacts.exists() and not is_primary:
+                raise serializers.ValidationError(
+                    "The first billable contact must be set as primary"
+                )
+
+        return data
+
+
+class NewStudentSerializer(serializers.ModelSerializer):
+    """Basic serializer for Student model (list view)"""
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+    age = serializers.IntegerField(read_only=True)
+    assigned_teacher_names = serializers.SerializerMethodField()
+    primary_contact = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Student
+        fields = [
+            'id', 'first_name', 'last_name', 'full_name',
+            'email', 'phone', 'date_of_birth', 'age', 'notes',
+            'is_active', 'assigned_teacher_names', 'primary_contact',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_assigned_teacher_names(self, obj):
+        return [teacher.get_full_name() for teacher in obj.assigned_teachers.all()]
+
+    def get_primary_contact(self, obj):
+        primary = obj.primary_billable_contact
+        if primary:
+            return {
+                'id': primary.id,
+                'name': primary.get_full_name(),
+                'email': primary.email,
+                'phone': primary.phone
+            }
+        return None
+
+
+class StudentDetailSerializer(serializers.ModelSerializer):
+    """Detailed serializer for Student model (detail view with nested data)"""
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+    age = serializers.IntegerField(read_only=True)
+    assigned_teachers = UserSerializer(many=True, read_only=True)
+    billable_contacts = BillableContactSerializer(many=True, read_only=True)
+    lesson_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Student
+        fields = [
+            'id', 'first_name', 'last_name', 'full_name',
+            'email', 'phone', 'date_of_birth', 'age', 'notes',
+            'is_active', 'assigned_teachers', 'billable_contacts',
+            'lesson_count', 'user_account', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_lesson_count(self, obj):
+        return obj.lessons.count()
+
+
+class TeacherStudentSerializer(serializers.ModelSerializer):
+    """Simplified serializer for teachers' assigned students (for invoice dropdown)"""
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+    primary_billable_contact = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Student
+        fields = ['id', 'full_name', 'primary_billable_contact']
+
+    def get_primary_billable_contact(self, obj):
+        primary = obj.primary_billable_contact
+        if primary:
+            return BillableContactSerializer(primary).data
+        return None
+
+
+# Legacy serializers for backward compatibility (deprecated - keep for now)
 class TeacherSerializer(serializers.ModelSerializer):
     """Legacy serializer - use UserSerializer instead"""
     class Meta:
         model = User
         fields = ['id', 'email', 'first_name', 'last_name', 'bio', 'instruments', 'hourly_rate', 'phone_number', 'address']
-
-class StudentSerializer(serializers.ModelSerializer):
-    """Legacy serializer - use UserSerializer instead"""
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'phone_number', 'address', 'assigned_teacher', 'parent_email', 'parent_phone']
 
 
 # Management serializers for new approval system

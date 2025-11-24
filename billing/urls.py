@@ -8,8 +8,19 @@ urlpatterns = [
     path('teachers/', views.teacher_list, name='teacher_list'),
     path('teachers/all/', views.all_teachers, name='all_teachers'),
     path('teachers/<int:teacher_id>/approve/', views.approve_teacher, name='approve_teacher'),
-    path('students/', views.student_list, name='student_list'),
-    
+    path('teachers/me/students/', views.teacher_assigned_students, name='teacher_assigned_students'),
+    path('students/', views.student_list, name='student_list'),  # Legacy - keep for compatibility
+
+    # Student management (new system)
+    path('management/students/', views.student_list_create, name='student_list_create'),
+    path('management/students/<int:pk>/', views.student_detail, name='student_detail_new'),
+    path('management/students/<int:student_id>/assign-teacher/', views.assign_teacher_to_student, name='assign_teacher_to_student'),
+    path('management/students/<int:student_id>/teachers/<int:teacher_id>/', views.unassign_teacher_from_student, name='unassign_teacher_from_student'),
+
+    # Billable contact management
+    path('management/students/<int:student_id>/billable-contacts/', views.billable_contact_list_create, name='billable_contact_list_create'),
+    path('management/billable-contacts/<int:pk>/', views.billable_contact_detail, name='billable_contact_detail'),
+
     # Lesson management  
     path('lessons/', views.lesson_list, name='lesson_list'),
     path('lessons/request/', views.request_lesson, name='request_lesson'),

@@ -280,3 +280,265 @@ class InvoicePDFGenerator:
             logger.error(f"Failed to generate PDF for invoice {self.invoice.id}: {str(e)}")
             self.buffer.close()
             return False, None
+
+
+class StudentInvoicePDFGenerator:
+    """PDF Generator for student billing invoices"""
+
+    def __init__(self, invoice):
+        self.invoice = invoice
+        self.buffer = io.BytesIO()
+
+    def generate_pdf(self):
+        """Generate Student Invoice PDF and return success status and PDF content"""
+        try:
+            # Wave invoice red color
+            wave_red = colors.HexColor('#E31E24')
+
+            # Create PDF document with smaller margins
+            doc = SimpleDocTemplate(
+                self.buffer,
+                pagesize=A4,
+                rightMargin=36,
+                leftMargin=36,
+                topMargin=36,
+                bottomMargin=36
+            )
+
+            # Build PDF content
+            story = []
+            styles = getSampleStyleSheet()
+
+            # Create custom styles
+            invoice_title_style = ParagraphStyle(
+                'InvoiceTitle',
+                parent=styles['Normal'],
+                fontSize=36,
+                fontName='Helvetica-Bold',
+                textColor=colors.black,
+                alignment=TA_RIGHT,
+                spaceAfter=15,
+                leading=36
+            )
+
+            school_brand_style = ParagraphStyle(
+                'SchoolBrand',
+                parent=styles['Normal'],
+                fontSize=14,
+                fontName='Helvetica-Bold',
+                textColor=colors.black,
+                alignment=TA_RIGHT,
+                spaceAfter=5,
+                leading=14
+            )
+
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName='Helvetica-Bold',
+                spaceAfter=6,
+                textColor=colors.grey
+            )
+
+            normal_style = ParagraphStyle(
+                'NormalWrapped',
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName='Helvetica',
+                wordWrap='CJK'
+            )
+
+            # Header section with STUDENT INVOICE title
+            header_table_data = [
+                ['', '', '', 'STUDENT INVOICE'],
+                ['', '', '', 'Maple Key Music Academy'],
+                ['', '', '', 'Canada']
+            ]
+
+            header_table = Table(header_table_data, colWidths=[3.5*inch, 1.5*inch, 1.5*inch, 1.6*inch])
+            header_table.setStyle(TableStyle([
+                ('FONTSIZE', (3, 0), (3, 0), 36),
+                ('FONTNAME', (3, 0), (3, 0), 'Helvetica-Bold'),
+                ('TEXTCOLOR', (3, 0), (3, 0), colors.black),
+                ('ALIGN', (3, 0), (3, 0), 'RIGHT'),
+                ('VALIGN', (3, 0), (3, 0), 'TOP'),
+                ('BOTTOMPADDING', (3, 0), (3, 0), 45),
+
+                ('FONTSIZE', (3, 1), (3, 1), 14),
+                ('FONTNAME', (3, 1), (3, 1), 'Helvetica-Bold'),
+                ('TEXTCOLOR', (3, 1), (3, 1), colors.black),
+                ('ALIGN', (3, 1), (3, 1), 'RIGHT'),
+                ('VALIGN', (3, 1), (3, 1), 'TOP'),
+                ('BOTTOMPADDING', (3, 1), (3, 1), 5),
+
+                ('FONTSIZE', (3, 2), (3, 2), 10),
+                ('TEXTCOLOR', (3, 2), (3, 2), colors.black),
+                ('ALIGN', (3, 2), (3, 2), 'RIGHT'),
+                ('VALIGN', (3, 2), (3, 2), 'TOP'),
+
+                ('TOPPADDING', (0, 0), (-1, -1), 0),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ]))
+
+            story.append(header_table)
+
+            # Add divider line
+            divider_table_data = [['']]
+            divider_table = Table(divider_table_data, colWidths=[8.1*inch])
+            divider_table.setStyle(TableStyle([
+                ('LINEBELOW', (0, 0), (0, 0), 1, colors.lightgrey),
+                ('TOPPADDING', (0, 0), (0, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (0, 0), 10),
+            ]))
+            story.append(divider_table)
+            story.append(Spacer(1, 20))
+
+            # Get billable contact information
+            billable_contact = self.invoice.billable_contact
+
+            # Create two-column layout for Bill To and Invoice Details
+            left_column = []
+            right_column = []
+
+            # Left column - BILL TO
+            left_column.append(Paragraph("BILL TO", heading_style))
+            if billable_contact:
+                left_column.append(Paragraph(f"<b>{billable_contact.get_full_name()}</b>", normal_style))
+                left_column.append(Paragraph(billable_contact.address_line1, normal_style))
+                if billable_contact.address_line2:
+                    left_column.append(Paragraph(billable_contact.address_line2, normal_style))
+                left_column.append(Paragraph(
+                    f"{billable_contact.city}, {billable_contact.province_state} {billable_contact.postal_code}",
+                    normal_style
+                ))
+                left_column.append(Paragraph(billable_contact.country, normal_style))
+                left_column.append(Paragraph(billable_contact.phone, normal_style))
+                left_column.append(Paragraph(billable_contact.email, normal_style))
+            else:
+                left_column.append(Paragraph("No billable contact information", normal_style))
+
+            # Right column - Invoice Details
+            right_align_style = ParagraphStyle('RightAlign', parent=normal_style, alignment=TA_RIGHT)
+            right_align_bold = ParagraphStyle('RightAlignBold', parent=normal_style, alignment=TA_RIGHT, fontName='Helvetica-Bold')
+
+            right_column.append(Paragraph(f"<b>Invoice Number:</b> {self.invoice.invoice_number}", right_align_style))
+            right_column.append(Paragraph(f"<b>Invoice Date:</b> {self.invoice.created_at.strftime('%B %d, %Y')}", right_align_style))
+            if self.invoice.due_date:
+                right_column.append(Paragraph(f"<b>Due Date:</b> {self.invoice.due_date.strftime('%B %d, %Y')}", right_align_style))
+            right_column.append(Paragraph(f"<b>Total Amount (CAD):</b> ${self.invoice.payment_balance:.2f}", right_align_bold))
+
+            # Combine columns into table
+            info_table_data = []
+            max_rows = max(len(left_column), len(right_column))
+            for i in range(max_rows):
+                left_cell = left_column[i] if i < len(left_column) else Paragraph("", normal_style)
+                right_cell = right_column[i] if i < len(right_column) else Paragraph("", normal_style)
+                info_table_data.append([left_cell, right_cell])
+
+            info_table = Table(info_table_data, colWidths=[4.0*inch, 4.1*inch])
+            info_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ]))
+
+            story.append(info_table)
+            story.append(Spacer(1, 25))
+
+            # Lessons breakdown table with Lesson Type column
+            if self.invoice.lessons.exists():
+                # Table headers
+                data = [['Teacher', 'Lesson Type', 'Date', 'Duration (hrs)', 'Total ($)']]
+
+                for lesson in self.invoice.lessons.all():
+                    # Format date
+                    lesson_date = lesson.scheduled_date.strftime('%Y-%m-%d') if lesson.scheduled_date else 'N/A'
+                    # Get lesson type display
+                    lesson_type_display = lesson.get_lesson_type_display()
+
+                    data.append([
+                        Paragraph(lesson.teacher.get_full_name(), normal_style),
+                        lesson_type_display,
+                        lesson_date,
+                        f"{lesson.duration:.1f}",
+                        f"${lesson.total_cost():.2f}"
+                    ])
+
+                # Create table
+                table = Table(data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch, 1.3*inch, 1.3*inch])
+                table.setStyle(TableStyle([
+                    # Header row
+                    ('BACKGROUND', (0, 0), (-1, 0), wave_red),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+                    ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('TOPPADDING', (0, 0), (-1, 0), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+
+                    # Data rows
+                    ('FONTSIZE', (0, 1), (-1, -1), 10),
+                    ('TOPPADDING', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+                    ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+
+                    # Row borders
+                    ('LINEBELOW', (0, 1), (-1, -1), 1, colors.grey),
+                    ('BOX', (0, 0), (-1, -1), 1, colors.lightgrey),
+                ]))
+
+                story.append(table)
+                story.append(Spacer(1, 15))
+
+                # Totals section
+                totals_table_data = [
+                    ['', '', '', 'TOTAL:', f"${self.invoice.payment_balance:.2f}"]
+                ]
+
+                totals_table = Table(totals_table_data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch, 1.3*inch, 1.3*inch])
+                totals_table.setStyle(TableStyle([
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('FONTNAME', (3, 0), (-1, -1), 'Helvetica-Bold'),
+                    ('ALIGN', (3, 0), (3, -1), 'RIGHT'),
+                    ('ALIGN', (4, 0), (4, -1), 'CENTER'),
+                    ('TOPPADDING', (0, 0), (-1, -1), 4),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ]))
+
+                story.append(totals_table)
+            else:
+                story.append(Paragraph("No lessons found for this invoice.", normal_style))
+
+            # Add footer
+            story.append(Spacer(1, 25))
+            notes_table_data = [
+                [Paragraph("Notes / Terms", heading_style), ''],
+                [Paragraph("Thank you for your business!", normal_style), '']
+            ]
+
+            notes_table = Table(notes_table_data, colWidths=[4.0*inch, 4.1*inch])
+            notes_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ]))
+
+            story.append(notes_table)
+
+            # Build PDF
+            doc.build(story)
+
+            # Get PDF content
+            pdf_content = self.buffer.getvalue()
+            self.buffer.close()
+
+            logger.info(f"Successfully generated student invoice PDF for invoice {self.invoice.id}")
+            return True, pdf_content
+
+        except Exception as e:
+            logger.error(f"Failed to generate student invoice PDF for invoice {self.invoice.id}: {str(e)}")
+            self.buffer.close()
+            return False, None

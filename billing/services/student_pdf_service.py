@@ -101,8 +101,15 @@ class StudentInvoicePDFGenerator:
             # Calculate total amount for this student
             student_total = sum(lesson.total_cost() for lesson in self.student_lessons)
 
-            # Get student info
+            # Get student and billable contact info
             student = self.student_lessons[0].student if self.student_lessons else None
+            # Note: invoice will have billable_contact set when created via submit_lessons_for_invoice
+            billable_contact = None
+            if hasattr(self, 'billable_contact'):
+                billable_contact = self.billable_contact
+            elif student:
+                # Fallback: use primary billable contact if not provided
+                billable_contact = student.primary_billable_contact
 
             # Header section with INVOICE title and school branding
             # Use table structure to match billing section alignment
@@ -156,19 +163,28 @@ class StudentInvoicePDFGenerator:
             left_column = []
             right_column = []
 
-            # Left column - Bill To
+            # Left column - Bill To (using Billable Contact information)
             left_column.append(Paragraph("BILL TO", heading_style))
-            if student:
+            if billable_contact:
+                # Use billable contact information
+                left_column.append(Paragraph(f"<b>{billable_contact.get_full_name()}</b>", normal_style))
+                left_column.append(Paragraph(billable_contact.address_line1, normal_style))
+                if billable_contact.address_line2:
+                    left_column.append(Paragraph(billable_contact.address_line2, normal_style))
+                left_column.append(Paragraph(
+                    f"{billable_contact.city}, {billable_contact.province_state} {billable_contact.postal_code}",
+                    normal_style
+                ))
+                left_column.append(Paragraph(billable_contact.country, normal_style))
+                left_column.append(Paragraph(billable_contact.phone, normal_style))
+                left_column.append(Paragraph(billable_contact.email, normal_style))
+            elif student:
+                # Fallback to student info if no billable contact (shouldn't happen in new system)
                 left_column.append(Paragraph(f"<b>{student.get_full_name()}</b>", normal_style))
-                left_column.append(Paragraph(f"{student.get_full_name()}", normal_style))
-                if student.address:
-                    # Split address by commas or newlines for better formatting
-                    address_lines = student.address.replace(',', '<br/>').replace('\n', '<br/>')
-                    left_column.append(Paragraph(address_lines, normal_style))
-                if student.phone_number:
-                    left_column.append(Paragraph(f"{student.phone_number}", normal_style))
                 if student.email:
                     left_column.append(Paragraph(f"{student.email}", normal_style))
+                if student.phone:
+                    left_column.append(Paragraph(f"{student.phone}", normal_style))
 
             # Right column - Invoice Details (right-aligned to match totals)
             right_align_style = ParagraphStyle('RightAlign', parent=normal_style, alignment=TA_RIGHT)

@@ -28,21 +28,30 @@ class InvoiceProcessor:
                 return False, "Failed to generate teacher PDF", None
 
             # Step 2: Generate student PDFs
-            # Group lessons by student
-            lessons_by_student = defaultdict(list)
-            for lesson in invoice.lessons.all():
-                lessons_by_student[lesson.student].append(lesson)
+            # Get the corresponding student_billing invoices to retrieve billable_contact info
+            from ..models import Invoice as InvoiceModel
+            student_billing_invoices = InvoiceModel.objects.filter(
+                invoice_type='student_billing',
+                lessons__in=invoice.lessons.all()
+            ).distinct()
 
             student_pdfs = []
-            for student, student_lessons in lessons_by_student.items():
-                student_pdf_generator = StudentInvoicePDFGenerator(invoice, student_lessons)
+            for student_invoice in student_billing_invoices:
+                student = student_invoice.student
+                billable_contact = student_invoice.billable_contact
+                student_lessons = list(student_invoice.lessons.all())
+
+                # Create generator and pass billable_contact
+                student_pdf_generator = StudentInvoicePDFGenerator(student_invoice, student_lessons)
+                student_pdf_generator.billable_contact = billable_contact  # Pass billable contact
                 student_pdf_success, student_pdf_content = student_pdf_generator.generate_pdf()
 
                 if student_pdf_success:
                     student_pdfs.append({
                         'student': student,
                         'pdf_content': student_pdf_content,
-                        'lessons': student_lessons
+                        'lessons': student_lessons,
+                        'billable_contact': billable_contact
                     })
                 else:
                     logger.warning(f"Failed to generate PDF for student {student.get_full_name()}")

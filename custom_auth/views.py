@@ -15,6 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 from urllib.parse import urlencode
 import requests
 import os
+import sys
 
 # Get URLs from environment
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
@@ -256,6 +257,14 @@ def google_oauth_callback(request):
         }
 
         redirect_url = f"{frontend_redirect_uri}?{urlencode(params)}"
+
+        # Debug: Print redirect URL
+        sys.stderr.write(f"=== Redirecting to frontend ===\n")
+        sys.stderr.write(f"Redirect URL: {redirect_url}\n")
+        sys.stderr.write(f"Access token length: {len(str(refresh.access_token))}\n")
+        sys.stderr.write(f"Refresh token length: {len(str(refresh))}\n")
+        sys.stderr.write(f"User data: {user_data_dict}\n")
+        sys.stderr.flush()
 
         # Redirect to frontend with tokens
         return HttpResponseRedirect(redirect_url)

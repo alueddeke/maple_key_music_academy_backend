@@ -40,7 +40,11 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15, blank=True)
     address = models.TextField(blank=True)
-    
+    city = models.CharField(max_length=100, blank=True)
+    province_state = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20, blank=True)
+    country = models.CharField(max_length=100, blank=True, default='Canada')
+
     # Remove the username field since we're using email
     username = None
     
@@ -83,6 +87,158 @@ class User(AbstractUser):
         return f"{self.get_full_name()} ({self.get_user_type_display()})"
 
 
+class Student(models.Model):
+    """
+    Student records managed by management.
+    Separate from User model to allow non-login student records,
+    but can be linked to User account for future login capability.
+    """
+    # Basic Information
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    email = models.EmailField(blank=True)
+    phone = models.CharField(max_length=15, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True, help_text="Internal notes about the student")
+
+    # Teacher Assignment
+    assigned_teachers = models.ManyToManyField(
+        User,
+        related_name='assigned_students',
+        limit_choices_to={'user_type': 'teacher'},
+        blank=True
+    )
+
+    # Status
+    is_active = models.BooleanField(default=True, help_text="Soft delete flag")
+
+    # Future User Account Linking
+    user_account = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='student_profile',
+        help_text="Link to User account if student needs login access"
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['last_name', 'first_name']
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
+    @property
+    def age(self):
+        """Calculate age from date of birth. Displayed on profile only, not on PDFs."""
+        if not self.date_of_birth:
+            return None
+        from datetime import date
+        today = date.today()
+        return today.year - self.date_of_birth.year - (
+            (today.month, today.day) < (self.date_of_birth.month, self.date_of_birth.day)
+        )
+
+    @property
+    def primary_billable_contact(self):
+        """Get the primary billable contact for this student"""
+        return self.billable_contacts.filter(is_primary=True).first()
+
+    def __str__(self):
+        return self.get_full_name()
+
+
+class BillableContact(models.Model):
+    """
+    Parent/guardian or billing contact information for students.
+    Stores who should receive invoices and billing information.
+    """
+    CONTACT_TYPE_CHOICES = [
+        ('parent', 'Parent'),
+        ('guardian', 'Guardian'),
+        ('self', 'Self'),
+        ('other', 'Other'),
+    ]
+
+    # Student Relationship
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name='billable_contacts'
+    )
+
+    # Contact Type
+    contact_type = models.CharField(max_length=20, choices=CONTACT_TYPE_CHOICES)
+    relationship_notes = models.TextField(
+        blank=True,
+        help_text="e.g., 'Mother', 'Legal Guardian', 'Aunt'"
+    )
+
+    # Contact Information
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    email = models.EmailField()
+    phone = models.CharField(max_length=15)
+
+    # Billing Address
+    address_line1 = models.CharField(max_length=255)
+    address_line2 = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100)
+    province_state = models.CharField(max_length=100)
+    postal_code = models.CharField(max_length=20)
+    country = models.CharField(max_length=100, default='Canada')
+
+    # Payment Information
+    payment_preferences = models.TextField(
+        blank=True,
+        help_text="Notes about payment method, split billing, etc."
+    )
+
+    # Primary Contact Flag
+    is_primary = models.BooleanField(
+        default=False,
+        help_text="Primary contact for billing. Each student must have exactly one."
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_primary', 'last_name', 'first_name']
+        verbose_name = 'Billable Contact'
+        verbose_name_plural = 'Billable Contacts'
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
+    def get_full_address(self):
+        """Format full address for display on invoices"""
+        lines = [self.address_line1]
+        if self.address_line2:
+            lines.append(self.address_line2)
+        lines.append(f"{self.city}, {self.province_state} {self.postal_code}")
+        lines.append(self.country)
+        return '\n'.join(lines)
+
+    def save(self, *args, **kwargs):
+        # If this is being set as primary, unset other primary contacts for this student
+        if self.is_primary:
+            BillableContact.objects.filter(
+                student=self.student,
+                is_primary=True
+            ).exclude(pk=self.pk).update(is_primary=False)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        primary_label = " (Primary)" if self.is_primary else ""
+        return f"{self.get_full_name()} - {self.student.get_full_name()}{primary_label}"
+
+
 class Lesson(models.Model):
     LESSON_STATUS = [
         ('requested', 'Requested'),
@@ -96,11 +252,10 @@ class Lesson(models.Model):
         ('online', 'Online'),
     ]
 
-    # Updated foreign keys to use User
+    # Foreign keys
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_teaching',
                                limit_choices_to={'user_type': 'teacher'})
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_taking',
-                               limit_choices_to={'user_type': 'student'})
+    student = models.ForeignKey('Student', on_delete=models.CASCADE, related_name='lessons')
 
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
@@ -125,9 +280,17 @@ class Lesson(models.Model):
         return float(rate * duration)
     
     def save(self, *args, **kwargs):
-        # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
-        if self.rate == 80.00 and self.teacher and self.teacher.hourly_rate != 80.00:
-            self.rate = self.teacher.hourly_rate
+        # Set rate based on lesson_type if not explicitly provided
+        # Only auto-set rate on creation (not on updates)
+        if not self.pk:  # New lesson being created
+            if self.lesson_type == 'online':
+                # Online lessons default to $45/hour
+                if self.rate == 80.00:  # If still at default, set to online rate
+                    self.rate = 45.00
+            else:  # in_person
+                # In-person lessons use teacher's hourly rate
+                if self.rate == 80.00 and self.teacher and self.teacher.hourly_rate != 80.00:
+                    self.rate = self.teacher.hourly_rate
         super().save(*args, **kwargs)
     
     def __str__(self):
@@ -156,8 +319,10 @@ class Invoice(models.Model):
     # User relationships (either teacher OR student, not both)
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True,
                                related_name='teacher_invoices', limit_choices_to={'user_type': 'teacher'})
-    student = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True,
-                               related_name='student_invoices', limit_choices_to={'user_type': 'student'})
+    student = models.ForeignKey('Student', on_delete=models.CASCADE, null=True, blank=True,
+                               related_name='invoices')
+    billable_contact = models.ForeignKey('BillableContact', on_delete=models.SET_NULL,
+                                        null=True, blank=True, related_name='invoices')
 
     # Invoice details
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)

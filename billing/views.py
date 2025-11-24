@@ -5,8 +5,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import Invoice, Lesson
-from .serializers import UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer
+from .models import Invoice, Lesson, Student, BillableContact
+from .serializers import (
+    UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    NewStudentSerializer, StudentDetailSerializer, BillableContactSerializer,
+    TeacherStudentSerializer
+)
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
@@ -252,17 +256,17 @@ def teacher_invoice_stats(request):
 def submit_lessons_for_invoice(request):
     """
     Teacher submits lesson details and creates invoice in one transaction.
-    
+
     Expected request body:
     {
-        "month": "January 2024",
         "lessons": [
             {
-                "student_name": "John Smith",
-                "student_email": "john@example.com",  # Optional, for student lookup
+                "student_id": 1,
+                "billable_contact_id": 1,
+                "lesson_type": "in_person" or "online",
                 "scheduled_date": "2024-01-15T14:00:00Z",
                 "duration": 1.0,
-                "rate": 80.00,  # Optional, defaults to teacher's hourly rate
+                "rate": 80.00,  # Optional, auto-set based on lesson_type
                 "teacher_notes": "Worked on scales and arpeggios"
             }
         ],
@@ -272,58 +276,76 @@ def submit_lessons_for_invoice(request):
     try:
         data = request.data.copy()
         lessons_data = data.get('lessons', [])
-        
+
         if not lessons_data:
             return Response({'error': 'No lessons provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # Validate all students and billable contacts exist and teacher is assigned
+        for lesson_data in lessons_data:
+            student_id = lesson_data.get('student_id')
+            billable_contact_id = lesson_data.get('billable_contact_id')
+
+            if not student_id:
+                return Response({'error': 'student_id is required for each lesson'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not billable_contact_id:
+                return Response({'error': 'billable_contact_id is required for each lesson'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Verify student exists and teacher is assigned
+            try:
+                student = Student.objects.get(pk=student_id, is_active=True)
+            except Student.DoesNotExist:
+                return Response({'error': f'Student with id {student_id} not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Check teacher is assigned to this student
+            if request.user not in student.assigned_teachers.all():
+                return Response({
+                    'error': f'You are not assigned to student {student.get_full_name()}'
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            # Verify billable contact exists and belongs to student
+            try:
+                billable_contact = BillableContact.objects.get(pk=billable_contact_id, student=student)
+            except BillableContact.DoesNotExist:
+                return Response({
+                    'error': f'Billable contact {billable_contact_id} not found for student {student.get_full_name()}'
+                }, status=status.HTTP_404_NOT_FOUND)
+
         # Create lessons and collect them for the invoice
         created_lessons = []
-        
+
         for lesson_data in lessons_data:
-            # Handle student lookup/creation
-            student_name = lesson_data.get('student_name')
-            student_email = lesson_data.get('student_email')
-            
-            if student_email:
-                # Find or create student by email using get_or_create for atomicity
-                student, created = User.objects.get_or_create(
-                    email=student_email,
-                    user_type='student',
-                    defaults={
-                        'first_name': student_name.split()[0] if student_name else '',
-                        'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        'is_approved': True  # Auto-approve students created by teachers
-                    }
-                )
-            else:
-                # Create student with just name (no email)
-                # Generate temp email and use get_or_create for atomicity
-                temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
-                student, created = User.objects.get_or_create(
-                    email=temp_email,
-                    user_type='student',
-                    defaults={
-                        'first_name': student_name.split()[0] if student_name else '',
-                        'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        'is_approved': True
-                    }
-                )
-            
+            student_id = lesson_data.get('student_id')
+            billable_contact_id = lesson_data.get('billable_contact_id')
+            lesson_type = lesson_data.get('lesson_type', 'in_person')
+
+            # Get student
+            student = Student.objects.get(pk=student_id)
+
+            # Determine rate based on lesson_type if not explicitly provided
+            rate = lesson_data.get('rate')
+            if not rate:
+                if lesson_type == 'online':
+                    rate = 45.00  # Online lessons default to $45
+                else:  # in_person
+                    rate = request.user.hourly_rate  # Use teacher's hourly rate
+
             # Create lesson
             lesson = Lesson.objects.create(
                 teacher=request.user,
                 student=student,
+                lesson_type=lesson_type,
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
                 duration=lesson_data.get('duration', 1.0),
-                rate=lesson_data.get('rate', request.user.hourly_rate),
+                rate=rate,
                 status='completed',  # Mark as completed since teacher is submitting for payment
                 completed_date=timezone.now(),
                 teacher_notes=lesson_data.get('teacher_notes', '')
             )
-            
+
             created_lessons.append(lesson)
-        
-        # Create invoice
+
+        # Create teacher payment invoice
         invoice = Invoice.objects.create(
             invoice_type='teacher_payment',
             teacher=request.user,
@@ -332,7 +354,7 @@ def submit_lessons_for_invoice(request):
             created_by=request.user,
             payment_balance=0  # Will be calculated after lessons are added
         )
-        
+
         # Add lessons to invoice
         invoice.lessons.set(created_lessons)
 
@@ -343,14 +365,16 @@ def submit_lessons_for_invoice(request):
         invoice.save()
 
         # Create student invoices
-        # Group lessons by student
+        # Group lessons by (student, billable_contact) tuple
         from collections import defaultdict
-        lessons_by_student = defaultdict(list)
-        for lesson in created_lessons:
-            lessons_by_student[lesson.student].append(lesson)
+        lessons_by_student_contact = defaultdict(list)
+        for i, lesson in enumerate(created_lessons):
+            billable_contact_id = lessons_data[i]['billable_contact_id']
+            billable_contact = BillableContact.objects.get(pk=billable_contact_id)
+            lessons_by_student_contact[(lesson.student, billable_contact)].append(lesson)
 
         student_invoices_created = []
-        for student, student_lessons in lessons_by_student.items():
+        for (student, billable_contact), student_lessons in lessons_by_student_contact.items():
             # Calculate total for this student
             student_total = sum(lesson.total_cost() for lesson in student_lessons)
 
@@ -358,6 +382,7 @@ def submit_lessons_for_invoice(request):
             student_invoice = Invoice.objects.create(
                 invoice_type='student_billing',
                 student=student,
+                billable_contact=billable_contact,
                 status='pending',  # Waiting for student payment
                 due_date=timezone.now() + timezone.timedelta(days=14),  # 14 days payment term
                 created_by=request.user,
@@ -369,7 +394,7 @@ def submit_lessons_for_invoice(request):
             student_invoice.lessons.set(student_lessons)
             student_invoices_created.append(student_invoice)
 
-        # Generate PDF and send email
+        # Generate PDF and send email (only for teacher payment invoice)
         try:
             from billing.services.invoice_service import InvoiceProcessor
             success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
@@ -388,7 +413,7 @@ def submit_lessons_for_invoice(request):
             'lessons_created': len(created_lessons),
             'student_invoices_created': len(student_invoices_created)
         }, status=status.HTTP_201_CREATED)
-        
+
     except Exception as e:
         import traceback
         logger.error(f"Invoice submission failed: {str(e)}")
@@ -1053,6 +1078,171 @@ def management_regenerate_invoice_pdf(request, pk):
 
     except Invoice.DoesNotExist:
         return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+# STUDENT MANAGEMENT ENDPOINTS
+
+@api_view(['GET', 'POST'])
+@management_required
+def student_list_create(request):
+    """Management can list all students and create new students"""
+    if request.method == 'GET':
+        students = Student.objects.filter(is_active=True)
+        serializer = NewStudentSerializer(students, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        serializer = NewStudentSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@management_required
+def student_detail(request, pk):
+    """Management can view, update, or soft-delete students"""
+    try:
+        student = Student.objects.get(pk=pk)
+    except Student.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = StudentDetailSerializer(student)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        serializer = StudentDetailSerializer(student, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        # Soft delete
+        student.is_active = False
+        student.save()
+        return Response({
+            'message': f'Student {student.get_full_name()} deactivated successfully'
+        }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@management_required
+def assign_teacher_to_student(request, student_id):
+    """Management can assign a teacher to a student"""
+    try:
+        student = Student.objects.get(pk=student_id)
+    except Student.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    teacher_id = request.data.get('teacher_id')
+    if not teacher_id:
+        return Response({'error': 'teacher_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        teacher = User.objects.get(pk=teacher_id, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Add teacher to student's assigned teachers
+    student.assigned_teachers.add(teacher)
+
+    return Response({
+        'message': f'Teacher {teacher.get_full_name()} assigned to {student.get_full_name()}'
+    })
+
+
+@api_view(['DELETE'])
+@management_required
+def unassign_teacher_from_student(request, student_id, teacher_id):
+    """Management can remove a teacher assignment from a student"""
+    try:
+        student = Student.objects.get(pk=student_id)
+    except Student.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        teacher = User.objects.get(pk=teacher_id, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Remove teacher from student's assigned teachers
+    student.assigned_teachers.remove(teacher)
+
+    return Response({
+        'message': f'Teacher {teacher.get_full_name()} unassigned from {student.get_full_name()}'
+    })
+
+
+# BILLABLE CONTACT ENDPOINTS
+
+@api_view(['GET', 'POST'])
+@management_required
+def billable_contact_list_create(request, student_id):
+    """Management can list and create billable contacts for a student"""
+    try:
+        student = Student.objects.get(pk=student_id)
+    except Student.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        contacts = student.billable_contacts.all()
+        serializer = BillableContactSerializer(contacts, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        data['student'] = student_id
+        serializer = BillableContactSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@management_required
+def billable_contact_detail(request, pk):
+    """Management can view, update, or delete a billable contact"""
+    try:
+        contact = BillableContact.objects.get(pk=pk)
+    except BillableContact.DoesNotExist:
+        return Response({'error': 'Billable contact not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = BillableContactSerializer(contact)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        serializer = BillableContactSerializer(contact, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        # Prevent deletion of primary contact if it's the only one
+        if contact.is_primary and contact.student.billable_contacts.count() == 1:
+            return Response({
+                'error': 'Cannot delete the only billable contact for a student'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        contact.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# TEACHER ENDPOINTS
+
+@api_view(['GET'])
+@teacher_required
+def teacher_assigned_students(request):
+    """Teachers can view their assigned students with primary billable contacts"""
+    teacher = request.user
+    students = teacher.assigned_students.filter(is_active=True)
+    serializer = TeacherStudentSerializer(students, many=True)
+    return Response(serializer.data)
 
 
 # SYSTEM SETTINGS ENDPOINTS
