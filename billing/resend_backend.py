@@ -74,6 +74,24 @@ class ResendEmailBackend(BaseEmailBackend):
                     if mimetype == 'text/html':
                         params["html"] = content
 
+            # Add attachments if present
+            if message.attachments:
+                import base64
+                attachments = []
+                for attachment in message.attachments:
+                    # attachment can be (filename, content, mimetype) or MIMEBase object
+                    if isinstance(attachment, tuple):
+                        filename, content, mimetype = attachment
+                        # Resend expects base64-encoded content
+                        if isinstance(content, str):
+                            content = content.encode()
+                        attachments.append({
+                            "filename": filename,
+                            "content": base64.b64encode(content).decode('utf-8'),
+                        })
+                if attachments:
+                    params["attachments"] = attachments
+
             # Send via Resend API
             response = resend.Emails.send(params)
 
