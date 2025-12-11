@@ -4,11 +4,11 @@ A Django REST API backend for a music school management system with role-based a
 
 ---
 
-## 🚀 New Developer? Start Here!
+## New Developer? Start Here
 
 **This is the backend repository.** For complete setup instructions including all three repositories (backend, frontend, docker), see:
 
-**📖 [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md)** - Complete guide from first-time setup to production deployment
+**[DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md)** - Complete guide from first-time setup to production deployment
 
 **Quick Links:**
 - [First-Time Setup](../DEVELOPER_WORKFLOW.md#first-time-setup) - Get up and running (includes Django admin setup)
@@ -16,11 +16,11 @@ A Django REST API backend for a music school management system with role-based a
 - [Database Migrations](../DEVELOPER_WORKFLOW.md#handling-database-migrations) - How to handle model changes
 - [Deployment Guide](../DEVELOPER_WORKFLOW.md#submitting-to-production) - Deploying to production
 
-**Important:** This backend runs inside Docker. Don't run `pip install` locally - use the Docker workflow!
+**Important:** This backend runs inside Docker. Do not run `pip install` locally - use the Docker workflow.
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ### Core Components
 
@@ -43,7 +43,7 @@ maple_key_music_academy_backend/
 
 ---
 
-## 🚀 Quick Start (Docker - Recommended)
+## Quick Start (Docker - Recommended)
 
 **Note:** We use Docker for development. See [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md) for complete setup.
 
@@ -95,7 +95,7 @@ python manage.py runserver
 
 ---
 
-## 📊 Core Models
+## Core Models
 
 ### User Model (Custom User in billing app)
 
@@ -245,7 +245,7 @@ class Invoice(models.Model):
 
 ---
 
-## 🔐 Authentication System
+## Authentication System
 
 ### JWT Token Authentication
 
@@ -353,7 +353,7 @@ def resource_endpoint(request):
 
 ---
 
-## 📚 API Endpoints
+## API Endpoints
 
 ### Authentication
 
@@ -479,7 +479,7 @@ GET    /api/billing/invoices/{id}/                  # Invoice detail (any type)
 
 ---
 
-## 💰 Invoicing Workflows
+## Invoicing Workflows
 
 ### Teacher Payment Flow
 
@@ -504,7 +504,7 @@ GET    /api/billing/invoices/{id}/                  # Invoice detail (any type)
 
 ---
 
-## 🧪 Django Admin Setup
+## Django Admin Setup
 
 After running migrations for the first time, you **must** configure Django admin:
 
@@ -562,7 +562,7 @@ Test OAuth flow:
 
 ---
 
-## 🔧 Environment Variables
+## Environment Variables
 
 ### Required Variables
 
@@ -620,7 +620,7 @@ VPC_PORT=22
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ### Run Architecture Tests
 
@@ -703,7 +703,7 @@ curl -X POST http://localhost:8000/api/billing/invoices/teacher/submit-lessons/ 
 
 ---
 
-## 👥 User Types & Roles
+## User Types and Roles
 
 ### Management
 
@@ -730,7 +730,7 @@ curl -X POST http://localhost:8000/api/billing/invoices/teacher/submit-lessons/ 
 
 ---
 
-## 🔒 Security Features
+## Security Features
 
 ### Token Security
 - Short-lived access tokens (1 hour)
@@ -758,7 +758,7 @@ curl -X POST http://localhost:8000/api/billing/invoices/teacher/submit-lessons/ 
 
 ---
 
-## 📖 Documentation
+## Documentation
 
 **Essential Guides:**
 - [DEVELOPER_WORKFLOW.md](../DEVELOPER_WORKFLOW.md) - Complete developer workflow from setup to deployment
@@ -766,7 +766,7 @@ curl -X POST http://localhost:8000/api/billing/invoices/teacher/submit-lessons/ 
 
 ---
 
-## 🚀 Future Enhancements
+## Future Enhancements
 
 - [ ] Payment processing integration (Stripe, Square)
 - [ ] Email notifications (lesson confirmations, invoice reminders)
@@ -779,6 +779,6 @@ curl -X POST http://localhost:8000/api/billing/invoices/teacher/submit-lessons/ 
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License.
