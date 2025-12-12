@@ -44,19 +44,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
         model = Invoice
         fields = '__all__'
 
-# Legacy serializers for backward compatibility (deprecated)
-class TeacherSerializer(serializers.ModelSerializer):
-    """Legacy serializer - use UserSerializer instead"""
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'bio', 'instruments', 'hourly_rate', 'phone_number', 'address']
-
-class StudentSerializer(serializers.ModelSerializer):
-    """Legacy serializer - use UserSerializer instead"""
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'phone_number', 'address', 'assigned_teacher', 'parent_email', 'parent_phone']
-
 
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):
