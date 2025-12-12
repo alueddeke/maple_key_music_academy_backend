@@ -122,7 +122,8 @@ class Lesson(models.Model):
         # Ensure both values are Decimal for proper calculation
         rate = Decimal(str(self.rate)) if not isinstance(self.rate, Decimal) else self.rate
         duration = Decimal(str(self.duration)) if not isinstance(self.duration, Decimal) else self.duration
-        return float(rate * duration)
+        # CRITICAL: Return Decimal for money precision, not float
+        return rate * duration
     
     def save(self, *args, **kwargs):
         # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
