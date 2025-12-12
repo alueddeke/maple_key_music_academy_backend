@@ -331,7 +331,6 @@ class SystemSettings(models.Model):
     """System-wide settings configurable from the management UI"""
     # Singleton pattern - only one instance should exist
     invoice_recipient_email = models.EmailField(
-        default='antonilueddeke@gmail.com',
         help_text='Email address where invoice PDFs are sent'
     )
     updated_at = models.DateTimeField(auto_now=True)

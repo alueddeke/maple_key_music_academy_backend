@@ -1,7 +1,7 @@
 from django.apps import AppConfig
 
-#loads configuration for the billing app when project is run
-class Test1Config(AppConfig):
+# Loads configuration for the billing app when project is run
+class BillingConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "billing"
 

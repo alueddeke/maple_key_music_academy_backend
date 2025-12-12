@@ -1,8 +1,3 @@
-from django.shortcuts import redirect, render
-from allauth.socialaccount.providers.google.views import oauth2_login, GoogleOAuth2Adapter
-from allauth.socialaccount.providers.oauth2.client import OAuth2Client
-from allauth.socialaccount.providers.oauth2.views import OAuth2LoginView
-from allauth.socialaccount.models import SocialLogin
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.conf import settings
@@ -15,6 +10,9 @@ from django.views.decorators.csrf import csrf_exempt
 from urllib.parse import urlencode
 import requests
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Get URLs from environment
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
@@ -49,9 +47,9 @@ def google_oauth(request):
     # Construct backend callback URL from request to match environment
     backend_callback_url = request.build_absolute_uri('/api/auth/google/callback/')
 
-    print(f"DEBUG: Backend callback URL: {backend_callback_url}")
-    print(f"DEBUG: Request host: {request.get_host()}")
-    print(f"DEBUG: Request scheme: {request.scheme}")
+    logger.debug(f"Backend callback URL: {backend_callback_url}")
+    logger.debug(f"Request host: {request.get_host()}")
+    logger.debug(f"Request scheme: {request.scheme}")
 
     google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {

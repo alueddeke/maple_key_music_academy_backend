@@ -79,7 +79,7 @@ if not DEBUG:
 # Application definition
 
 INSTALLED_APPS = [
-    'billing.apps.Test1Config',  # Use full app config path to trigger ready() method for signals
+    'billing.apps.BillingConfig',  # Use full app config path to trigger ready() method for signals
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -264,15 +264,6 @@ ACCOUNT_UNIQUE_EMAIL = True                          # Email addresses must be u
 ACCOUNT_EMAIL_VERIFICATION = 'none'                  # Email verification setting ('none', 'optional', 'mandatory')
 ACCOUNT_LOGIN_METHODS = {'email'}                    # Use email for authentication instead of username
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']  # Required fields for signup
-
-# Email Configuration
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
-EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@maplekeymusic.com')
 
 # Social account settings (for allauth.socialaccount)
 SOCIALACCOUNT_PROVIDERS = {
