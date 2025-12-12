@@ -19,3 +19,9 @@ sqlparse==0.5.3
 urllib3==2.5.0
 gunicorn
 resend
+
+# Testing dependencies
+pytest==8.3.4
+pytest-django==4.9.0
+pytest-cov==6.0.0
+factory-boy==3.3.1
