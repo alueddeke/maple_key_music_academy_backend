@@ -4,11 +4,11 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT, TA_LEFT
 from django.conf import settings
 import logging
 from datetime import datetime, timedelta
+from .pdf_styles import get_invoice_styles
 
 logger = logging.getLogger(__name__)
 
@@ -36,64 +36,15 @@ class StudentInvoicePDFGenerator:
 
             # Build PDF content
             story = []
-            styles = getSampleStyleSheet()
 
-            # Create custom styles - Using Helvetica-Bold (ReportLab standard)
-            invoice_title_style = ParagraphStyle(
-                'InvoiceTitle',
-                parent=styles['Normal'],
-                fontSize=36,
-                fontName='Helvetica-Bold',
-                textColor=colors.black,
-                alignment=TA_RIGHT,
-                spaceAfter=15,  # Add bottom margin
-                leading=36  # Set line height to match font size
-            )
-
-            school_brand_style = ParagraphStyle(
-                'SchoolBrand',
-                parent=styles['Normal'],
-                fontSize=14,
-                fontName='Helvetica-Bold',
-                textColor=colors.black,  # Changed from red to black
-                alignment=TA_RIGHT,
-                spaceAfter=5,  # Add small bottom margin
-                leading=14  # Set line height to match font size
-            )
-
-            country_style = ParagraphStyle(
-                'Country',
-                parent=styles['Normal'],
-                fontSize=10,
-                fontName='Helvetica',
-                alignment=TA_RIGHT,
-                spaceAfter=20,
-                leading=10  # Set line height to match font size
-            )
-
-            heading_style = ParagraphStyle(
-                'CustomHeading',
-                parent=styles['Normal'],
-                fontSize=10,
-                fontName='Helvetica-Bold',
-                spaceAfter=6,
-                textColor=colors.grey
-            )
-
-            bold_style = ParagraphStyle(
-                'BoldStyle',
-                parent=styles['Normal'],
-                fontSize=10,
-                fontName='Helvetica-Bold'
-            )
-
-            normal_style = ParagraphStyle(
-                'NormalWrapped',
-                parent=styles['Normal'],
-                fontSize=10,
-                fontName='Helvetica',
-                wordWrap='CJK'
-            )
+            # Get shared invoice styles
+            pdf_styles = get_invoice_styles()
+            invoice_title_style = pdf_styles['invoice_title_style']
+            school_brand_style = pdf_styles['school_brand_style']
+            country_style = pdf_styles['country_style']
+            heading_style = pdf_styles['heading_style']
+            bold_style = pdf_styles['bold_style']
+            normal_style = pdf_styles['normal_style']
 
             # Calculate due date (14 days from generation)
             due_date = datetime.now() + timedelta(days=14)
