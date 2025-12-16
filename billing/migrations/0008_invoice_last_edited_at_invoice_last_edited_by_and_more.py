@@ -7,7 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("billing", "0007_add_invoice_due_date"),
+        ("billing", "0006_increase_duration_field_size"),
     ]
 
     operations = [
