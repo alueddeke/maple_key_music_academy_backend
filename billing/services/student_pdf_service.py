@@ -165,7 +165,7 @@ class StudentInvoicePDFGenerator:
                 data.append([
                     Paragraph(items_text, normal_style),
                     lesson_date,
-                    f"{lesson.duration:.1f}",
+                    f"{lesson.duration:.2f}",
                     f"${lesson.total_cost():.2f}"
                 ])
 
