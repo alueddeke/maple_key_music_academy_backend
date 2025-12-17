@@ -309,13 +309,32 @@ def submit_lessons_for_invoice(request):
                     }
                 )
             
-            # Create lesson
+            # Create lesson with dual-rate system
+            lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
+
+            # Determine rates based on lesson type
+            from billing.models import GlobalRateSettings
+            from decimal import Decimal
+
+            global_rates = GlobalRateSettings.get_settings()
+
+            if lesson_type == 'online':
+                # Online lessons use global rates
+                teacher_rate = global_rates.online_teacher_rate
+                student_rate = global_rates.online_student_rate
+            else:
+                # In-person lessons: teacher gets their hourly_rate, student pays global in-person rate
+                teacher_rate = request.user.hourly_rate
+                student_rate = global_rates.inperson_student_rate
+
             lesson = Lesson.objects.create(
                 teacher=request.user,
                 student=student,
+                lesson_type=lesson_type,
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
                 duration=lesson_data.get('duration', 1.0),
-                rate=lesson_data.get('rate', request.user.hourly_rate),
+                teacher_rate=teacher_rate,
+                student_rate=student_rate,
                 status='completed',  # Mark as completed since teacher is submitting for payment
                 completed_date=timezone.now(),
                 teacher_notes=lesson_data.get('teacher_notes', '')
