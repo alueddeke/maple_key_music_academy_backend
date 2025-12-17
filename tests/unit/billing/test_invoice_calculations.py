@@ -19,13 +19,16 @@ class TestLessonCostCalculation:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("80.00"),
+            teacher_rate=Decimal("50.00"),
+            student_rate=Decimal("100.00"),
             duration=Decimal("1.0"),
             scheduled_date=datetime.now(),
-            status="completed"
+            status="completed",
+            lesson_type="in_person"
         )
 
-        assert lesson.total_cost() == Decimal("80.00")
+        # total_cost() still uses 'rate' which syncs with teacher_rate
+        assert lesson.total_cost() == Decimal("50.00")
 
     def test_lesson_total_cost_partial_hours(self, teacher_user, student_user):
         """Test cost calculation for partial hour lessons (e.g., 1.5 hours)."""
