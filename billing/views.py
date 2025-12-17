@@ -370,8 +370,8 @@ def submit_lessons_for_invoice(request):
 
         student_invoices_created = []
         for student, student_lessons in lessons_by_student.items():
-            # Calculate total for this student
-            student_total = sum(lesson.total_cost() for lesson in student_lessons)
+            # Calculate total for this student using student_rate (not teacher_rate)
+            student_total = sum(lesson.student_cost() for lesson in student_lessons)
 
             # Create student invoice
             student_invoice = Invoice.objects.create(

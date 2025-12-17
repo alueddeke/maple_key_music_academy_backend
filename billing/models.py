@@ -120,9 +120,19 @@ class Lesson(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     def total_cost(self):
+        """Calculate total cost using teacher_rate (for teacher invoices)"""
         from decimal import Decimal
-        # Ensure both values are Decimal for proper calculation
-        rate = Decimal(str(self.rate)) if not isinstance(self.rate, Decimal) else self.rate
+        # Use teacher_rate for dual-rate system
+        rate = Decimal(str(self.teacher_rate)) if not isinstance(self.teacher_rate, Decimal) else self.teacher_rate
+        duration = Decimal(str(self.duration)) if not isinstance(self.duration, Decimal) else self.duration
+        # CRITICAL: Return Decimal for money precision, not float
+        return rate * duration
+
+    def student_cost(self):
+        """Calculate total cost using student_rate (for student invoices)"""
+        from decimal import Decimal
+        # Use student_rate for dual-rate system
+        rate = Decimal(str(self.student_rate)) if not isinstance(self.student_rate, Decimal) else self.student_rate
         duration = Decimal(str(self.duration)) if not isinstance(self.duration, Decimal) else self.duration
         # CRITICAL: Return Decimal for money precision, not float
         return rate * duration
