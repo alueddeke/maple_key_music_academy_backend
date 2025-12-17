@@ -1,7 +1,12 @@
 """
-Unit tests for invoice and lesson cost calculations.
+Unit tests for invoice and lesson cost calculations with dual-rate system.
 
 CRITICAL: These tests protect money calculations - invoice totals must be exact.
+
+Dual-Rate System:
+- teacher_rate: Amount paid to teacher for lesson
+- student_rate: Amount billed to student for lesson
+- Invoice.calculate_payment_balance() uses teacher_rate for teacher_payment, student_rate for student_billing
 """
 
 import pytest
@@ -35,10 +40,12 @@ class TestLessonCostCalculation:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("80.00"),
+            teacher_rate=Decimal("80.00"),
+            student_rate=Decimal("100.00"),
             duration=Decimal("1.5"),
             scheduled_date=datetime.now(),
-            status="completed"
+            status="completed",
+            lesson_type="in_person"
         )
 
         # CRITICAL: 1.5 hours at $80/hr should be $120, not $80
@@ -49,10 +56,12 @@ class TestLessonCostCalculation:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("80.00"),
+            teacher_rate=Decimal("80.00"),
+            student_rate=Decimal("100.00"),
             duration=Decimal("0.25"),  # 15 minutes
             scheduled_date=datetime.now(),
-            status="completed"
+            status="completed",
+            lesson_type="in_person"
         )
 
         assert lesson.total_cost() == Decimal("20.00")
@@ -62,10 +71,12 @@ class TestLessonCostCalculation:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("100.00"),  # Higher rate
+            teacher_rate=Decimal("100.00"),  # Higher rate
+            student_rate=Decimal("120.00"),
             duration=Decimal("2.0"),
             scheduled_date=datetime.now(),
-            status="completed"
+            status="completed",
+            lesson_type="in_person"
         )
 
         assert lesson.total_cost() == Decimal("200.00")
@@ -75,10 +86,12 @@ class TestLessonCostCalculation:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("45.00"),  # Online lesson rate
+            teacher_rate=Decimal("45.00"),  # Online lesson rate
+            student_rate=Decimal("60.00"),
             duration=Decimal("1.5"),
             scheduled_date=datetime.now(),
-            status="completed"
+            status="completed",
+            lesson_type="online"
         )
 
         # Should be exactly 67.50, not 67.49999999
@@ -88,10 +101,10 @@ class TestLessonCostCalculation:
 
 @pytest.mark.django_db
 class TestInvoicePaymentBalance:
-    """Test invoice payment_balance = sum of all lesson costs."""
+    """Test invoice payment_balance = sum of lesson costs using correct rate by type."""
 
-    def test_invoice_payment_balance_single_lesson(self, teacher_user, student_user):
-        """Test invoice total with one lesson."""
+    def test_teacher_invoice_uses_teacher_rate(self, teacher_user, student_user):
+        """Test that teacher payment invoices use teacher_rate."""
         invoice = Invoice.objects.create(
             invoice_type="teacher_payment",
             teacher=teacher_user,
@@ -103,18 +116,46 @@ class TestInvoicePaymentBalance:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("80.00"),
+            teacher_rate=Decimal("50.00"),  # Teacher gets $50
+            student_rate=Decimal("100.00"),  # Student pays $100
             duration=Decimal("1.0"),
             scheduled_date=datetime.now(),
-            status="completed"
+            status="completed",
+            lesson_type="in_person"
         )
 
         invoice.lessons.add(lesson)
-        invoice.save()
 
-        # Calculate total from lessons
-        total = sum(lesson.total_cost() for lesson in invoice.lessons.all())
-        assert total == Decimal("80.00")
+        # Teacher invoice should use teacher_rate ($50)
+        total = invoice.calculate_payment_balance()
+        assert total == Decimal("50.00")
+
+    def test_student_invoice_uses_student_rate(self, teacher_user, student_user):
+        """Test that student billing invoices use student_rate."""
+        invoice = Invoice.objects.create(
+            invoice_type="student_billing",
+            student=student_user,
+            payment_balance=Decimal("0.00"),
+            due_date=datetime.now() + timedelta(days=30),
+            status="pending"
+        )
+
+        lesson = Lesson.objects.create(
+            teacher=teacher_user,
+            student=student_user,
+            teacher_rate=Decimal("50.00"),  # Teacher gets $50
+            student_rate=Decimal("100.00"),  # Student pays $100
+            duration=Decimal("1.0"),
+            scheduled_date=datetime.now(),
+            status="completed",
+            lesson_type="in_person"
+        )
+
+        invoice.lessons.add(lesson)
+
+        # Student invoice should use student_rate ($100)
+        total = invoice.calculate_payment_balance()
+        assert total == Decimal("100.00")
 
     def test_invoice_payment_balance_multiple_lessons(self, teacher_user, student_user):
         """Test invoice total with multiple lessons of varying durations."""
@@ -131,39 +172,44 @@ class TestInvoicePaymentBalance:
             Lesson.objects.create(
                 teacher=teacher_user,
                 student=student_user,
-                rate=Decimal("80.00"),
+                teacher_rate=Decimal("80.00"),
+                student_rate=Decimal("100.00"),
                 duration=Decimal("1.0"),
                 scheduled_date=datetime.now(),
-                status="completed"
+                status="completed",
+                lesson_type="in_person"
             ),
             Lesson.objects.create(
                 teacher=teacher_user,
                 student=student_user,
-                rate=Decimal("80.00"),
+                teacher_rate=Decimal("80.00"),
+                student_rate=Decimal("100.00"),
                 duration=Decimal("1.5"),
                 scheduled_date=datetime.now(),
-                status="completed"
+                status="completed",
+                lesson_type="in_person"
             ),
             Lesson.objects.create(
                 teacher=teacher_user,
                 student=student_user,
-                rate=Decimal("80.00"),
+                teacher_rate=Decimal("80.00"),
+                student_rate=Decimal("100.00"),
                 duration=Decimal("0.5"),
                 scheduled_date=datetime.now(),
-                status="completed"
+                status="completed",
+                lesson_type="in_person"
             ),
         ]
 
         for lesson in lessons:
             invoice.lessons.add(lesson)
-        invoice.save()
 
-        # Total should be: 80 + 120 + 40 = 240
-        total = sum(lesson.total_cost() for lesson in invoice.lessons.all())
+        # Total should be: 80 + 120 + 40 = 240 (using teacher_rate)
+        total = invoice.calculate_payment_balance()
         assert total == Decimal("240.00")
 
-    def test_invoice_payment_balance_mixed_rates(self, teacher_user, student_user):
-        """Test invoice total with lessons at different rates (in-person vs online)."""
+    def test_invoice_payment_balance_mixed_lesson_types(self, teacher_user, student_user):
+        """Test invoice total with both online and in-person lessons (different rates)."""
         invoice = Invoice.objects.create(
             invoice_type="teacher_payment",
             teacher=teacher_user,
@@ -172,22 +218,24 @@ class TestInvoicePaymentBalance:
             status="pending"
         )
 
-        # In-person lesson at $80/hr
+        # In-person lesson: teacher gets $80/hr, student pays $100/hr
         lesson1 = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("80.00"),
+            teacher_rate=Decimal("80.00"),
+            student_rate=Decimal("100.00"),
             duration=Decimal("1.0"),
             scheduled_date=datetime.now(),
             status="completed",
             lesson_type="in_person"
         )
 
-        # Online lesson at $45/hr
+        # Online lesson: teacher gets $45/hr, student pays $60/hr
         lesson2 = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=Decimal("45.00"),
+            teacher_rate=Decimal("45.00"),
+            student_rate=Decimal("60.00"),
             duration=Decimal("1.0"),
             scheduled_date=datetime.now(),
             status="completed",
@@ -195,11 +243,53 @@ class TestInvoicePaymentBalance:
         )
 
         invoice.lessons.add(lesson1, lesson2)
-        invoice.save()
 
-        # Total should be: 80 + 45 = 125
-        total = sum(lesson.total_cost() for lesson in invoice.lessons.all())
+        # Total should be: 80 + 45 = 125 (using teacher_rate for teacher payment)
+        total = invoice.calculate_payment_balance()
         assert total == Decimal("125.00")
+
+    def test_student_invoice_dual_rate_difference(self, teacher_user, student_user):
+        """Test that student pays more than teacher receives (school margin)."""
+        # Create teacher invoice
+        teacher_invoice = Invoice.objects.create(
+            invoice_type="teacher_payment",
+            teacher=teacher_user,
+            payment_balance=Decimal("0.00"),
+            due_date=datetime.now() + timedelta(days=30),
+            status="pending"
+        )
+
+        # Create student invoice for same lesson
+        student_invoice = Invoice.objects.create(
+            invoice_type="student_billing",
+            student=student_user,
+            payment_balance=Decimal("0.00"),
+            due_date=datetime.now() + timedelta(days=30),
+            status="pending"
+        )
+
+        # In-person lesson: teacher gets $50, student pays $100
+        lesson = Lesson.objects.create(
+            teacher=teacher_user,
+            student=student_user,
+            teacher_rate=Decimal("50.00"),
+            student_rate=Decimal("100.00"),
+            duration=Decimal("1.0"),
+            scheduled_date=datetime.now(),
+            status="completed",
+            lesson_type="in_person"
+        )
+
+        teacher_invoice.lessons.add(lesson)
+        student_invoice.lessons.add(lesson)
+
+        teacher_total = teacher_invoice.calculate_payment_balance()
+        student_total = student_invoice.calculate_payment_balance()
+
+        # Verify dual-rate system: student pays more than teacher receives
+        assert teacher_total == Decimal("50.00")
+        assert student_total == Decimal("100.00")
+        assert student_total > teacher_total  # School keeps the difference
 
     def test_invoice_payment_balance_empty_invoice(self, teacher_user):
         """Test that empty invoice has zero balance."""
@@ -211,5 +301,5 @@ class TestInvoicePaymentBalance:
             status="draft"
         )
 
-        total = sum(lesson.total_cost() for lesson in invoice.lessons.all())
+        total = invoice.calculate_payment_balance()
         assert total == Decimal("0.00")
