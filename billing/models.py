@@ -52,7 +52,7 @@ class User(AbstractUser):
     # Teacher-specific fields
     bio = models.TextField(blank=True)
     instruments = models.CharField(max_length=500, blank=True, help_text="Comma-separated list of instruments")
-    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
+    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00)
     
     # Student-specific fields (for future)
     assigned_teacher = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, 
@@ -104,7 +104,9 @@ class Lesson(models.Model):
 
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
-    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
+    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)  # DEPRECATED: Use teacher_rate/student_rate
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, help_text="Rate paid to teacher for this lesson")
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)  # Increased from 4 to 6 to allow values up to 9999.99
@@ -118,16 +120,47 @@ class Lesson(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     def total_cost(self):
+        """Calculate total cost using teacher_rate (for teacher invoices)"""
         from decimal import Decimal
-        # Ensure both values are Decimal for proper calculation
-        rate = Decimal(str(self.rate)) if not isinstance(self.rate, Decimal) else self.rate
+        # Use teacher_rate for dual-rate system
+        rate = Decimal(str(self.teacher_rate)) if not isinstance(self.teacher_rate, Decimal) else self.teacher_rate
         duration = Decimal(str(self.duration)) if not isinstance(self.duration, Decimal) else self.duration
-        return float(rate * duration)
+        # CRITICAL: Return Decimal for money precision, not float
+        return rate * duration
+
+    def student_cost(self):
+        """Calculate total cost using student_rate (for student invoices)"""
+        from decimal import Decimal
+        # Use student_rate for dual-rate system
+        rate = Decimal(str(self.student_rate)) if not isinstance(self.student_rate, Decimal) else self.student_rate
+        duration = Decimal(str(self.duration)) if not isinstance(self.duration, Decimal) else self.duration
+        # CRITICAL: Return Decimal for money precision, not float
+        return rate * duration
     
     def save(self, *args, **kwargs):
-        # Set rate from teacher's hourly rate if not provided and teacher has a custom rate
-        if self.rate == 80.00 and self.teacher and self.teacher.hourly_rate != 80.00:
-            self.rate = self.teacher.hourly_rate
+        from decimal import Decimal
+
+        # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
+        if not self.teacher_rate or not self.student_rate:
+            # Get global rate settings
+            try:
+                global_rates = GlobalRateSettings.get_settings()
+            except:
+                # Fallback defaults if GlobalRateSettings doesn't exist yet
+                global_rates = None
+
+            if self.lesson_type == 'online':
+                # Online lesson rates
+                self.teacher_rate = global_rates.online_teacher_rate if global_rates else Decimal('45.00')
+                self.student_rate = global_rates.online_student_rate if global_rates else Decimal('60.00')
+            else:
+                # In-person lesson rates
+                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
+                self.student_rate = global_rates.inperson_student_rate if global_rates else Decimal('100.00')
+
+        # Maintain backward compatibility: sync 'rate' with teacher_rate for existing code
+        self.rate = self.teacher_rate
+
         super().save(*args, **kwargs)
     
     def __str__(self):
@@ -189,7 +222,22 @@ class Invoice(models.Model):
     last_edited_at = models.DateTimeField(null=True, blank=True)
 
     def calculate_payment_balance(self):
-        total = sum(lesson.total_cost() for lesson in self.lessons.all())
+        from decimal import Decimal
+        total = Decimal('0.00')
+
+        for lesson in self.lessons.all():
+            # Use appropriate rate based on invoice type
+            if self.invoice_type == 'teacher_payment':
+                # Teachers are paid their teacher_rate
+                rate = lesson.teacher_rate
+            else:  # student_billing
+                # Students are billed the student_rate
+                rate = lesson.student_rate
+
+            # Calculate cost for this lesson
+            duration = Decimal(str(lesson.duration))
+            total += rate * duration
+
         return total
 
     def can_be_edited(self):
@@ -331,7 +379,6 @@ class SystemSettings(models.Model):
     """System-wide settings configurable from the management UI"""
     # Singleton pattern - only one instance should exist
     invoice_recipient_email = models.EmailField(
-        default='antonilueddeke@gmail.com',
         help_text='Email address where invoice PDFs are sent'
     )
     updated_at = models.DateTimeField(auto_now=True)
@@ -354,6 +401,68 @@ class SystemSettings(models.Model):
 
     def __str__(self):
         return 'System Settings'
+
+
+class GlobalRateSettings(models.Model):
+    """Global rate settings for online and in-person lessons"""
+    # Singleton pattern - only one instance should exist
+
+    # Online lesson rates
+    online_teacher_rate = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=45.00,
+        help_text='Rate paid to teachers for online lessons ($/hour)'
+    )
+    online_student_rate = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=60.00,
+        help_text='Rate billed to students for online lessons ($/hour)'
+    )
+
+    # In-person lesson rates
+    inperson_student_rate = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=100.00,
+        help_text='Rate billed to students for in-person lessons ($/hour). Teachers paid their hourly_rate.'
+    )
+
+    # Tracking
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rate_settings_updates'
+    )
+
+    class Meta:
+        verbose_name = 'Global Rate Settings'
+        verbose_name_plural = 'Global Rate Settings'
+
+    def save(self, *args, **kwargs):
+        # Ensure only one instance exists (singleton pattern)
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_settings(cls):
+        """Get or create the singleton settings instance"""
+        settings, created = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                'online_teacher_rate': 45.00,
+                'online_student_rate': 60.00,
+                'inperson_student_rate': 100.00,
+            }
+        )
+        return settings
+
+    def __str__(self):
+        return 'Global Rate Settings'
 
 
 class InvoiceRecipientEmail(models.Model):

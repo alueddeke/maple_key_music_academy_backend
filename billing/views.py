@@ -309,13 +309,32 @@ def submit_lessons_for_invoice(request):
                     }
                 )
             
-            # Create lesson
+            # Create lesson with dual-rate system
+            lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
+
+            # Determine rates based on lesson type
+            from billing.models import GlobalRateSettings
+            from decimal import Decimal
+
+            global_rates = GlobalRateSettings.get_settings()
+
+            if lesson_type == 'online':
+                # Online lessons use global rates
+                teacher_rate = global_rates.online_teacher_rate
+                student_rate = global_rates.online_student_rate
+            else:
+                # In-person lessons: teacher gets their hourly_rate, student pays global in-person rate
+                teacher_rate = request.user.hourly_rate
+                student_rate = global_rates.inperson_student_rate
+
             lesson = Lesson.objects.create(
                 teacher=request.user,
                 student=student,
+                lesson_type=lesson_type,
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
                 duration=lesson_data.get('duration', 1.0),
-                rate=lesson_data.get('rate', request.user.hourly_rate),
+                teacher_rate=teacher_rate,
+                student_rate=student_rate,
                 status='completed',  # Mark as completed since teacher is submitting for payment
                 completed_date=timezone.now(),
                 teacher_notes=lesson_data.get('teacher_notes', '')
@@ -351,8 +370,8 @@ def submit_lessons_for_invoice(request):
 
         student_invoices_created = []
         for student, student_lessons in lessons_by_student.items():
-            # Calculate total for this student
-            student_total = sum(lesson.total_cost() for lesson in student_lessons)
+            # Calculate total for this student using student_rate (not teacher_rate)
+            student_total = sum(lesson.student_cost() for lesson in student_lessons)
 
             # Create student invoice
             student_invoice = Invoice.objects.create(
@@ -1139,3 +1158,94 @@ def delete_invoice_recipient(request, pk):
             {'error': 'Recipient not found'},
             status=status.HTTP_404_NOT_FOUND
         )
+
+
+# Step 2: Dual-Rate System API Endpoints
+
+@api_view(['GET', 'PATCH'])
+@management_required
+def global_rate_settings(request):
+    """
+    Get or update global rate settings (singleton).
+    Management only.
+    """
+    from .models import GlobalRateSettings
+    from .serializers import GlobalRateSettingsSerializer
+
+    # Get or create the singleton settings instance
+    settings = GlobalRateSettings.get_settings()
+
+    if request.method == 'GET':
+        serializer = GlobalRateSettingsSerializer(settings)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        serializer = GlobalRateSettingsSerializer(settings, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save(updated_by=request.user)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@management_required
+def teacher_list(request):
+    """
+    List all teachers with computed stats.
+    Management only.
+    """
+    from .serializers import TeacherListSerializer
+
+    teachers = User.objects.filter(user_type='teacher', is_approved=True).order_by('last_name', 'first_name')
+    serializer = TeacherListSerializer(teachers, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['GET', 'PATCH'])
+@management_required
+def teacher_detail(request, pk):
+    """
+    Get teacher details with stats, or update teacher hourly_rate.
+    Management only.
+    """
+    from .serializers import TeacherDetailSerializer
+
+    try:
+        teacher = User.objects.get(pk=pk, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = TeacherDetailSerializer(teacher)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        # Only allow updating hourly_rate
+        if 'hourly_rate' not in request.data:
+            return Response(
+                {'error': 'Only hourly_rate can be updated'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate hourly_rate
+        from decimal import Decimal, InvalidOperation
+        try:
+            new_rate = Decimal(str(request.data['hourly_rate']))
+            if new_rate < 0:
+                return Response(
+                    {'error': 'Hourly rate must be positive'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (InvalidOperation, ValueError):
+            return Response(
+                {'error': 'Invalid hourly rate format'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Update teacher hourly_rate
+        teacher.hourly_rate = new_rate
+        teacher.save()
+
+        # Return updated teacher data
+        serializer = TeacherDetailSerializer(teacher)
+        return Response(serializer.data)

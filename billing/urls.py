@@ -57,4 +57,9 @@ urlpatterns = [
     path('management/invoice-recipients/', views.list_invoice_recipients, name='list_invoice_recipients'),
     path('management/invoice-recipients/add/', views.add_invoice_recipient, name='add_invoice_recipient'),
     path('management/invoice-recipients/<int:pk>/delete/', views.delete_invoice_recipient, name='delete_invoice_recipient'),
+
+    # Step 2: Dual-Rate System Management Endpoints
+    path('management/global-rates/', views.global_rate_settings, name='global_rate_settings'),
+    path('management/teachers/', views.teacher_list, name='management_teacher_list'),
+    path('management/teachers/<int:pk>/', views.teacher_detail, name='management_teacher_detail'),
 ]

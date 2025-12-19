@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail
+from django.db.models import Count, Sum, Q
+from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail, GlobalRateSettings
 
 User = get_user_model()
 
@@ -43,19 +44,6 @@ class InvoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = '__all__'
-
-# Legacy serializers for backward compatibility (deprecated)
-class TeacherSerializer(serializers.ModelSerializer):
-    """Legacy serializer - use UserSerializer instead"""
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'bio', 'instruments', 'hourly_rate', 'phone_number', 'address']
-
-class StudentSerializer(serializers.ModelSerializer):
-    """Legacy serializer - use UserSerializer instead"""
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'phone_number', 'address', 'assigned_teacher', 'parent_email', 'parent_phone']
 
 
 # Management serializers for new approval system
@@ -139,3 +127,133 @@ class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
         model = InvoiceRecipientEmail
         fields = ['id', 'email', 'created_at', 'created_by', 'created_by_name']
         read_only_fields = ['id', 'created_at', 'created_by', 'created_by_name']
+
+
+# Step 2: Dual-Rate System Serializers
+
+class GlobalRateSettingsSerializer(serializers.ModelSerializer):
+    """Serializer for global rate settings (singleton)"""
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = GlobalRateSettings
+        fields = [
+            'id', 'online_teacher_rate', 'online_student_rate', 'inperson_student_rate',
+            'updated_at', 'updated_by', 'updated_by_name'
+        ]
+        read_only_fields = ['id', 'updated_at', 'updated_by', 'updated_by_name']
+
+
+class TeacherListSerializer(serializers.ModelSerializer):
+    """Teacher list with computed stats for management dashboard"""
+    # Computed stats fields
+    total_students = serializers.SerializerMethodField()
+    total_lessons = serializers.SerializerMethodField()
+    total_invoices = serializers.SerializerMethodField()
+    pending_invoices = serializers.SerializerMethodField()
+    total_earnings = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'hourly_rate',
+            'instruments', 'is_approved',
+            'total_students', 'total_lessons', 'total_invoices',
+            'pending_invoices', 'total_earnings'
+        ]
+
+    def get_total_students(self, obj):
+        """Count distinct students this teacher has taught"""
+        return Lesson.objects.filter(teacher=obj, status='completed').values('student').distinct().count()
+
+    def get_total_lessons(self, obj):
+        """Count completed lessons for this teacher"""
+        return Lesson.objects.filter(teacher=obj, status='completed').count()
+
+    def get_total_invoices(self, obj):
+        """Count all invoices for this teacher"""
+        return Invoice.objects.filter(teacher=obj, invoice_type='teacher_payment').count()
+
+    def get_pending_invoices(self, obj):
+        """Count pending invoices for this teacher"""
+        return Invoice.objects.filter(
+            teacher=obj,
+            invoice_type='teacher_payment',
+            status='pending'
+        ).count()
+
+    def get_total_earnings(self, obj):
+        """Calculate total paid earnings (approved + paid invoices)"""
+        from decimal import Decimal
+        total = Invoice.objects.filter(
+            teacher=obj,
+            invoice_type='teacher_payment',
+            status__in=['approved', 'paid']
+        ).aggregate(total=Sum('payment_balance'))['total']
+        return total or Decimal('0.00')
+
+
+class TeacherDetailSerializer(serializers.ModelSerializer):
+    """Detailed teacher info with expanded stats"""
+    # Basic stats
+    total_students = serializers.SerializerMethodField()
+    total_lessons = serializers.SerializerMethodField()
+    total_invoices = serializers.SerializerMethodField()
+    pending_invoices = serializers.SerializerMethodField()
+    total_earnings = serializers.SerializerMethodField()
+
+    # Recent activity
+    recent_lessons = serializers.SerializerMethodField()
+    recent_invoices = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'phone_number', 'address',
+            'hourly_rate', 'bio', 'instruments', 'is_approved',
+            'total_students', 'total_lessons', 'total_invoices',
+            'pending_invoices', 'total_earnings',
+            'recent_lessons', 'recent_invoices',
+            'date_joined', 'last_login'
+        ]
+
+    def get_total_students(self, obj):
+        return Lesson.objects.filter(teacher=obj, status='completed').values('student').distinct().count()
+
+    def get_total_lessons(self, obj):
+        return Lesson.objects.filter(teacher=obj, status='completed').count()
+
+    def get_total_invoices(self, obj):
+        return Invoice.objects.filter(teacher=obj, invoice_type='teacher_payment').count()
+
+    def get_pending_invoices(self, obj):
+        return Invoice.objects.filter(
+            teacher=obj,
+            invoice_type='teacher_payment',
+            status='pending'
+        ).count()
+
+    def get_total_earnings(self, obj):
+        from decimal import Decimal
+        total = Invoice.objects.filter(
+            teacher=obj,
+            invoice_type='teacher_payment',
+            status__in=['approved', 'paid']
+        ).aggregate(total=Sum('payment_balance'))['total']
+        return total or Decimal('0.00')
+
+    def get_recent_lessons(self, obj):
+        """Get 5 most recent completed lessons"""
+        lessons = Lesson.objects.filter(
+            teacher=obj,
+            status='completed'
+        ).order_by('-completed_date')[:5]
+        return LessonSerializer(lessons, many=True).data
+
+    def get_recent_invoices(self, obj):
+        """Get 5 most recent invoices"""
+        invoices = Invoice.objects.filter(
+            teacher=obj,
+            invoice_type='teacher_payment'
+        ).order_by('-created_at')[:5]
+        return InvoiceSerializer(invoices, many=True).data
