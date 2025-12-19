@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('billing', '0008_lesson_lesson_type'),
+        ('billing', '0007_lesson_lesson_type'),
         ('billing', '0011_invoice_rejected_at_invoice_rejected_by_and_more'),
     ]
 

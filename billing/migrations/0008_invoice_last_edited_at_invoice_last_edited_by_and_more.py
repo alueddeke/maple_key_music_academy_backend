@@ -7,7 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("billing", "0006_increase_duration_field_size"),
+        ("billing", "0007_lesson_lesson_type"),
     ]
 
     operations = [
