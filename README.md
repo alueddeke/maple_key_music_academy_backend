@@ -157,6 +157,20 @@ Access the admin interface at: `http://localhost:8000/admin/`
 - [Billing App README](billing/README.md) - User management, lessons, invoices
 - [Custom Auth App README](custom_auth/README.md) - Authentication and authorization
 
+## 🏛️ Architecture Decision Records
+
+Backend architectural decisions are documented in [ADRs](./docs/adr/README.md).
+
+**Key Backend Decisions:**
+- [BE-0001: Unified User Model](./docs/adr/BE-0001-unified-user-model.md) - Single table with user_type field
+- [BE-0002: Email-Based Authentication](./docs/adr/BE-0002-email-based-authentication.md) - USERNAME_FIELD = 'email'
+- [BE-0003: Dual-Purpose Invoice Model](./docs/adr/BE-0003-dual-purpose-invoice-model.md) - One model for both invoice types
+- [BE-0004: Dual-Rate Lesson Pricing](./docs/adr/BE-0004-dual-rate-lesson-pricing.md) - Rate locking at lesson creation
+- [BE-0005: JWT Token Authentication](./docs/adr/BE-0005-jwt-token-authentication.md) - Stateless API authentication
+- [BE-0006: OAuth with Django Allauth](./docs/adr/BE-0006-oauth-with-django-allauth.md) - Google OAuth integration
+- [BE-0007: Pre-Push Migration Hook](./docs/adr/BE-0007-pre-push-migration-hook.md) - Prevent migration conflicts
+- [BE-0008: Student Billing Contact Design](./docs/adr/BE-0008-student-billing-contact-design.md) - Current implementation
+
 ## 🚀 Future Enhancements
 
 - Student billing invoices (pre-payment system)
