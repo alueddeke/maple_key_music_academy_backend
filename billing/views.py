@@ -390,7 +390,7 @@ def submit_lessons_for_invoice(request):
 
         # Generate PDF and send email
         try:
-            from billing.services.invoice_service import InvoiceProcessor
+            from billing.services.teacher_invoicepdf_generator import InvoiceProcessor
             success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
             if success:
                 logger.info(f"PDF generated and email sent for invoice {invoice.id} with {len(student_invoices_created)} student invoices")
@@ -1050,6 +1050,8 @@ def management_reject_invoice(request, pk):
 def management_regenerate_invoice_pdf(request, pk):
     """Management can regenerate and resend invoice PDF"""
     try:
+        from billing.services.teacher_invoicepdf_generator import InvoiceProcessor
+
         invoice = Invoice.objects.get(pk=pk)
 
         # Get recipient email if provided
