@@ -30,10 +30,30 @@ class LessonSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
     total_cost = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
-    
+    student_cost = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    is_first_lesson = serializers.SerializerMethodField()
+
     class Meta:
         model = Lesson
         fields = '__all__'
+
+    def get_is_first_lesson(self, obj):
+        """Check if this is the student's first lesson (for UI display)"""
+        if obj.pk:  # Existing lesson
+            return False
+        # For new lessons, check if student has completed lessons
+        return not Lesson.student_has_completed_lesson(obj.student)
+
+    def validate(self, data):
+        """Custom validation for trial lessons"""
+        # Prevent changing is_trial after lesson is completed
+        if self.instance and self.instance.status == 'completed':
+            if 'is_trial' in data and data['is_trial'] != self.instance.is_trial:
+                raise serializers.ValidationError({
+                    'is_trial': 'Cannot change trial status after lesson is completed'
+                })
+
+        return data
 
 class InvoiceSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
