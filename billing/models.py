@@ -104,12 +104,13 @@ class Lesson(models.Model):
 
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
+    is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
     rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)  # DEPRECATED: Use teacher_rate/student_rate
     teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, help_text="Rate paid to teacher for this lesson")
     student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
-    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)  # Increased from 4 to 6 to allow values up to 9999.99
+    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0) 
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
 
     # Notes
@@ -137,8 +138,34 @@ class Lesson(models.Model):
         # CRITICAL: Return Decimal for money precision, not float
         return rate * duration
     
+
+    @staticmethod
+    def student_has_completed_lesson(student):
+        """
+        Check if student has completed any lessons.
+        Used to determine if lesson should be default or trial.
+
+        Args:
+            student: User instance with user_type='student'
+
+        Returns:
+            bool: True if student has at least one completed lesson, False otherwise
+        """
+        return Lesson.objects.filter(
+            student=student,
+            status='completed'
+        ).exists()
+    
     def save(self, *args, **kwargs):
         from decimal import Decimal
+
+        # Auto detect if trial lesson/first time students
+        if not self.pk:
+            if not self.student_has_completed_lesson(self.student):
+                # student has no completed lessons, making this a trial
+                # management can also explicitly set to false
+                if not hasattr(self, '_is_trial_explicitly_set'):
+                    self.is_trial=True
 
         # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
         if not self.teacher_rate or not self.student_rate:
@@ -149,14 +176,25 @@ class Lesson(models.Model):
                 # Fallback defaults if GlobalRateSettings doesn't exist yet
                 global_rates = None
 
+            # Determine rates based on lesson type
             if self.lesson_type == 'online':
                 # Online lesson rates
                 self.teacher_rate = global_rates.online_teacher_rate if global_rates else Decimal('45.00')
-                self.student_rate = global_rates.online_student_rate if global_rates else Decimal('60.00')
+                base_student_rate = global_rates.online_student_rate if global_rates else Decimal('60.00')
             else:
                 # In-person lesson rates
                 self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                self.student_rate = global_rates.inperson_student_rate if global_rates else Decimal('100.00')
+                base_student_rate = global_rates.inperson_student_rate if global_rates else Decimal('100.00')
+
+            # Set student_rate: $0 for trial lessons, normal rate otherwise
+            if self.is_trial:
+                self.student_rate = Decimal('0.00')
+            else:
+                self.student_rate = base_student_rate
+
+        # If lesson is marked as trial after rates were set, update student_rate to $0
+        elif self.is_trial and self.student_rate != Decimal('0.00'):
+            self.student_rate = Decimal('0.00')
 
         # Maintain backward compatibility: sync 'rate' with teacher_rate for existing code
         self.rate = self.teacher_rate
@@ -164,7 +202,8 @@ class Lesson(models.Model):
         super().save(*args, **kwargs)
     
     def __str__(self):
-        return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}"
+        trial_indicator = " [TRIAL]" if self.is_trial else ""
+        return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}{trial_indicator}"
 
 class Invoice(models.Model):
     INVOICE_TYPES = [
