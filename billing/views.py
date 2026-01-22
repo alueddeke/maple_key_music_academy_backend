@@ -327,14 +327,27 @@ def submit_lessons_for_invoice(request):
                 teacher_rate = request.user.hourly_rate
                 student_rate = global_rates.inperson_student_rate
 
+
+            is_trial = lesson_data.get('is_trial', False)
+            # If student has no completed lessons, automatically mark as trial
+            # (unless teacher/management explicitly set is_trial=False)
+            if not is_trial and not Lesson.student_has_completed_lesson(student):
+                is_trial = True
+                logger.info(f"Auto-detected first lesson for student {student.email} - marking as trial")
+
+            if is_trial:
+                student_rate = Decimal('0.00')
+                logger.info(f"Trial lesson for {student.email} - student_rate=$0.00, teacher_rate={teacher_rate}")
+
             lesson = Lesson.objects.create(
                 teacher=request.user,
                 student=student,
                 lesson_type=lesson_type,
+                is_trial=is_trial,  # ADDED (MAP-23): Pass trial status to lesson
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
                 duration=lesson_data.get('duration', 1.0),
                 teacher_rate=teacher_rate,
-                student_rate=student_rate,
+                student_rate=student_rate,  # MODIFIED (MAP-23): Will be $0 if trial lesson
                 status='completed',  # Mark as completed since teacher is submitting for payment
                 completed_date=timezone.now(),
                 teacher_notes=lesson_data.get('teacher_notes', '')
