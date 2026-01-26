@@ -46,6 +46,7 @@ class User(AbstractUser):
     
     # Status fields
     is_approved = models.BooleanField(default=False, help_text="Management approval for teachers/students")
+    is_active = models.BooleanField(default=True, help_text="Soft delete flag - False means user is deleted")
     oauth_provider = models.CharField(max_length=50, blank=True)  # 'google', etc.
     oauth_id = models.CharField(max_length=100, blank=True)
     
@@ -54,11 +55,17 @@ class User(AbstractUser):
     instruments = models.CharField(max_length=500, blank=True, help_text="Comma-separated list of instruments")
     hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00)
     
-    # Student-specific fields (for future)
-    assigned_teacher = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, 
-                                       limit_choices_to={'user_type': 'teacher'})
-    parent_email = models.EmailField(blank=True)
-    parent_phone = models.CharField(max_length=15, blank=True)
+    # Student-specific fields
+    assigned_teachers = models.ManyToManyField(
+        'self',
+        symmetrical=False,
+        related_name='assigned_students',
+        limit_choices_to={'user_type': 'teacher'},
+        blank=True
+    )
+    # DEPRECATED: parent_email and parent_phone - replaced by BillableContact model
+    parent_email = models.EmailField(blank=True, help_text="DEPRECATED: Use BillableContact instead")
+    parent_phone = models.CharField(max_length=15, blank=True, help_text="DEPRECATED: Use BillableContact instead")
     
     # Override to use email as username
     USERNAME_FIELD = 'email'
@@ -82,6 +89,70 @@ class User(AbstractUser):
     def __str__(self):
         return f"{self.get_full_name()} ({self.get_user_type_display()})"
 
+
+class BillableContact(models.Model):
+    """Billable contact for student invoices - supports multiple"""
+    CONTACT_TYPES = [
+        ('parent', 'Parent'),
+        ('guardian', 'Guardian'),
+        ('self', 'Self'),
+        ('other', 'Other'),
+    ]
+
+    # Relationships
+    student = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='billable_contacts',
+        limit_choices_to={'user_type': 'student'}
+    )
+
+    # Contact type
+    contact_type = models.CharField(max_length=20, choices=CONTACT_TYPES, default='parent')
+
+    # Contact information
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    email = models.EmailField()
+    phone = models.CharField(max_length=15)
+
+    # Full address for billing
+    street_address = models.CharField(max_length=255)
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=2, help_text="Province/State code")
+    postal_code = models.CharField(max_length=10, help_text="Postal code (e.g., A1A 1A1) or ZIP code")
+
+    # Primary contact flag (used for invoicing)
+    is_primary = models.BooleanField(
+        default=False,
+        help_text="Primary contact receives invoices"
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_primary', '-created_at']
+        verbose_name = 'Billable Contact'
+        verbose_name_plural = 'Billable Contacts'
+
+    def save(self, *args, **kwargs):
+        """Ensure exactly one primary contact per student"""
+        if self.is_primary:
+            # Unset any other primary contacts for this student
+            BillableContact.objects.filter(
+                student=self.student,
+                is_primary=True
+            ).exclude(pk=self.pk).update(is_primary=False)
+        super().save(*args, **kwargs)
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
+    def __str__(self):
+        primary_label = " (Primary)" if self.is_primary else ""
+        return f"{self.get_full_name()} - {self.get_contact_type_display()}{primary_label}"
 
 class Lesson(models.Model):
     LESSON_STATUS = [
