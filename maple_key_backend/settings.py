@@ -14,6 +14,31 @@ from pathlib import Path
 from decouple import config  # For reading environment variables from .env file
 from urllib.parse import urlparse
 import os
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+
+# =============================================================================
+# SENTRY ERROR TRACKING CONFIGURATION
+# =============================================================================
+# Sentry provides error tracking, performance monitoring, and alerting
+# Sign up for free at https://sentry.io - the free tier includes 5K errors/month
+# Set SENTRY_DSN environment variable to enable (get DSN from Sentry project settings)
+
+SENTRY_DSN = config('SENTRY_DSN', default='')
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        # Capture 10% of transactions for performance monitoring (adjust as needed)
+        traces_sample_rate=config('SENTRY_TRACES_SAMPLE_RATE', default=0.1, cast=float),
+        # Send user info with errors (email, id) for debugging
+        send_default_pii=True,
+        # Environment tag for filtering in Sentry dashboard
+        environment=config('SENTRY_ENVIRONMENT', default='development'),
+        # Release version for tracking deployments
+        release=config('SENTRY_RELEASE', default='maple-key-backend@1.0.0'),
+    )
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -86,24 +111,40 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    'rest_framework', 
+    'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
-    'corsheaders', 
-    
+    'corsheaders',
+
     # Django Allauth - Required for OAuth authentication
     'django.contrib.sites',  # Required by django-allauth for multi-site support
     'allauth',  # Main allauth app for authentication
     'allauth.account',  # Handles user accounts and registration
     'allauth.socialaccount',  # Handles social media authentication
     'allauth.socialaccount.providers.google',  # Google OAuth provider
-    
+
     # Custom authentication app
     'custom_auth',  # Your custom auth app for OAuth views and JWT handling
+
+    # ==========================================================================
+    # OBSERVABILITY APPS
+    # ==========================================================================
+    # Prometheus metrics - exposes /metrics endpoint for Prometheus scraping
+    'django_prometheus',
+
+    # Health checks - exposes /health/ endpoint for container orchestration
+    'health_check',                              # Core health check
+    'health_check.db',                           # Database connectivity check
+    'health_check.cache',                        # Cache backend check
+    'health_check.storage',                      # Storage backend check
+    'health_check.contrib.migrations',           # Pending migrations check
+    'health_check.contrib.psutil',               # System resources (CPU, memory, disk)
 ]
 
 MIDDLEWARE = [
-	'corsheaders.middleware.CorsMiddleware',
+    # Prometheus middleware (must be first to capture all requests)
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -112,6 +153,8 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",  # Required by django-allauth
+    # Prometheus middleware (must be last to capture response metrics)
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
 ]
 
 ROOT_URLCONF = "maple_key_backend.urls"
@@ -353,3 +396,31 @@ EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@maplekey.com')
 TEST_EMAIL_RECIPIENT = config('TEST_EMAIL_RECIPIENT', default='antonilueddeke@gmail.com')
+
+# =============================================================================
+# HEALTH CHECK CONFIGURATION
+# =============================================================================
+# django-health-check provides endpoints for container orchestration (K8s, Docker)
+# Access at /health/ for detailed status or /health/?format=json for JSON response
+
+HEALTH_CHECK = {
+    # Disk usage threshold - warn if disk is more than 90% full
+    'DISK_USAGE_MAX': 90,
+    # Memory usage threshold - warn if memory is more than 90% used
+    'MEMORY_MIN': 100,  # Minimum free memory in MB
+}
+
+# =============================================================================
+# PROMETHEUS METRICS CONFIGURATION
+# =============================================================================
+# django-prometheus exposes metrics at /metrics for Prometheus scraping
+# Metrics include: request counts, latencies, database queries, cache hits, etc.
+#
+# To scrape metrics, add this to your Prometheus config:
+# scrape_configs:
+#   - job_name: 'maple-key-backend'
+#     static_configs:
+#       - targets: ['your-backend-host:8000']
+
+# Export Django model metrics (creates, updates, deletes per model)
+PROMETHEUS_EXPORT_MIGRATIONS = False  # Disable migration metrics to reduce noise

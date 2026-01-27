@@ -23,4 +23,16 @@ urlpatterns = [
     path("api/auth/", include('custom_auth.urls')),
     # Django Allauth URLs - these handle the OAuth flow
     path("accounts/", include('allauth.urls')),
+
+    # ==========================================================================
+    # OBSERVABILITY ENDPOINTS
+    # ==========================================================================
+    # Health check endpoint - use for container liveness/readiness probes
+    # GET /health/        - HTML status page
+    # GET /health/?format=json - JSON response for programmatic access
+    path('health/', include('health_check.urls')),
+
+    # Prometheus metrics endpoint - scrape with Prometheus for monitoring
+    # GET /metrics - Prometheus format metrics (request counts, latencies, etc.)
+    path('', include('django_prometheus.urls')),
 ]
