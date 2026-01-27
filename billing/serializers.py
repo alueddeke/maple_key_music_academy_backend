@@ -374,6 +374,19 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
 
 
 # STEP 2.3: StudentCreateSerializer for atomic student creation
+class BillingContactInputSerializer(serializers.Serializer):
+    """Serializer for billing contact input (without student field)"""
+    contact_type = serializers.ChoiceField(choices=['parent', 'guardian', 'self', 'other'], default='parent')
+    first_name = serializers.CharField(max_length=150)
+    last_name = serializers.CharField(max_length=150)
+    email = serializers.EmailField()
+    phone = serializers.CharField(max_length=15, required=False, allow_blank=True)
+    street_address = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    city = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    state = serializers.CharField(max_length=2, required=False, allow_blank=True)
+    postal_code = serializers.CharField(max_length=10, required=False, allow_blank=True)
+
+
 class StudentCreateSerializer(serializers.Serializer):
     """Serializer for creating a student with billing contact in one operation"""
     # Student fields
@@ -389,7 +402,7 @@ class StudentCreateSerializer(serializers.Serializer):
 
     # Billing contact fields (optional - if not provided, use student's info)
     use_student_as_contact = serializers.BooleanField(default=False)
-    billing_contact = BillableContactSerializer(required=False)
+    billing_contact = BillingContactInputSerializer(required=False)
 
     def validate_email(self, value):
         """Check if email already exists"""
@@ -451,10 +464,19 @@ class StudentCreateSerializer(serializers.Serializer):
                 )
             else:
                 # Use provided billing contact
-                billing_contact_data['student'] = student.id
-                billing_contact_data['is_primary'] = True
-                contact_serializer = BillableContactSerializer(data=billing_contact_data)
-                contact_serializer.is_valid(raise_exception=True)
-                contact_serializer.save()
+                # Create directly instead of using serializer to avoid student validation
+                BillableContact.objects.create(
+                    student=student,
+                    contact_type=billing_contact_data.get('contact_type', 'parent'),
+                    first_name=billing_contact_data['first_name'],
+                    last_name=billing_contact_data['last_name'],
+                    email=billing_contact_data['email'],
+                    phone=billing_contact_data.get('phone', ''),
+                    street_address=billing_contact_data.get('street_address', ''),
+                    city=billing_contact_data.get('city', ''),
+                    state=billing_contact_data.get('state', ''),
+                    postal_code=billing_contact_data.get('postal_code', ''),
+                    is_primary=True
+                )
 
         return student
