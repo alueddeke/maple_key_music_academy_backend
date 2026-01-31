@@ -1585,7 +1585,8 @@ def teacher_students(request, teacher_id):
     return Response({
         'teacher': {
             'id': teacher.id,
-            'name': teacher.get_full_name(),
+            'first_name': teacher.first_name,
+            'last_name': teacher.last_name,
             'email': teacher.email,
             'instruments': teacher.instruments,
             'bio': teacher.bio
