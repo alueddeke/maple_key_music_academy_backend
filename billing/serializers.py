@@ -18,7 +18,7 @@ class BillableContactSerializer(serializers.ModelSerializer):
             'id', 'student', 'contact_type', 'contact_type_display',
             'first_name', 'last_name', 'full_name',
             'email', 'phone',
-            'street_address', 'city', 'state', 'postal_code',
+            'street_address', 'city', 'province', 'postal_code',
             'is_primary', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'contact_type_display', 'full_name']
@@ -375,16 +375,58 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
 
 # STEP 2.3: StudentCreateSerializer for atomic student creation
 class BillingContactInputSerializer(serializers.Serializer):
-    """Serializer for billing contact input (without student field)"""
+    """Serializer for billing contact input (without student field) - Canadian format"""
     contact_type = serializers.ChoiceField(choices=['parent', 'guardian', 'self', 'other'], default='parent')
-    first_name = serializers.CharField(max_length=150)
-    last_name = serializers.CharField(max_length=150)
-    email = serializers.EmailField()
-    phone = serializers.CharField(max_length=15, required=False, allow_blank=True)
-    street_address = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    city = serializers.CharField(max_length=100, required=False, allow_blank=True)
-    state = serializers.CharField(max_length=2, required=False, allow_blank=True)
-    postal_code = serializers.CharField(max_length=10, required=False, allow_blank=True)
+    first_name = serializers.CharField(max_length=150, min_length=1, error_messages={
+        'required': 'First name is required',
+        'min_length': 'First name cannot be empty'
+    })
+    last_name = serializers.CharField(max_length=150, min_length=1, error_messages={
+        'required': 'Last name is required',
+        'min_length': 'Last name cannot be empty'
+    })
+    email = serializers.EmailField(error_messages={
+        'required': 'Email is required',
+        'invalid': 'Please enter a valid email address'
+    })
+    phone = serializers.CharField(max_length=15, min_length=1, error_messages={
+        'required': 'Phone number is required',
+        'min_length': 'Phone number cannot be empty'
+    })
+    street_address = serializers.CharField(max_length=255, min_length=1, error_messages={
+        'required': 'Street address is required',
+        'min_length': 'Street address cannot be empty'
+    })
+    city = serializers.CharField(max_length=100, min_length=1, error_messages={
+        'required': 'City is required',
+        'min_length': 'City cannot be empty'
+    })
+    province = serializers.CharField(max_length=2, min_length=2, error_messages={
+        'required': 'Province is required',
+        'min_length': 'Province must be 2 characters (e.g., ON, BC, QC)',
+        'max_length': 'Province must be 2 characters (e.g., ON, BC, QC)'
+    })
+    postal_code = serializers.CharField(max_length=10, min_length=1, error_messages={
+        'required': 'Postal code is required',
+        'min_length': 'Postal code cannot be empty'
+    })
+
+    def validate_province(self, value):
+        """Ensure province is uppercase 2-letter code"""
+        if len(value) != 2:
+            raise serializers.ValidationError("Province must be exactly 2 characters (e.g., ON, BC, QC)")
+        return value.upper()
+
+    def validate_postal_code(self, value):
+        """Basic validation for Canadian postal code format"""
+        import re
+        # Remove spaces and convert to uppercase
+        cleaned = value.replace(' ', '').upper()
+        # Canadian postal code pattern: A1A 1A1 (letter-digit-letter digit-letter-digit)
+        if not re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', cleaned):
+            raise serializers.ValidationError("Invalid Canadian postal code format (e.g., M5H 2N2)")
+        # Return formatted version with space: A1A 1A1
+        return f"{cleaned[:3]} {cleaned[3:]}"
 
 
 class StudentCreateSerializer(serializers.Serializer):
@@ -447,35 +489,44 @@ class StudentCreateSerializer(serializers.Serializer):
                 student.assigned_teachers.set(assigned_teacher_ids)
 
             # Create billing contact
-            if use_student_as_contact or not billing_contact_data:
-                # Use student's own information
+            if use_student_as_contact:
+                # When using student as contact, require complete address info
+                if not billing_contact_data:
+                    raise serializers.ValidationError({
+                        'billing_contact': 'Complete billing address is required when student is their own contact'
+                    })
+                # Use student info but with provided address
                 BillableContact.objects.create(
                     student=student,
                     contact_type='self',
                     first_name=student.first_name,
                     last_name=student.last_name,
                     email=student.email,
-                    phone=student.phone_number or '',
-                    street_address='',
-                    city='',
-                    state='',
-                    postal_code='',
+                    phone=billing_contact_data['phone'],
+                    street_address=billing_contact_data['street_address'],
+                    city=billing_contact_data['city'],
+                    province=billing_contact_data['province'],
+                    postal_code=billing_contact_data['postal_code'],
                     is_primary=True
                 )
             else:
-                # Use provided billing contact
-                # Create directly instead of using serializer to avoid student validation
+                # Use provided billing contact (required)
+                if not billing_contact_data:
+                    raise serializers.ValidationError({
+                        'billing_contact': 'Billing contact information is required'
+                    })
+                # Create directly - serializer validation already ensures all fields present
                 BillableContact.objects.create(
                     student=student,
                     contact_type=billing_contact_data.get('contact_type', 'parent'),
                     first_name=billing_contact_data['first_name'],
                     last_name=billing_contact_data['last_name'],
                     email=billing_contact_data['email'],
-                    phone=billing_contact_data.get('phone', ''),
-                    street_address=billing_contact_data.get('street_address', ''),
-                    city=billing_contact_data.get('city', ''),
-                    state=billing_contact_data.get('state', ''),
-                    postal_code=billing_contact_data.get('postal_code', ''),
+                    phone=billing_contact_data['phone'],
+                    street_address=billing_contact_data['street_address'],
+                    city=billing_contact_data['city'],
+                    province=billing_contact_data['province'],
+                    postal_code=billing_contact_data['postal_code'],
                     is_primary=True
                 )
 

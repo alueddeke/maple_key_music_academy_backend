@@ -116,11 +116,11 @@ class BillableContact(models.Model):
     email = models.EmailField()
     phone = models.CharField(max_length=15)
 
-    # Full address for billing
+    # Full address for billing (Canadian format)
     street_address = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
-    state = models.CharField(max_length=2, help_text="Province/State code")
-    postal_code = models.CharField(max_length=10, help_text="Postal code (e.g., A1A 1A1) or ZIP code")
+    province = models.CharField(max_length=2, help_text="Province code (e.g., ON, BC, QC)")
+    postal_code = models.CharField(max_length=10, help_text="Postal code (e.g., M5H 2N2)")
 
     # Primary contact flag (used for invoicing)
     is_primary = models.BooleanField(

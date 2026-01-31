@@ -275,13 +275,90 @@ def submit_lessons_for_invoice(request):
     try:
         data = request.data.copy()
         lessons_data = data.get('lessons', [])
-        
+
         if not lessons_data:
             return Response({'error': 'No lessons provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # VALIDATION: Check all students have complete billing information
+        validation_errors = []
+        for lesson_data in lessons_data:
+            student_email = lesson_data.get('student_email')
+            student_name = lesson_data.get('student_name', 'Unknown Student')
+
+            # Generate email if not provided (same logic as creation)
+            if not student_email:
+                temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
+                student_email = temp_email
+
+            # Check if student exists
+            try:
+                student = User.objects.get(email=student_email, user_type='student')
+
+                # Check for complete billing contact
+                primary_contact = BillableContact.objects.filter(
+                    student=student,
+                    is_primary=True
+                ).first()
+
+                if not primary_contact:
+                    validation_errors.append({
+                        'student': student_name,
+                        'email': student_email,
+                        'error': 'No billing contact found. Please add complete billing information in Student Management.'
+                    })
+                else:
+                    # Check all required fields
+                    missing_fields = []
+                    incomplete_fields = {}
+
+                    required_fields = {
+                        'first_name': primary_contact.first_name,
+                        'last_name': primary_contact.last_name,
+                        'email': primary_contact.email,
+                        'phone': primary_contact.phone,
+                        'street_address': primary_contact.street_address,
+                        'city': primary_contact.city,
+                        'province': primary_contact.province,
+                        'postal_code': primary_contact.postal_code
+                    }
+
+                    for field_name, field_value in required_fields.items():
+                        if not field_value or field_value.strip() == '':
+                            missing_fields.append(field_name)
+                        elif field_value.strip().upper() in ['INCOMPLETE', 'XX', 'N/A', 'TBD']:
+                            incomplete_fields[field_name] = field_value
+
+                    if missing_fields or incomplete_fields:
+                        error_parts = []
+                        if missing_fields:
+                            error_parts.append(f"Missing: {', '.join(missing_fields)}")
+                        if incomplete_fields:
+                            error_parts.append(f"Incomplete: {', '.join(incomplete_fields.keys())}")
+
+                        validation_errors.append({
+                            'student': student_name,
+                            'email': student_email,
+                            'missing_fields': missing_fields,
+                            'incomplete_fields': list(incomplete_fields.keys()),
+                            'error': f"Incomplete billing contact. {' | '.join(error_parts)}. Please update student information in Student Management."
+                        })
+
+            except User.DoesNotExist:
+                # New student - will be created, so skip validation for now
+                # Will create with placeholder contact that must be updated before invoice approval
+                pass
+
+        # If validation errors found, return them with helpful message
+        if validation_errors:
+            return Response({
+                'error': 'Cannot submit invoice - some students have incomplete billing information',
+                'details': validation_errors,
+                'message': 'Please update student billing information in Student Management before submitting this invoice. All fields (name, email, phone, street address, city, province, postal code) are required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Create lessons and collect them for the invoice
         created_lessons = []
-        
+
         for lesson_data in lessons_data:
             # Handle student lookup/creation
             student_name = lesson_data.get('student_name')
@@ -310,6 +387,23 @@ def submit_lessons_for_invoice(request):
                         'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
                         'is_approved': True
                     }
+                )
+
+            # If student was just created, create a placeholder billable contact
+            # Management must complete this information before approving the invoice
+            if created:
+                BillableContact.objects.create(
+                    student=student,
+                    contact_type='parent',
+                    first_name='INCOMPLETE',
+                    last_name='INCOMPLETE',
+                    email=student_email or temp_email,
+                    phone='INCOMPLETE',
+                    street_address='INCOMPLETE - Please update in Student Management',
+                    city='INCOMPLETE',
+                    province='XX',
+                    postal_code='INCOMPLETE',
+                    is_primary=True
                 )
             
             # Create lesson with dual-rate system
