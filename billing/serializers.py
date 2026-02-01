@@ -1,23 +1,99 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Sum, Q
-from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail, GlobalRateSettings
+from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail, GlobalRateSettings, BillableContact
 
 User = get_user_model()
 
+
+# STEP 2.1: BillableContact Serializer
+class BillableContactSerializer(serializers.ModelSerializer):
+    """Serializer for billable contact information"""
+    contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+
+    class Meta:
+        model = BillableContact
+        fields = [
+            'id', 'student', 'contact_type', 'contact_type_display',
+            'first_name', 'last_name', 'full_name',
+            'email', 'phone',
+            'street_address', 'city', 'province', 'postal_code',
+            'is_primary', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'contact_type_display', 'full_name']
+
+    def validate(self, data):
+        """Ensure at least one primary contact per student"""
+        student = data.get('student')
+        is_primary = data.get('is_primary', False)
+
+        # If unsetting primary, ensure another primary exists
+        if not is_primary and self.instance and self.instance.is_primary:
+            other_primaries = BillableContact.objects.filter(
+                student=student,
+                is_primary=True
+            ).exclude(pk=self.instance.pk).exists()
+
+            if not other_primaries:
+                raise serializers.ValidationError({
+                    'is_primary': 'At least one primary contact is required per student'
+                })
+
+        return data
+
+
+# STEP 2.2: Updated UserSerializer with billable contacts and assigned teachers
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
-    
+    user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
+    billable_contacts = BillableContactSerializer(many=True, read_only=True)
+    assigned_teachers_data = serializers.SerializerMethodField()
+    assigned_students_data = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = [
-            'id', 'email', 'first_name', 'last_name', 'user_type',
-            'phone_number', 'address', 'is_approved', 'bio', 
-            'instruments', 'hourly_rate', 'assigned_teacher',
-            'parent_email', 'parent_phone', 'password'
+            'id', 'email', 'first_name', 'last_name', 'user_type', 'user_type_display',
+            'phone_number', 'address', 'is_approved', 'is_active',
+            'bio', 'instruments', 'hourly_rate',
+            'assigned_teachers', 'assigned_teachers_data',
+            'assigned_students_data',
+            'billable_contacts',
+            'parent_email', 'parent_phone',  # DEPRECATED fields
+            'date_joined', 'last_login', 'password'
         ]
+        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display']
         extra_kwargs = {'password': {'write_only': True}}
-    
+
+    def get_assigned_teachers_data(self, obj):
+        """Return full teacher info for students"""
+        if obj.user_type == 'student':
+            return [
+                {
+                    'id': teacher.id,
+                    'name': teacher.get_full_name(),
+                    'email': teacher.email,
+                    'instruments': teacher.instruments
+                }
+                for teacher in obj.assigned_teachers.filter(is_active=True)
+            ]
+        return []
+
+    def get_assigned_students_data(self, obj):
+        """Return full student info for teachers"""
+        if obj.user_type == 'teacher':
+            return [
+                {
+                    'id': student.id,
+                    'name': student.get_full_name(),
+                    'email': student.email,
+                    'phone': student.phone_number
+                }
+                for student in obj.assigned_students.filter(is_active=True)
+            ]
+        return []
+
     def create(self, validated_data):
         password = validated_data.pop('password', None)
         user = User.objects.create_user(**validated_data)
@@ -25,6 +101,7 @@ class UserSerializer(serializers.ModelSerializer):
             user.set_password(password)
             user.save()
         return user
+
 
 class LessonSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
@@ -60,7 +137,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
-    
+
     class Meta:
         model = Invoice
         fields = '__all__'
@@ -95,17 +172,34 @@ class UserRegistrationRequestSerializer(serializers.ModelSerializer):
 class DetailedUserSerializer(serializers.ModelSerializer):
     """Detailed user serializer for management with all fields"""
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
-    assigned_teacher_name = serializers.CharField(source='assigned_teacher.get_full_name', read_only=True)
+    billable_contacts = BillableContactSerializer(many=True, read_only=True)
+    assigned_teachers_data = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'user_type', 'user_type_display',
-            'phone_number', 'address', 'is_approved', 'oauth_provider', 'oauth_id',
-            'bio', 'instruments', 'hourly_rate', 'assigned_teacher', 'assigned_teacher_name',
+            'phone_number', 'address', 'is_approved', 'is_active', 'oauth_provider', 'oauth_id',
+            'bio', 'instruments', 'hourly_rate',
+            'assigned_teachers', 'assigned_teachers_data',
+            'billable_contacts',
             'parent_email', 'parent_phone', 'date_joined', 'last_login'
         ]
         read_only_fields = ['date_joined', 'last_login']
+
+    def get_assigned_teachers_data(self, obj):
+        """Return full teacher info for students"""
+        if obj.user_type == 'student':
+            return [
+                {
+                    'id': teacher.id,
+                    'name': teacher.get_full_name(),
+                    'email': teacher.email,
+                    'instruments': teacher.instruments
+                }
+                for teacher in obj.assigned_teachers.filter(is_active=True)
+            ]
+        return []
 
 
 class DetailedInvoiceSerializer(serializers.ModelSerializer):
@@ -277,3 +371,163 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
             invoice_type='teacher_payment'
         ).order_by('-created_at')[:5]
         return InvoiceSerializer(invoices, many=True).data
+
+
+# STEP 2.3: StudentCreateSerializer for atomic student creation
+class BillingContactInputSerializer(serializers.Serializer):
+    """Serializer for billing contact input (without student field) - Canadian format"""
+    contact_type = serializers.ChoiceField(choices=['parent', 'guardian', 'self', 'other'], default='parent')
+    first_name = serializers.CharField(max_length=150, min_length=1, error_messages={
+        'required': 'First name is required',
+        'min_length': 'First name cannot be empty'
+    })
+    last_name = serializers.CharField(max_length=150, min_length=1, error_messages={
+        'required': 'Last name is required',
+        'min_length': 'Last name cannot be empty'
+    })
+    email = serializers.EmailField(error_messages={
+        'required': 'Email is required',
+        'invalid': 'Please enter a valid email address'
+    })
+    phone = serializers.CharField(max_length=15, min_length=1, error_messages={
+        'required': 'Phone number is required',
+        'min_length': 'Phone number cannot be empty'
+    })
+    street_address = serializers.CharField(max_length=255, min_length=1, error_messages={
+        'required': 'Street address is required',
+        'min_length': 'Street address cannot be empty'
+    })
+    city = serializers.CharField(max_length=100, min_length=1, error_messages={
+        'required': 'City is required',
+        'min_length': 'City cannot be empty'
+    })
+    province = serializers.CharField(max_length=2, min_length=2, error_messages={
+        'required': 'Province is required',
+        'min_length': 'Province must be 2 characters (e.g., ON, BC, QC)',
+        'max_length': 'Province must be 2 characters (e.g., ON, BC, QC)'
+    })
+    postal_code = serializers.CharField(max_length=10, min_length=1, error_messages={
+        'required': 'Postal code is required',
+        'min_length': 'Postal code cannot be empty'
+    })
+
+    def validate_province(self, value):
+        """Ensure province is uppercase 2-letter code"""
+        if len(value) != 2:
+            raise serializers.ValidationError("Province must be exactly 2 characters (e.g., ON, BC, QC)")
+        return value.upper()
+
+    def validate_postal_code(self, value):
+        """Basic validation for Canadian postal code format"""
+        import re
+        # Remove spaces and convert to uppercase
+        cleaned = value.replace(' ', '').upper()
+        # Canadian postal code pattern: A1A 1A1 (letter-digit-letter digit-letter-digit)
+        if not re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', cleaned):
+            raise serializers.ValidationError("Invalid Canadian postal code format (e.g., M5H 2N2)")
+        # Return formatted version with space: A1A 1A1
+        return f"{cleaned[:3]} {cleaned[3:]}"
+
+
+class StudentCreateSerializer(serializers.Serializer):
+    """Serializer for creating a student with billing contact in one operation"""
+    # Student fields
+    email = serializers.EmailField()
+    first_name = serializers.CharField(max_length=150)
+    last_name = serializers.CharField(max_length=150)
+    phone_number = serializers.CharField(max_length=15, required=False, allow_blank=True)
+    assigned_teachers = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=True
+    )
+
+    # Billing contact fields (optional - if not provided, use student's info)
+    use_student_as_contact = serializers.BooleanField(default=False)
+    billing_contact = BillingContactInputSerializer(required=False)
+
+    def validate_email(self, value):
+        """Check if email already exists"""
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("A user with this email already exists")
+        return value
+
+    def validate_assigned_teachers(self, value):
+        """Validate teacher IDs exist and are active"""
+        if value:
+            teachers = User.objects.filter(
+                id__in=value,
+                user_type='teacher',
+                is_active=True
+            )
+            if teachers.count() != len(value):
+                raise serializers.ValidationError("One or more teacher IDs are invalid")
+        return value
+
+    def create(self, validated_data):
+        """Create student and billing contact atomically"""
+        from django.db import transaction
+
+        # Extract nested data
+        assigned_teacher_ids = validated_data.pop('assigned_teachers', [])
+        use_student_as_contact = validated_data.pop('use_student_as_contact', False)
+        billing_contact_data = validated_data.pop('billing_contact', None)
+
+        with transaction.atomic():
+            # Create student user
+            student = User.objects.create_user(
+                email=validated_data['email'],
+                first_name=validated_data['first_name'],
+                last_name=validated_data['last_name'],
+                phone_number=validated_data.get('phone_number', ''),
+                user_type='student',
+                is_approved=True  # Management-created students are auto-approved
+            )
+
+            # Assign teachers if provided
+            if assigned_teacher_ids:
+                student.assigned_teachers.set(assigned_teacher_ids)
+
+            # Create billing contact
+            if use_student_as_contact:
+                # When using student as contact, require complete address info
+                if not billing_contact_data:
+                    raise serializers.ValidationError({
+                        'billing_contact': 'Complete billing address is required when student is their own contact'
+                    })
+                # Use student info but with provided address
+                BillableContact.objects.create(
+                    student=student,
+                    contact_type='self',
+                    first_name=student.first_name,
+                    last_name=student.last_name,
+                    email=student.email,
+                    phone=billing_contact_data['phone'],
+                    street_address=billing_contact_data['street_address'],
+                    city=billing_contact_data['city'],
+                    province=billing_contact_data['province'],
+                    postal_code=billing_contact_data['postal_code'],
+                    is_primary=True
+                )
+            else:
+                # Use provided billing contact (required)
+                if not billing_contact_data:
+                    raise serializers.ValidationError({
+                        'billing_contact': 'Billing contact information is required'
+                    })
+                # Create directly - serializer validation already ensures all fields present
+                BillableContact.objects.create(
+                    student=student,
+                    contact_type=billing_contact_data.get('contact_type', 'parent'),
+                    first_name=billing_contact_data['first_name'],
+                    last_name=billing_contact_data['last_name'],
+                    email=billing_contact_data['email'],
+                    phone=billing_contact_data['phone'],
+                    street_address=billing_contact_data['street_address'],
+                    city=billing_contact_data['city'],
+                    province=billing_contact_data['province'],
+                    postal_code=billing_contact_data['postal_code'],
+                    is_primary=True
+                )
+
+        return student

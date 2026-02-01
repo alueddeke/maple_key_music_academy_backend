@@ -5,8 +5,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import Invoice, Lesson
-from .serializers import UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer
+from .models import Invoice, Lesson, BillableContact
+from .serializers import (
+    UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    BillableContactSerializer, StudentCreateSerializer
+)
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
@@ -272,13 +275,90 @@ def submit_lessons_for_invoice(request):
     try:
         data = request.data.copy()
         lessons_data = data.get('lessons', [])
-        
+
         if not lessons_data:
             return Response({'error': 'No lessons provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # VALIDATION: Check all students have complete billing information
+        validation_errors = []
+        for lesson_data in lessons_data:
+            student_email = lesson_data.get('student_email')
+            student_name = lesson_data.get('student_name', 'Unknown Student')
+
+            # Generate email if not provided (same logic as creation)
+            if not student_email:
+                temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
+                student_email = temp_email
+
+            # Check if student exists
+            try:
+                student = User.objects.get(email=student_email, user_type='student')
+
+                # Check for complete billing contact
+                primary_contact = BillableContact.objects.filter(
+                    student=student,
+                    is_primary=True
+                ).first()
+
+                if not primary_contact:
+                    validation_errors.append({
+                        'student': student_name,
+                        'email': student_email,
+                        'error': 'No billing contact found. Please add complete billing information in Student Management.'
+                    })
+                else:
+                    # Check all required fields
+                    missing_fields = []
+                    incomplete_fields = {}
+
+                    required_fields = {
+                        'first_name': primary_contact.first_name,
+                        'last_name': primary_contact.last_name,
+                        'email': primary_contact.email,
+                        'phone': primary_contact.phone,
+                        'street_address': primary_contact.street_address,
+                        'city': primary_contact.city,
+                        'province': primary_contact.province,
+                        'postal_code': primary_contact.postal_code
+                    }
+
+                    for field_name, field_value in required_fields.items():
+                        if not field_value or field_value.strip() == '':
+                            missing_fields.append(field_name)
+                        elif field_value.strip().upper() in ['INCOMPLETE', 'XX', 'N/A', 'TBD']:
+                            incomplete_fields[field_name] = field_value
+
+                    if missing_fields or incomplete_fields:
+                        error_parts = []
+                        if missing_fields:
+                            error_parts.append(f"Missing: {', '.join(missing_fields)}")
+                        if incomplete_fields:
+                            error_parts.append(f"Incomplete: {', '.join(incomplete_fields.keys())}")
+
+                        validation_errors.append({
+                            'student': student_name,
+                            'email': student_email,
+                            'missing_fields': missing_fields,
+                            'incomplete_fields': list(incomplete_fields.keys()),
+                            'error': f"Incomplete billing contact. {' | '.join(error_parts)}. Please update student information in Student Management."
+                        })
+
+            except User.DoesNotExist:
+                # New student - will be created, so skip validation for now
+                # Will create with placeholder contact that must be updated before invoice approval
+                pass
+
+        # If validation errors found, return them with helpful message
+        if validation_errors:
+            return Response({
+                'error': 'Cannot submit invoice - some students have incomplete billing information',
+                'details': validation_errors,
+                'message': 'Please update student billing information in Student Management before submitting this invoice. All fields (name, email, phone, street address, city, province, postal code) are required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Create lessons and collect them for the invoice
         created_lessons = []
-        
+
         for lesson_data in lessons_data:
             # Handle student lookup/creation
             student_name = lesson_data.get('student_name')
@@ -307,6 +387,23 @@ def submit_lessons_for_invoice(request):
                         'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
                         'is_approved': True
                     }
+                )
+
+            # If student was just created, create a placeholder billable contact
+            # Management must complete this information before approving the invoice
+            if created:
+                BillableContact.objects.create(
+                    student=student,
+                    contact_type='parent',
+                    first_name='INCOMPLETE',
+                    last_name='INCOMPLETE',
+                    email=student_email or temp_email,
+                    phone='INCOMPLETE',
+                    street_address='INCOMPLETE - Please update in Student Management',
+                    city='INCOMPLETE',
+                    province='XX',
+                    postal_code='INCOMPLETE',
+                    is_primary=True
                 )
             
             # Create lesson with dual-rate system
@@ -1264,3 +1361,289 @@ def teacher_detail(request, pk):
         # Return updated teacher data
         serializer = TeacherDetailSerializer(teacher)
         return Response(serializer.data)
+
+# ============================================================================
+# STUDENT MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@api_view(['GET', 'POST'])
+@management_required
+def management_students(request):
+    """List all students or create new student with billing contact"""
+    if request.method == 'GET':
+        # Get all active students
+        include_inactive = request.GET.get('include_inactive', 'false').lower() == 'true'
+        
+        if include_inactive:
+            students = User.objects.filter(user_type='student')
+        else:
+            students = User.objects.filter(user_type='student', is_active=True)
+        
+        serializer = UserSerializer(students, many=True)
+        return Response(serializer.data)
+    
+    elif request.method == 'POST':
+        # Create student with billing contact
+        serializer = StudentCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            student = serializer.save()
+            return Response(
+                UserSerializer(student).data,
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@management_required
+def management_student_detail(request, pk):
+    """Get, update, or soft-delete a student"""
+    try:
+        student = User.objects.get(pk=pk, user_type='student')
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    if request.method == 'GET':
+        serializer = UserSerializer(student)
+        return Response(serializer.data)
+    
+    elif request.method == 'PUT':
+        # Update student information
+        serializer = UserSerializer(student, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    elif request.method == 'DELETE':
+        # Soft delete - check for lessons/invoices first
+        has_lessons = Lesson.objects.filter(student=student).exists()
+        has_invoices = Invoice.objects.filter(student=student).exists()
+        
+        warning_message = None
+        if has_lessons or has_invoices:
+            lesson_count = Lesson.objects.filter(student=student).count()
+            invoice_count = Invoice.objects.filter(student=student).count()
+            warning_message = (
+                f"Warning: This student has {lesson_count} lessons "
+                f"and {invoice_count} invoices. "
+                "Historical data will be preserved."
+            )
+        
+        # Perform soft delete
+        student.is_active = False
+        student.save()
+        
+        return Response({
+            'message': 'Student deleted successfully',
+            'warning': warning_message
+        }, status=status.HTTP_200_OK)
+
+
+# ============================================================================
+# BILLABLE CONTACT ENDPOINTS
+# ============================================================================
+
+@api_view(['POST'])
+@management_required
+def add_billable_contact(request, student_id):
+    """Add a new billing contact for a student"""
+    try:
+        student = User.objects.get(pk=student_id, user_type='student', is_active=True)
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    data = request.data.copy()
+    data['student'] = student.id
+    
+    serializer = BillableContactSerializer(data=data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@management_required
+def manage_billable_contact(request, pk):
+    """Get, update, or delete a billing contact"""
+    try:
+        contact = BillableContact.objects.get(pk=pk)
+    except BillableContact.DoesNotExist:
+        return Response({'error': 'Billing contact not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    if request.method == 'GET':
+        # Get contact details for editing
+        serializer = BillableContactSerializer(contact)
+        return Response(serializer.data)
+    
+    elif request.method == 'PUT':
+        serializer = BillableContactSerializer(contact, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    elif request.method == 'DELETE':
+        # Check if this is the last contact
+        student = contact.student
+        contact_count = BillableContact.objects.filter(student=student).count()
+        
+        if contact_count == 1:
+            return Response({
+                'error': 'Cannot delete the last billing contact for a student'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # If deleting primary, make another contact primary
+        if contact.is_primary:
+            other_contact = BillableContact.objects.filter(
+                student=student
+            ).exclude(pk=contact.pk).first()
+            
+            if other_contact:
+                other_contact.is_primary = True
+                other_contact.save()
+        
+        contact.delete()
+        return Response({
+            'message': 'Billing contact deleted successfully'
+        }, status=status.HTTP_200_OK)
+
+
+# ============================================================================
+# TEACHER-STUDENT ASSIGNMENT ENDPOINTS
+# ============================================================================
+
+@api_view(['POST'])
+@management_required
+def assign_teachers_to_student(request, student_id):
+    """Assign one or more teachers to a student"""
+    try:
+        student = User.objects.get(pk=student_id, user_type='student', is_active=True)
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    teacher_ids = request.data.get('teacher_ids', [])
+    
+    if not teacher_ids:
+        return Response({'error': 'No teacher IDs provided'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Validate teachers exist and are active
+    teachers = User.objects.filter(
+        id__in=teacher_ids,
+        user_type='teacher',
+        is_active=True
+    )
+    
+    if teachers.count() != len(teacher_ids):
+        return Response({
+            'error': 'One or more teacher IDs are invalid or inactive'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Add teachers (keeps existing assignments)
+    student.assigned_teachers.add(*teachers)
+    
+    return Response({
+        'message': f'Assigned {teachers.count()} teacher(s) to {student.get_full_name()}',
+        'assigned_teachers': [
+            {'id': t.id, 'name': t.get_full_name()}
+            for t in student.assigned_teachers.filter(is_active=True)
+        ]
+    })
+
+
+@api_view(['DELETE'])
+@management_required
+def unassign_teacher_from_student(request, student_id, teacher_id):
+    """Remove a teacher assignment from a student"""
+    try:
+        student = User.objects.get(pk=student_id, user_type='student')
+        teacher = User.objects.get(pk=teacher_id, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Student or teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    student.assigned_teachers.remove(teacher)
+    
+    return Response({
+        'message': f'Removed {teacher.get_full_name()} from {student.get_full_name()}'
+    })
+
+
+@api_view(['GET'])
+@management_required
+def teacher_students(request, teacher_id):
+    """Get all students assigned to a teacher"""
+    try:
+        teacher = User.objects.get(pk=teacher_id, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # Get active students assigned to this teacher
+    students = teacher.assigned_students.filter(is_active=True)
+    serializer = UserSerializer(students, many=True)
+    
+    return Response({
+        'teacher': {
+            'id': teacher.id,
+            'first_name': teacher.first_name,
+            'last_name': teacher.last_name,
+            'email': teacher.email,
+            'instruments': teacher.instruments,
+            'bio': teacher.bio
+        },
+        'students': serializer.data,
+        'total_students': students.count()
+    })
+
+
+# ============================================================================
+# TEACHER MANAGEMENT ENDPOINTS (UPDATE/DELETE ONLY, NO CREATE)
+# ============================================================================
+
+@api_view(['PUT'])
+@management_required
+def management_update_teacher(request, pk):
+    """Update teacher information"""
+    try:
+        teacher = User.objects.get(pk=pk, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    serializer = UserSerializer(teacher, data=request.data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['DELETE'])
+@management_required
+def management_delete_teacher(request, pk):
+    """Soft delete a teacher"""
+    try:
+        teacher = User.objects.get(pk=pk, user_type='teacher')
+    except User.DoesNotExist:
+        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # Check for lessons/invoices
+    has_lessons = Lesson.objects.filter(teacher=teacher).exists()
+    has_invoices = Invoice.objects.filter(teacher=teacher).exists()
+    
+    warning_message = None
+    if has_lessons or has_invoices:
+        lesson_count = Lesson.objects.filter(teacher=teacher).count()
+        invoice_count = Invoice.objects.filter(teacher=teacher).count()
+        warning_message = (
+            f"Warning: This teacher has {lesson_count} lessons "
+            f"and {invoice_count} invoices. "
+            "Historical data will be preserved."
+        )
+    
+    # Perform soft delete
+    teacher.is_active = False
+    teacher.save()
+    
+    return Response({
+        'message': 'Teacher deleted successfully',
+        'warning': warning_message
+    }, status=status.HTTP_200_OK)

@@ -62,4 +62,21 @@ urlpatterns = [
     path('management/global-rates/', views.global_rate_settings, name='global_rate_settings'),
     path('management/teachers/', views.teacher_list, name='management_teacher_list'),
     path('management/teachers/<int:pk>/', views.teacher_detail, name='management_teacher_detail'),
+
+    # Student management endpoints (full CRUD)
+    path('management/students/', views.management_students, name='management_students'),
+    path('management/students/<int:pk>/', views.management_student_detail, name='management_student_detail'),
+
+    # Billable contact endpoints
+    path('management/students/<int:student_id>/billable-contacts/', views.add_billable_contact, name='add_billable_contact'),
+    path('management/billable-contacts/<int:pk>/', views.manage_billable_contact, name='manage_billable_contact'),
+
+    # Teacher-student assignment endpoints
+    path('management/students/<int:student_id>/assign-teachers/', views.assign_teachers_to_student, name='assign_teachers_to_student'),
+    path('management/students/<int:student_id>/unassign-teacher/<int:teacher_id>/', views.unassign_teacher_from_student, name='unassign_teacher_from_student'),
+    path('management/teachers/<int:teacher_id>/students/', views.teacher_students, name='teacher_students'),
+
+    # Teacher management endpoints (update/delete only, no create)
+    path('management/teachers/<int:pk>/update/', views.management_update_teacher, name='management_update_teacher'),
+    path('management/teachers/<int:pk>/delete/', views.management_delete_teacher, name='management_delete_teacher'),
 ]
