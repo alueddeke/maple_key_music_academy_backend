@@ -231,12 +231,14 @@ class Lesson(models.Model):
         from decimal import Decimal
 
         # Auto detect if trial lesson/first time students
-        if not self.pk:
+        # Only auto-set to True if is_trial wasn't explicitly provided
+        if not self.pk and not hasattr(self, '_skip_trial_auto_detection'):
             if not self.student_has_completed_lesson(self.student):
-                # student has no completed lessons, making this a trial
-                # management can also explicitly set to false
+                # If is_trial is still the default False and student has no completed lessons,
+                # only auto-detect if the field wasn't explicitly set in object creation
+                # We check if _is_trial_explicitly_set was set by views.py
                 if not hasattr(self, '_is_trial_explicitly_set'):
-                    self.is_trial=True
+                    self.is_trial = True
 
         # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
         if not self.teacher_rate or not self.student_rate:
