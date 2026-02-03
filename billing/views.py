@@ -311,6 +311,9 @@ def submit_lessons_for_invoice(request):
                     missing_fields = []
                     incomplete_fields = {}
 
+                    # Handle both old 'state' and new 'province' field names for backward compatibility
+                    province_value = getattr(primary_contact, 'province', None) or getattr(primary_contact, 'state', None)
+
                     required_fields = {
                         'first_name': primary_contact.first_name,
                         'last_name': primary_contact.last_name,
@@ -318,7 +321,7 @@ def submit_lessons_for_invoice(request):
                         'phone': primary_contact.phone,
                         'street_address': primary_contact.street_address,
                         'city': primary_contact.city,
-                        'province': primary_contact.province,
+                        'province': province_value,
                         'postal_code': primary_contact.postal_code
                     }
 
@@ -392,19 +395,28 @@ def submit_lessons_for_invoice(request):
             # If student was just created, create a placeholder billable contact
             # Management must complete this information before approving the invoice
             if created:
-                BillableContact.objects.create(
-                    student=student,
-                    contact_type='parent',
-                    first_name='INCOMPLETE',
-                    last_name='INCOMPLETE',
-                    email=student_email or temp_email,
-                    phone='INCOMPLETE',
-                    street_address='INCOMPLETE - Please update in Student Management',
-                    city='INCOMPLETE',
-                    province='XX',
-                    postal_code='INCOMPLETE',
-                    is_primary=True
-                )
+                # Handle both old 'state' and new 'province' field names for backward compatibility
+                contact_data = {
+                    'student': student,
+                    'contact_type': 'parent',
+                    'first_name': 'INCOMPLETE',
+                    'last_name': 'INCOMPLETE',
+                    'email': student_email or temp_email,
+                    'phone': 'INCOMPLETE',
+                    'street_address': 'INCOMPLETE - Please update in Student Management',
+                    'city': 'INCOMPLETE',
+                    'postal_code': 'INCOMPLETE',
+                    'is_primary': True
+                }
+
+                # Detect which field name to use (province vs state) for backward compatibility
+                try:
+                    BillableContact._meta.get_field('province')
+                    contact_data['province'] = 'XX'
+                except:
+                    contact_data['state'] = 'XX'
+
+                BillableContact.objects.create(**contact_data)
             
             # Create lesson with dual-rate system
             lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
