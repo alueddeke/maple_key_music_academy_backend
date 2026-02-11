@@ -1,6 +1,7 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 from django.utils import timezone
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 class UserManager(BaseUserManager):
     
@@ -28,12 +29,80 @@ class UserManager(BaseUserManager):
         
         return self.create_user(email, password, **extra_fields)
 
+
+class School(models.Model): 
+    # 1. Basic Info
+    name = models.CharField(max_length=150)
+    # A subdomain is the 'maplekey' in 'maplekey.yourapp.com'
+    subdomain = models.SlugField(max_length=150, unique=True, help_text="Used for the URL")
+    # For images, we use ImageField (requires 'Pillow' library)
+    logo = models.ImageField(upload_to='school_logos/', null=True, blank=True)
+    primary_color = models.CharField(max_length=7, default="#000000", help_text="Hex color code")
+
+    # 2. Canadian Tax (Use Decimal for currency/tax, never Integer)
+    # max_digits=5, decimal_places=2 allows up to 999.99
+    hst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=13.00)
+    gst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=5.00)
+    pst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    tax_number = models.CharField(max_length=50, blank=True)
+
+    # 3. Billing & Policy
+    billing_cycle_day = models.PositiveIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(31)],
+        help_text="Day of the month (1-31)"
+    )
+    payment_terms_days = models.PositiveIntegerField(default=7)
+    cancellation_notice_hours = models.PositiveIntegerField(default=24)
+
+    # 4. Contact Info
+    email = models.EmailField(unique=True)
+    phone_number = models.CharField(max_length=20, blank=True)
+    street_address = models.CharField(max_length=255)
+    city = models.CharField(max_length=100)
+    province = models.CharField(max_length=2, default='ON')
+    postal_code = models.CharField(max_length=7)
+
+    # 5. Status & Timestamps
+    is_active = models.BooleanField(default=True)
+    # auto_now_add sets time ONLY when created. auto_now updates every time you save.
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+# labels this model using "name"
+    def __str__(self):
+        return self.name
+
+class SchoolSettings(models.Model):
+    # link to school model name
+    school = models.OneToOneField(School, on_delete=models.CASCADE, related_name='settings')
+    # rates
+    online_teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=45.00)
+    online_student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=60.00)
+    inperson_student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00)
+    # Deprecated field
+    invoice_recipient_email = models.EmailField(blank=True, null=True, help_text="DEPRECATED")
+    # tracking
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='school_settings_updates')
+    # history = HistoricalRecords()
+
+    @classmethod
+    def get_settings_for_school(cls, school):
+        """Get existing settings or create them with defaults"""
+        settings, created = cls.objects.get_or_create(school=school)
+        return settings
+    def __str__(self):
+        return f"Settings for {self.school.name}"
+
+
+
 class User(AbstractUser):
     USER_TYPES = [
         ('management', 'Management'),
         ('teacher', 'Teacher'), 
         ('student', 'Student'),
     ]
+
+    school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name='users')
     
     # Core fields
     user_type = models.CharField(max_length=20, choices=USER_TYPES)
@@ -231,7 +300,7 @@ class Lesson(models.Model):
         from decimal import Decimal
 
         # Auto detect if trial lesson/first time students
-        # Only auto-set to True if is_trial wasn't explicitly provided
+        # only run if lesson is being created for a student for the first time
         if not self.pk and not hasattr(self, '_skip_trial_auto_detection'):
             if not self.student_has_completed_lesson(self.student):
                 # If is_trial is still the default False and student has no completed lessons,
@@ -240,30 +309,34 @@ class Lesson(models.Model):
                 if not hasattr(self, '_is_trial_explicitly_set'):
                     self.is_trial = True
 
+
         # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
         if not self.teacher_rate or not self.student_rate:
-            # Get global rate settings
-            try:
-                global_rates = GlobalRateSettings.get_settings()
-            except:
-                # Fallback defaults if GlobalRateSettings doesn't exist yet
-                global_rates = None
+            # find school settings
+            settings = None
+            # try to get rates from teacher's school
+            if self.teacher and getattr(self.teacher, 'school', None):
+                settings = SchoolSettings.get_settings_for_school(self.teacher.school)
+
+            if not settings:
+                try:
+                    # using legacy rate settings
+                    settings = GlobalRateSettings.get_settings()
+                except:
+                    settings = None
 
             # Determine rates based on lesson type
             if self.lesson_type == 'online':
-                # Online lesson rates
-                self.teacher_rate = global_rates.online_teacher_rate if global_rates else Decimal('45.00')
-                base_student_rate = global_rates.online_student_rate if global_rates else Decimal('60.00')
+                # Use settings rates if found, legacy otherwise
+                self.teacher_rate = settings.online_teacher_rate if settings else  Decimal('45.00')
+                base_student_rate = settings.online_student_rate if settings else Decimal('60.00')
             else:
-                # In-person lesson rates
+                # In-person lesson rates, individual to teacher per school
                 self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                base_student_rate = global_rates.inperson_student_rate if global_rates else Decimal('100.00')
+                base_student_rate = settings.inperson_student_rate if settings else Decimal('100.00')
 
-            # Set student_rate: $0 for trial lessons, normal rate otherwise
-            if self.is_trial:
-                self.student_rate = Decimal('0.00')
-            else:
-                self.student_rate = base_student_rate
+            # if lesson is trial, student pays $0
+            self.student_rate = Decimal('0.00') if self.is_trial else base_student_rate
 
         # If lesson is marked as trial after rates were set, update student_rate to $0
         elif self.is_trial and self.student_rate != Decimal('0.00'):
@@ -277,6 +350,8 @@ class Lesson(models.Model):
     def __str__(self):
         trial_indicator = " [TRIAL]" if self.is_trial else ""
         return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}{trial_indicator}"
+    
+
 
 class Invoice(models.Model):
     INVOICE_TYPES = [
