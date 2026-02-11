@@ -2,6 +2,7 @@ from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
+from simple_history.models import HistoricalRecords
 
 class UserManager(BaseUserManager):
     
@@ -67,6 +68,10 @@ class School(models.Model):
     # auto_now_add sets time ONLY when created. auto_now updates every time you save.
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Audit logging
+    history = HistoricalRecords()
+
 # labels this model using "name"
     def __str__(self):
         return self.name
@@ -83,7 +88,9 @@ class SchoolSettings(models.Model):
     # tracking
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='school_settings_updates')
-    # history = HistoricalRecords()
+
+    # Audit logging
+    history = HistoricalRecords()
 
     @classmethod
     def get_settings_for_school(cls, school):
@@ -102,14 +109,21 @@ class User(AbstractUser):
         ('student', 'Student'),
     ]
 
-    school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name='users')
-    
+    school = models.ForeignKey(
+    School,
+    on_delete=models.PROTECT,
+    related_name='users',
+    null=True,  # Temporary during migration
+    blank=True,
+    help_text="School this user belongs to"
+)
+
     # Core fields
     user_type = models.CharField(max_length=20, choices=USER_TYPES)
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15, blank=True)
     address = models.TextField(blank=True)
-    
+
     # Remove the username field since we're using email
     username = None
     
@@ -139,10 +153,13 @@ class User(AbstractUser):
     # Override to use email as username
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name', 'user_type']
-    
+
     # Use our custom manager
     objects = UserManager()
-    
+
+    # Audit logging
+    history = HistoricalRecords()
+
     def save(self, *args, **kwargs):
         # Auto-approve management users
         if self.user_type == 'management':
@@ -167,6 +184,14 @@ class BillableContact(models.Model):
         ('self', 'Self'),
         ('other', 'Other'),
     ]
+    school = models.ForeignKey(
+    School,
+    on_delete=models.PROTECT,
+    related_name='billable_contacts',
+    null=True,  # Temporary during migration
+    blank=True,
+    help_text="School this billable contact belongs to"
+)
 
     # Relationships
     student = models.ForeignKey(
@@ -200,6 +225,9 @@ class BillableContact(models.Model):
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Audit logging
+    history = HistoricalRecords()
 
     class Meta:
         ordering = ['-is_primary', '-created_at']
@@ -235,6 +263,14 @@ class Lesson(models.Model):
         ('in_person', 'In Person'),
         ('online', 'Online'),
     ]
+    school = models.ForeignKey(
+    School,
+    on_delete=models.PROTECT,
+    related_name='lessons',
+    null=True,  # Temporary during migration
+    blank=True,
+    help_text="School this lesson belongs to"
+)
 
     # Updated foreign keys to use User
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_teaching',
@@ -250,15 +286,18 @@ class Lesson(models.Model):
     student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
-    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0) 
+    duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
 
     # Notes
     teacher_notes = models.TextField(blank=True)
     student_notes = models.TextField(blank=True)
-    
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Audit logging
+    history = HistoricalRecords()
     
     def total_cost(self):
         """Calculate total cost using teacher_rate (for teacher invoices)"""
@@ -408,6 +447,9 @@ class Invoice(models.Model):
                                       limit_choices_to={'user_type': 'management'})
     last_edited_at = models.DateTimeField(null=True, blank=True)
 
+    # Audit logging
+    history = HistoricalRecords()
+
     def calculate_payment_balance(self):
         from decimal import Decimal
         total = Decimal('0.00')
@@ -490,6 +532,9 @@ class ApprovedEmail(models.Model):
     approved_at = models.DateTimeField(auto_now_add=True)
     notes = models.TextField(blank=True, help_text="Optional notes about this pre-approval")
 
+    # Audit logging
+    history = HistoricalRecords()
+
     class Meta:
         ordering = ['-approved_at']
 
@@ -524,6 +569,9 @@ class UserRegistrationRequest(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True, help_text="Management notes about this request")
 
+    # Audit logging
+    history = HistoricalRecords()
+
     class Meta:
         ordering = ['-requested_at']
 
@@ -542,6 +590,9 @@ class InvitationToken(models.Model):
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True, blank=True)
     is_used = models.BooleanField(default=False)
+
+    # Audit logging
+    history = HistoricalRecords()
 
     class Meta:
         ordering = ['-created_at']
@@ -570,6 +621,9 @@ class SystemSettings(models.Model):
     )
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='settings_updates')
+
+    # Audit logging
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'System Settings'
@@ -626,6 +680,9 @@ class GlobalRateSettings(models.Model):
         related_name='rate_settings_updates'
     )
 
+    # Audit logging
+    history = HistoricalRecords()
+
     class Meta:
         verbose_name = 'Global Rate Settings'
         verbose_name_plural = 'Global Rate Settings'
@@ -663,6 +720,9 @@ class InvoiceRecipientEmail(models.Model):
         blank=True,
         related_name='created_recipient_emails'
     )
+
+    # Audit logging
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Invoice Recipient Email'

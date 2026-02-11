@@ -8,6 +8,7 @@ django-allauth==65.11.0
 django-cors-headers==4.7.0
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1
+django-simple-history==3.7.0
 idna==3.10
 pycparser==2.22
 PyJWT==2.10.1
