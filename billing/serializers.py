@@ -1,7 +1,11 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Sum, Q
-from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail, GlobalRateSettings, BillableContact
+from .models import (
+    Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings,
+    InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
+    School, SchoolSettings
+)
 
 User = get_user_model()
 
@@ -252,7 +256,7 @@ class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
 # Step 2: Dual-Rate System Serializers
 
 class GlobalRateSettingsSerializer(serializers.ModelSerializer):
-    """Serializer for global rate settings (singleton)"""
+    """Serializer for global rate settings (singleton) - DEPRECATED, use SchoolSettingsSerializer"""
     updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
 
     class Meta:
@@ -262,6 +266,22 @@ class GlobalRateSettingsSerializer(serializers.ModelSerializer):
             'updated_at', 'updated_by', 'updated_by_name'
         ]
         read_only_fields = ['id', 'updated_at', 'updated_by', 'updated_by_name']
+
+
+class SchoolSettingsSerializer(serializers.ModelSerializer):
+    """Serializer for school-specific settings"""
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
+
+    class Meta:
+        model = SchoolSettings
+        fields = [
+            'id', 'school', 'school_name',
+            'online_teacher_rate', 'online_student_rate', 'inperson_student_rate',
+            'invoice_recipient_email',  # DEPRECATED field
+            'updated_at', 'updated_by', 'updated_by_name'
+        ]
+        read_only_fields = ['id', 'school', 'school_name', 'updated_at', 'updated_by', 'updated_by_name']
 
 
 class TeacherListSerializer(serializers.ModelSerializer):

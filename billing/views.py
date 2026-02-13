@@ -1337,23 +1337,23 @@ def delete_invoice_recipient(request, pk):
 
 @api_view(['GET', 'PATCH'])
 @management_required
-def global_rate_settings(request):
+def school_settings(request):
     """
-    Get or update global rate settings (singleton).
+    Get or update school settings for the user's school.
     Management only.
     """
-    from .models import GlobalRateSettings
-    from .serializers import GlobalRateSettingsSerializer
+    from .models import SchoolSettings
+    from .serializers import SchoolSettingsSerializer
 
-    # Get or create the singleton settings instance
-    settings = GlobalRateSettings.get_settings()
+    # Get or create the school settings for user's school
+    settings = SchoolSettings.get_settings_for_school(request.user.school)
 
     if request.method == 'GET':
-        serializer = GlobalRateSettingsSerializer(settings)
+        serializer = SchoolSettingsSerializer(settings)
         return Response(serializer.data)
 
     elif request.method == 'PATCH':
-        serializer = GlobalRateSettingsSerializer(settings, data=request.data, partial=True)
+        serializer = SchoolSettingsSerializer(settings, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save(updated_by=request.user)
             return Response(serializer.data)
