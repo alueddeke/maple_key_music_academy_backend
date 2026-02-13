@@ -110,13 +110,11 @@ class User(AbstractUser):
     ]
 
     school = models.ForeignKey(
-    School,
-    on_delete=models.PROTECT,
-    related_name='users',
-    null=True,  # Temporary during migration
-    blank=True,
-    help_text="School this user belongs to"
-)
+        School,
+        on_delete=models.PROTECT,
+        related_name='users',
+        help_text="School this user belongs to"
+    )
 
     # Core fields
     user_type = models.CharField(max_length=20, choices=USER_TYPES)
@@ -185,13 +183,11 @@ class BillableContact(models.Model):
         ('other', 'Other'),
     ]
     school = models.ForeignKey(
-    School,
-    on_delete=models.PROTECT,
-    related_name='billable_contacts',
-    null=True,  # Temporary during migration
-    blank=True,
-    help_text="School this billable contact belongs to"
-)
+        School,
+        on_delete=models.PROTECT,
+        related_name='billable_contacts',
+        help_text="School this billable contact belongs to"
+    )
 
     # Relationships
     student = models.ForeignKey(
@@ -264,13 +260,11 @@ class Lesson(models.Model):
         ('online', 'Online'),
     ]
     school = models.ForeignKey(
-    School,
-    on_delete=models.PROTECT,
-    related_name='lessons',
-    null=True,  # Temporary during migration
-    blank=True,
-    help_text="School this lesson belongs to"
-)
+        School,
+        on_delete=models.PROTECT,
+        related_name='lessons',
+        help_text="School this lesson belongs to"
+    )
 
     # Updated foreign keys to use User
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_teaching',
@@ -350,7 +344,8 @@ class Lesson(models.Model):
 
 
         # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
-        if not self.teacher_rate or not self.student_rate:
+        # Only set rates for new lessons (pk is None) and if both rates are still at model defaults
+        if not self.pk and (self.teacher_rate == Decimal('50.00') and self.student_rate == Decimal('100.00')):
             # find school settings
             settings = None
             # try to get rates from teacher's school
@@ -367,7 +362,7 @@ class Lesson(models.Model):
             # Determine rates based on lesson type
             if self.lesson_type == 'online':
                 # Use settings rates if found, legacy otherwise
-                self.teacher_rate = settings.online_teacher_rate if settings else  Decimal('45.00')
+                self.teacher_rate = settings.online_teacher_rate if settings else Decimal('45.00')
                 base_student_rate = settings.online_student_rate if settings else Decimal('60.00')
             else:
                 # In-person lesson rates, individual to teacher per school
@@ -395,9 +390,9 @@ class Lesson(models.Model):
 class Invoice(models.Model):
     INVOICE_TYPES = [
         ('teacher_payment', 'Teacher Payment'),  # School pays teacher
-        ('student_billing', 'Student Billing'),  # Student pays school  
+        ('student_billing', 'Student Billing'),  # Student pays school
     ]
-    
+
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('pending', 'Pending'),
@@ -406,7 +401,14 @@ class Invoice(models.Model):
         ('rejected', 'Rejected'),
         ('overdue', 'Overdue')
     ]
-    
+
+    school = models.ForeignKey(
+        School,
+        on_delete=models.PROTECT,
+        related_name='invoices',
+        help_text="School this invoice belongs to"
+    )
+
     # Core fields
     invoice_number = models.CharField(max_length=50, unique=True, blank=True, null=True)
     invoice_type = models.CharField(max_length=20, choices=INVOICE_TYPES)
@@ -711,6 +713,12 @@ class GlobalRateSettings(models.Model):
 
 class InvoiceRecipientEmail(models.Model):
     """Email addresses that receive invoice PDFs when teachers submit"""
+    school = models.ForeignKey(
+        School,
+        on_delete=models.CASCADE,
+        related_name='invoice_recipient_emails',
+        help_text="School this invoice recipient belongs to"
+    )
     email = models.EmailField(unique=True, help_text='Recipient email address for invoice PDFs')
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
