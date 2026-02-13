@@ -30,7 +30,10 @@ def teacher_list(request):
     """Public teacher directory + management teacher creation"""
     if request.method == 'GET':
         # Public endpoint - show approved teachers only
+        # For authenticated users, filter by school; for public, show all (future: subdomain filtering)
         teachers = User.objects.filter(user_type='teacher', is_approved=True)
+        if request.user.is_authenticated and hasattr(request.user, 'school') and request.user.school:
+            teachers = teachers.filter(school=request.user.school)
         serializer = UserSerializer(teachers, many=True)
         return Response(serializer.data)
     
@@ -55,7 +58,7 @@ def teacher_list(request):
 @management_required
 def all_teachers(request):
     """Management endpoint to see all teachers (approved and pending)"""
-    teachers = User.objects.filter(user_type='teacher')
+    teachers = User.objects.filter(user_type='teacher', school=request.user.school)
     serializer = UserSerializer(teachers, many=True)
     return Response(serializer.data)
 
@@ -76,10 +79,10 @@ def approve_teacher(request, teacher_id):
 def student_list(request):
     """Students can see themselves, management can see all students"""
     if request.user.user_type == 'management':
-        students = User.objects.filter(user_type='student')
+        students = User.objects.filter(user_type='student', school=request.user.school)
     else:
         students = User.objects.filter(id=request.user.id)
-    
+
     serializer = UserSerializer(students, many=True)
     return Response(serializer.data)
 
@@ -91,10 +94,10 @@ def lesson_list(request):
     """List and create lessons"""
     if request.method == 'GET':
         if request.user.user_type == 'management':
-            lessons = Lesson.objects.all()
+            lessons = Lesson.objects.filter(school=request.user.school)
         else:  # teacher
-            lessons = Lesson.objects.filter(teacher=request.user)
-        
+            lessons = Lesson.objects.filter(teacher=request.user, school=request.user.school)
+
         serializer = LessonSerializer(lessons, many=True)
         return Response(serializer.data)
     
@@ -170,9 +173,16 @@ def teacher_invoice_list(request):
     """Teacher payment invoices"""
     if request.method == 'GET':
         if request.user.user_type == 'management':
-            invoices = Invoice.objects.filter(invoice_type='teacher_payment').order_by('-created_at')
+            invoices = Invoice.objects.filter(
+                invoice_type='teacher_payment',
+                school=request.user.school
+            ).order_by('-created_at')
         else:  # teacher
-            invoices = Invoice.objects.filter(invoice_type='teacher_payment', teacher=request.user).order_by('-created_at')
+            invoices = Invoice.objects.filter(
+                invoice_type='teacher_payment',
+                teacher=request.user,
+                school=request.user.school
+            ).order_by('-created_at')
 
         # Use DetailedInvoiceSerializer to include lesson details
         serializer = DetailedInvoiceSerializer(invoices, many=True)
@@ -199,28 +209,32 @@ def teacher_invoice_stats(request):
     """Get teacher's invoice statistics including rejected count"""
     teacher = request.user
 
-    # Get counts by status
+    # Get counts by status (school filtering implicit via teacher FK)
     pending_count = Invoice.objects.filter(
         invoice_type='teacher_payment',
         teacher=teacher,
+        school=teacher.school,
         status='pending'
     ).count()
 
     rejected_count = Invoice.objects.filter(
         invoice_type='teacher_payment',
         teacher=teacher,
+        school=teacher.school,
         status='rejected'
     ).count()
 
     approved_count = Invoice.objects.filter(
         invoice_type='teacher_payment',
         teacher=teacher,
+        school=teacher.school,
         status='approved'
     ).count()
 
     paid_count = Invoice.objects.filter(
         invoice_type='teacher_payment',
         teacher=teacher,
+        school=teacher.school,
         status='paid'
     ).count()
 
@@ -228,6 +242,7 @@ def teacher_invoice_stats(request):
     recent_rejected = Invoice.objects.filter(
         invoice_type='teacher_payment',
         teacher=teacher,
+        school=teacher.school,
         status='rejected'
     ).order_by('-rejected_at')[:5]
 
@@ -375,7 +390,8 @@ def submit_lessons_for_invoice(request):
                     defaults={
                         'first_name': student_name.split()[0] if student_name else '',
                         'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        'is_approved': True  # Auto-approve students created by teachers
+                        'is_approved': True,  # Auto-approve students created by teachers
+                        'school': request.user.school  # Auto-assign teacher's school
                     }
                 )
             else:
@@ -388,7 +404,8 @@ def submit_lessons_for_invoice(request):
                     defaults={
                         'first_name': student_name.split()[0] if student_name else '',
                         'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        'is_approved': True
+                        'is_approved': True,
+                        'school': request.user.school  # Auto-assign teacher's school
                     }
                 )
 
@@ -398,6 +415,7 @@ def submit_lessons_for_invoice(request):
                 # Handle both old 'state' and new 'province' field names for backward compatibility
                 contact_data = {
                     'student': student,
+                    'school': request.user.school,  # Auto-assign teacher's school
                     'contact_type': 'parent',
                     'first_name': 'INCOMPLETE',
                     'last_name': 'INCOMPLETE',
@@ -421,20 +439,32 @@ def submit_lessons_for_invoice(request):
             # Create lesson with dual-rate system
             lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
 
-            # Determine rates based on lesson type
-            from billing.models import GlobalRateSettings
+            # Determine rates based on lesson type using SchoolSettings
+            from billing.models import SchoolSettings
             from decimal import Decimal
 
-            global_rates = GlobalRateSettings.get_settings()
-
-            if lesson_type == 'online':
-                # Online lessons use global rates
-                teacher_rate = global_rates.online_teacher_rate
-                student_rate = global_rates.online_student_rate
-            else:
-                # In-person lessons: teacher gets their hourly_rate, student pays global in-person rate
-                teacher_rate = request.user.hourly_rate
-                student_rate = global_rates.inperson_student_rate
+            # Get rates from school settings (with fallback to legacy GlobalRateSettings if needed)
+            try:
+                school_settings = SchoolSettings.get_settings_for_school(request.user.school)
+                if lesson_type == 'online':
+                    # Online lessons use school rates
+                    teacher_rate = school_settings.online_teacher_rate
+                    student_rate = school_settings.online_student_rate
+                else:
+                    # In-person lessons: teacher gets their hourly_rate, student pays school in-person rate
+                    teacher_rate = request.user.hourly_rate
+                    student_rate = school_settings.inperson_student_rate
+            except Exception as e:
+                # Fallback to legacy GlobalRateSettings for backward compatibility
+                from billing.models import GlobalRateSettings
+                logger.warning(f"Failed to load SchoolSettings, falling back to GlobalRateSettings: {e}")
+                global_rates = GlobalRateSettings.get_settings()
+                if lesson_type == 'online':
+                    teacher_rate = global_rates.online_teacher_rate
+                    student_rate = global_rates.online_student_rate
+                else:
+                    teacher_rate = request.user.hourly_rate
+                    student_rate = global_rates.inperson_student_rate
 
 
             # Determine trial status
@@ -460,6 +490,7 @@ def submit_lessons_for_invoice(request):
             lesson = Lesson(
                 teacher=request.user,
                 student=student,
+                school=request.user.school,  # Auto-assign teacher's school
                 lesson_type=lesson_type,
                 is_trial=is_trial,
                 scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
@@ -484,6 +515,7 @@ def submit_lessons_for_invoice(request):
         invoice = Invoice.objects.create(
             invoice_type='teacher_payment',
             teacher=request.user,
+            school=request.user.school,  # Auto-assign teacher's school
             status='pending',  # Ready for management approval
             due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=14)),  # 2 weeks
             created_by=request.user,
@@ -515,6 +547,7 @@ def submit_lessons_for_invoice(request):
             student_invoice = Invoice.objects.create(
                 invoice_type='student_billing',
                 student=student,
+                school=request.user.school,  # Auto-assign teacher's school
                 status='pending',  # Waiting for student payment
                 due_date=timezone.now() + timezone.timedelta(days=14),  # 14 days payment term
                 created_by=request.user,
@@ -889,7 +922,7 @@ def management_all_users(request):
     user_type = request.GET.get('user_type')
     approval_status = request.GET.get('is_approved')
 
-    users = User.objects.all()
+    users = User.objects.filter(school=request.user.school)
 
     if user_type:
         users = users.filter(user_type=user_type)
@@ -1039,7 +1072,7 @@ def management_all_invoices(request):
     status_filter = request.GET.get('status')
     teacher_id = request.GET.get('teacher_id')
 
-    invoices = Invoice.objects.all().order_by('-created_at')  # Newest first
+    invoices = Invoice.objects.filter(school=request.user.school).order_by('-created_at')  # Newest first
 
     if invoice_type:
         invoices = invoices.filter(invoice_type=invoice_type)
@@ -1329,14 +1362,18 @@ def global_rate_settings(request):
 
 @api_view(['GET'])
 @management_required
-def teacher_list(request):
+def teacher_list_with_stats(request):
     """
     List all teachers with computed stats.
     Management only.
     """
     from .serializers import TeacherListSerializer
 
-    teachers = User.objects.filter(user_type='teacher', is_approved=True).order_by('last_name', 'first_name')
+    teachers = User.objects.filter(
+        user_type='teacher',
+        is_approved=True,
+        school=request.user.school
+    ).order_by('last_name', 'first_name')
     serializer = TeacherListSerializer(teachers, many=True)
     return Response(serializer.data)
 
@@ -1401,12 +1438,12 @@ def management_students(request):
     if request.method == 'GET':
         # Get all active students
         include_inactive = request.GET.get('include_inactive', 'false').lower() == 'true'
-        
+
         if include_inactive:
-            students = User.objects.filter(user_type='student')
+            students = User.objects.filter(user_type='student', school=request.user.school)
         else:
-            students = User.objects.filter(user_type='student', is_active=True)
-        
+            students = User.objects.filter(user_type='student', is_active=True, school=request.user.school)
+
         serializer = UserSerializer(students, many=True)
         return Response(serializer.data)
     
