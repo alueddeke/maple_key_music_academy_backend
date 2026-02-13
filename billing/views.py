@@ -1712,3 +1712,42 @@ def management_delete_teacher(request, pk):
         'message': 'Teacher deleted successfully',
         'warning': warning_message
     }, status=status.HTTP_200_OK)
+
+# ============================================================================
+# SCHOOL MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@api_view(['GET'])
+@management_required
+def get_current_school(request):
+    """Get current school details with stats (management only)"""
+    from .serializers import SchoolDetailSerializer
+    
+    school = request.user.school
+    if not school:
+        return Response({
+            'error': 'No school assigned to user'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    serializer = SchoolDetailSerializer(school)
+    return Response(serializer.data)
+
+
+@api_view(['PUT', 'PATCH'])
+@management_required
+def update_school(request):
+    """Update current school information (management only)"""
+    from .serializers import SchoolSerializer
+    
+    school = request.user.school
+    if not school:
+        return Response({
+            'error': 'No school assigned to user'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Partial update allowed
+    serializer = SchoolSerializer(school, data=request.data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

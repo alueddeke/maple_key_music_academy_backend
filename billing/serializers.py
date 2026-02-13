@@ -268,6 +268,77 @@ class GlobalRateSettingsSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'updated_at', 'updated_by', 'updated_by_name']
 
 
+class SchoolSerializer(serializers.ModelSerializer):
+    """Basic school serializer for school information"""
+
+    class Meta:
+        model = School
+        fields = [
+            'id', 'name', 'subdomain', 'logo', 'primary_color',
+            'hst_rate', 'gst_rate', 'pst_rate', 'tax_number',
+            'billing_cycle_day', 'payment_terms_days', 'cancellation_notice_hours',
+            'email', 'phone_number',
+            'street_address', 'city', 'province', 'postal_code',
+            'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class SchoolDetailSerializer(serializers.ModelSerializer):
+    """Detailed school serializer with computed stats"""
+    user_count = serializers.SerializerMethodField()
+    teacher_count = serializers.SerializerMethodField()
+    student_count = serializers.SerializerMethodField()
+    lesson_count = serializers.SerializerMethodField()
+    invoice_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = School
+        fields = [
+            'id', 'name', 'subdomain', 'logo', 'primary_color',
+            'hst_rate', 'gst_rate', 'pst_rate', 'tax_number',
+            'billing_cycle_day', 'payment_terms_days', 'cancellation_notice_hours',
+            'email', 'phone_number',
+            'street_address', 'city', 'province', 'postal_code',
+            'is_active', 'created_at', 'updated_at',
+            # Stats
+            'user_count', 'teacher_count', 'student_count', 'lesson_count', 'invoice_total'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_user_count(self, obj):
+        """Total users in this school"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.filter(school=obj).count()
+
+    def get_teacher_count(self, obj):
+        """Total teachers in this school"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.filter(school=obj, user_type='teacher').count()
+
+    def get_student_count(self, obj):
+        """Total students in this school"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.filter(school=obj, user_type='student').count()
+
+    def get_lesson_count(self, obj):
+        """Total lessons for this school"""
+        return Lesson.objects.filter(school=obj).count()
+
+    def get_invoice_total(self, obj):
+        """Total invoiced amount for teacher payments"""
+        from decimal import Decimal
+        total = Invoice.objects.filter(
+            school=obj,
+            invoice_type='teacher_payment',
+            status__in=['approved', 'paid']
+        ).aggregate(total=Sum('payment_balance'))['total']
+        return total or Decimal('0.00')
+
+
 class SchoolSettingsSerializer(serializers.ModelSerializer):
     """Serializer for school-specific settings"""
     updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)

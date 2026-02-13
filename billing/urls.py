@@ -58,10 +58,15 @@ urlpatterns = [
     path('management/invoice-recipients/add/', views.add_invoice_recipient, name='add_invoice_recipient'),
     path('management/invoice-recipients/<int:pk>/delete/', views.delete_invoice_recipient, name='delete_invoice_recipient'),
 
-    # Step 2: Dual-Rate System Management Endpoints
-    path('management/global-rates/', views.global_rate_settings, name='global_rate_settings'),
-    path('management/teachers/', views.teacher_list, name='management_teacher_list'),
+    # Step 2: Dual-Rate System Management Endpoints (DEPRECATED - use school endpoints)
+    path('management/global-rates/', views.school_settings, name='global_rate_settings'),  # DEPRECATED: redirects to school settings
+    path('management/teachers/', views.teacher_list_with_stats, name='management_teacher_list'),
     path('management/teachers/<int:pk>/', views.teacher_detail, name='management_teacher_detail'),
+
+    # Phase 5: School Management Endpoints
+    path('management/school/', views.get_current_school, name='get_current_school'),
+    path('management/school/update/', views.update_school, name='update_school'),
+    path('management/school/settings/', views.school_settings, name='school_settings'),
 
     # Student management endpoints (full CRUD)
     path('management/students/', views.management_students, name='management_students'),
