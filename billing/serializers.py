@@ -11,17 +11,18 @@ class BillableContactSerializer(serializers.ModelSerializer):
     """Serializer for billable contact information"""
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
     full_name = serializers.CharField(source='get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
         model = BillableContact
         fields = [
-            'id', 'student', 'contact_type', 'contact_type_display',
+            'id', 'student', 'school', 'school_name', 'contact_type', 'contact_type_display',
             'first_name', 'last_name', 'full_name',
             'email', 'phone',
             'street_address', 'city', 'province', 'postal_code',
             'is_primary', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'contact_type_display', 'full_name']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'contact_type_display', 'full_name', 'school_name']
 
     def validate(self, data):
         """Ensure at least one primary contact per student"""
@@ -47,6 +48,7 @@ class BillableContactSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
     assigned_teachers_data = serializers.SerializerMethodField()
     assigned_students_data = serializers.SerializerMethodField()
@@ -55,6 +57,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'user_type', 'user_type_display',
+            'school', 'school_name',
             'phone_number', 'address', 'is_approved', 'is_active',
             'bio', 'instruments', 'hourly_rate',
             'assigned_teachers', 'assigned_teachers_data',
@@ -63,7 +66,7 @@ class UserSerializer(serializers.ModelSerializer):
             'parent_email', 'parent_phone',  # DEPRECATED fields
             'date_joined', 'last_login', 'password'
         ]
-        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display']
+        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display', 'school_name']
         extra_kwargs = {'password': {'write_only': True}}
 
     def get_assigned_teachers_data(self, obj):
@@ -106,6 +109,7 @@ class UserSerializer(serializers.ModelSerializer):
 class LessonSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
     total_cost = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     student_cost = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     is_first_lesson = serializers.SerializerMethodField()
@@ -135,6 +139,7 @@ class LessonSerializer(serializers.ModelSerializer):
 class InvoiceSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
 
@@ -236,11 +241,12 @@ class SystemSettingsSerializer(serializers.ModelSerializer):
 class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
     """Serializer for invoice recipient emails"""
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
         model = InvoiceRecipientEmail
-        fields = ['id', 'email', 'created_at', 'created_by', 'created_by_name']
-        read_only_fields = ['id', 'created_at', 'created_by', 'created_by_name']
+        fields = ['id', 'school', 'school_name', 'email', 'created_at', 'created_by', 'created_by_name']
+        read_only_fields = ['id', 'created_at', 'created_by', 'created_by_name', 'school_name']
 
 
 # Step 2: Dual-Rate System Serializers
