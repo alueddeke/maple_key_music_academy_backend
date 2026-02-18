@@ -283,6 +283,32 @@ class Lesson(models.Model):
     duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
 
+    # Cancellation tracking
+    cancelled_by_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('teacher', 'Teacher Cancelled'),
+            ('student', 'Student Cancelled'),
+        ],
+        blank=True,
+        null=True,
+        help_text="Who cancelled the lesson (affects billing)"
+    )
+    cancellation_reason = models.TextField(
+        blank=True,
+        help_text="Optional reason for cancellation"
+    )
+
+    # Link to recurring schedule (if this lesson came from one)
+    recurring_schedule = models.ForeignKey(
+        'RecurringLessonsSchedule',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='generated_lessons',
+        help_text="The recurring schedule that generated this lesson"
+    )
+
     # Notes
     teacher_notes = models.TextField(blank=True)
     student_notes = models.TextField(blank=True)
@@ -398,8 +424,8 @@ class RecurringLessonsSchedule(models.Model):
     ]
 
     # Relationships
-    teacher = models.ForeignKey(User,on_delete=models.CASCADE, related_name='recurring_lesson_schedules', limit_choices_to={'user_type':'teacher'})
-    student = models.ForeignKey(User,on_delete=models.CASCADE, related_name='recurring_lesson_schedules', limit_choices_to={'user_type':'student'})
+    teacher = models.ForeignKey(User,on_delete=models.CASCADE, related_name='teaching_schedules', limit_choices_to={'user_type':'teacher'})
+    student = models.ForeignKey(User,on_delete=models.CASCADE, related_name='student_schedules', limit_choices_to={'user_type':'student'})
     school = models.ForeignKey('School',on_delete=models.PROTECT, related_name='recurring_lesson_schedules')
 
     # Schedule Details
@@ -628,6 +654,223 @@ class Invoice(models.Model):
             return f"Bill for {self.student.get_full_name()} - {self.payment_balance}"
 
 
+class MonthlyInvoiceBatch(models.Model):
+    """
+    Temporary container for invoices to live before management approval.
+    Represents teacher monthly invoice submission.
+    """
+
+    BATCH_STATUS = [
+        ('draft', 'Draft'),  # Teacher hasn't submitted yet
+        ('submitted', 'Submitted'),  # Waiting for management review
+        ('approved', 'Approved'),  # Management approved, Lesson records created
+        ('rejected', 'Rejected'),  # Management rejected
+    ]
+
+    # ID
+    batch_number = models.CharField(max_length=50, unique=True, blank=True)
+
+    # relationships
+    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='invoice_batches', limit_choices_to={'user_type': 'teacher'})
+    school = models.ForeignKey('School', on_delete=models.PROTECT, related_name='invoice_batches' )
+
+    # time period
+    month = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(12)])
+    year = models.IntegerField(validators=[MinValueValidator(2020)])
+    
+    # Status
+    status = models.CharField(max_length=20, choices=BATCH_STATUS, default='draft')
+
+    # Submission tracking
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    # approval/rejection
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_batches', limit_choices_to={'user_type':'management'})
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+
+    # linked invoice
+    invoice = models.ForeignKey(
+        Invoice, 
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='source_batch',
+        help_text='The teacher payment invoice created from this batch'
+    )
+
+    # tracking
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Audit Logging
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-year', 'month', 'created_at']
+        verbose_name = 'Monthly Invoice Batch'
+        verbose_name_plural = 'Monthly Invoice Batches'
+        # one batch per teacher per month
+        unique_together = ['teacher', 'month', 'year']
+
+    def generate_batch_number(self):
+        """Generate unique batch number: BATCH-YYYY-MM-TEACHER_ID-NNNN"""
+        if not self.batch_number:
+            
+            prefix = f"BATCH-{self.year}-{self.month:02d}-T{self.teacher.id}"
+            # find the "last one in db"
+            # find all batches starting with that prefix
+            # sort them by number, "-" means descending, newest first
+            # give me only the top one, most recent
+            last_batch = MonthlyInvoiceBatch.objects.filter(
+                batch_number__startswith=prefix
+            ).order_by('-batch_number').first()
+            if last_batch:
+                try:
+                    last_seq = int(last_batch.batch_number.split('-')[-1])
+                    new_seq = last_seq + 1
+                except (ValueError, IndexError):
+                    new_seq = 1
+            else:
+                new_seq = 1
+            self.batch_number = f"{prefix}-{new_seq:04d}"
+
+    def save(self, *args, **kwargs):
+        # auto gen batch number
+        self.generate_batch_number()
+
+        # autoset school from teacher
+        if not self.school_id and self.teacher:
+            self.school = self.teacher.school
+        # set submitted_at timestampe when status changes to submitted
+        if self.status == 'submitted' and not self.submitted_at:
+            self.submitted_at = timezone.now()
+        
+        # set reviewed_at when status changes to approved/rejected
+        if self.status in ['approved', 'rejected'] and not self.reviewed_at:
+            self.reviewed_at = timezone.now()
+        
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.batch_number} - {self.teacher.get_full_name()} - {self.year}-{self.month:02d} ({self.get_status_display()})"
+    
+    def get_scheduled_lessons_data(self):
+        """
+        Generate list of expected lessons for this month based on teacher's RecurringLessonsSchedule records.
+        Returns list of dicts - no actual lesson objects
+        """
+
+        schedules = self.teacher.teaching_schedules.filter(is_active=True, school=self.school)
+
+        lessons_data = []
+
+        for schedule in schedules:
+            # get dates this sched occurs in this month
+            dates = schedule.generate_lessons_for_month(self.year, self.month)
+
+            for lesson_date in dates:
+                lessons_data.append({                    
+                    'recurring_schedule': schedule,
+                    'scheduled_date': lesson_date,
+                    'start_time': schedule.start_time,
+                    'student': schedule.student,
+                    'teacher': schedule.teacher,
+                    'duration': schedule.duration,
+                    'lesson_type': schedule.lesson_type,
+                    'teacher_rate': schedule.teacher_rate,
+                    'student_rate': schedule.student_rate,
+                    # Default status (teacher can change via UI)
+                    'status': 'completed',
+                    'cancelled_by_type': None,
+                    'cancellation_reason': '',})
+        return lessons_data
+
+class BatchLessonItem(models.Model):
+    """
+    Individual lesson within a MonthlyInvoiceBatch. 
+    Stores lesson data before management approval.
+    Gets deleted after Lesson records are created on management approval
+    """
+    # parent batch
+    batch = models.ForeignKey(MonthlyInvoiceBatch, on_delete=models.CASCADE, related_name='lesson_items')
+
+    # lesson details (duplicates the Lesson model fields)
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+', limit_choices_to={'user_type':'student'})
+    scheduled_date = models.DateField()
+    start_time = models.TimeField()
+    duration = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
+    lesson_type = models.CharField(max_length=20, choices=Lesson.LESSON_TYPES)
+
+    # Rates (locked from recurring schedule or entered manually)
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2)
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2)
+
+    # status (teacher marks this)
+    status = models.CharField(max_length=20, choices=Lesson.LESSON_STATUS, default='completed')
+    cancelled_by_type = models.CharField(max_length=20, choices=[('teacher', 'Teacher'), ('student', 'Student')], blank=True, null=True)
+    cancellation_reason = models.TextField(blank=True)
+
+    # Notes
+    teacher_notes = models.TextField(blank=True)
+
+    # link to recurring sched (if from schedule)
+    recurring_schedule = models.ForeignKey(
+        RecurringLessonsSchedule,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+'
+    )
+
+    # One-off lesson flag
+    is_one_off = models.BooleanField(
+        default=False,
+        help_text="True if teacher added this manually (not from recurring schedule)"
+    )
+
+    # Created lesson (after approval)
+    created_lesson = models.ForeignKey(
+        Lesson,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        help_text="Actual Lesson record created when batch was approved"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['scheduled_date', 'start_time']
+        verbose_name = 'Batch Lesson Item'
+        verbose_name_plural = 'Batch Lesson Items'
+
+    def __str__(self):
+        return f"{self.batch.batch_number} | {self.scheduled_date} | {self.student.get_full_name()}"
+
+    def calculate_teacher_payment(self):
+        """Calculate what teacher gets paid for this lesson"""
+        from decimal import Decimal
+
+        # If teacher cancelled, they don't get paid
+        if self.status == 'cancelled' and self.cancelled_by_type == 'teacher':
+            return Decimal('0.00')
+
+        # Otherwise, pay teacher_rate × duration
+        return self.teacher_rate * self.duration
+
+    def calculate_student_charge(self):
+        """Calculate what student is billed for this lesson"""
+        from decimal import Decimal
+
+        # If cancelled (by anyone), student not charged
+        if self.status == 'cancelled':
+            return Decimal('0.00')
+
+        # If completed, charge student_rate × duration
+        return self.student_rate * self.duration
+    
 class ApprovedEmail(models.Model):
     """Pre-approved email addresses that can register without management review"""
     email = models.EmailField(unique=True)
