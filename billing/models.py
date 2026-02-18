@@ -385,7 +385,109 @@ class Lesson(models.Model):
         trial_indicator = " [TRIAL]" if self.is_trial else ""
         return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}{trial_indicator}"
     
+class RecurringLessonsSchedule(models.Model):
+    """Weekly recurring lesson schedule for teacher-student pairs"""
+    DAYS_OF_WEEK = [
+        (0, 'Monday'),
+        (1, 'Tuesday'),
+        (2, 'Wednesday'),
+        (3, 'Thursday'),
+        (4, 'Friday'),
+        (5, 'Saturday'),
+        (6, 'Sunday'),
+    ]
 
+    # Relationships
+    teacher = models.ForeignKey(User,on_delete=models.CASCADE, related_name='recurring_lesson_schedules', limit_choices_to={'user_type':'teacher'})
+    student = models.ForeignKey(User,on_delete=models.CASCADE, related_name='recurring_lesson_schedules', limit_choices_to={'user_type':'student'})
+    school = models.ForeignKey('School',on_delete=models.PROTECT, related_name='recurring_lesson_schedules')
+
+    # Schedule Details
+    day_of_week = models.IntegerField(choices=DAYS_OF_WEEK) 
+    start_time = models.TimeField(help_text="Lesson start time (eg. 15:00)")
+    duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0, help_text="Duration in hours")
+
+    # Lesson Type
+    lesson_type = models.CharField(max_length=20, choices=Lesson.LESSON_TYPES, default='in_person')
+
+    #Rates (locked at schedule creation like the lesson)
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2)
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2)
+
+    # Active Status
+    is_active = models.BooleanField(default=True, help_text="Set to False to pause/end this recurring schedule")
+    start_date = models.DateField(help_text="When this recurring schedule begins")
+    end_date = models.DateField(null=True, blank=True, help_text="Optional end date to track")
+
+    # Tracking
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_schedules' )
+
+    # audit logging
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['day_of_week', 'start_time']
+        verbose_name = 'Recurring Lesson Schedule'
+        verbose_name_plural = 'Recurring Lesson Schedules'
+        # prevent duplicate schedules
+        unique_together = ['teacher', 'student', 'day_of_week', 'start_time']
+
+    def save(self, *args, **kwargs):
+        """auto-set rates and school if not provided"""
+        from decimal import Decimal
+
+        #autoset school from teacher
+        if not self.school_id and self.teacher:
+            self.school = self.teacher.school
+        # autoset rates if not provided (rate locking)
+        if self.teacher_rate is None or self.student_rate is None:
+            settings = SchoolSettings.get_settings_for_school(self.school)
+
+            if self.lesson_type == 'online':
+                self.teacher_rate = settings.online_teacher_rate
+                self.student_rate = settings.online_student_rate
+            else:
+                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
+                self.student_rate = settings.inperson_student_rate
+            
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.teacher.get_full_name()} → {self.student.get_full_name()} | {self.get_day_of_week_display()} {self.start_time}"
+    
+    def generate_lessons_for_month(self, year, month):
+        """
+        Calculate which dates this schedule would occur in given month.
+        Return list of date objects(does NOT create the lesson records).
+        Example: "every monday", returns all mondays in that month
+        """
+        import calendar 
+        from datetime import date, timedelta
+
+        if not self.is_active:
+            return []
+        #get all days in month
+        num_days = calendar.monthrange(year, month)[1]
+        month_start = date(year, month, 1)
+        month_end = date(year, month, num_days)
+
+        # Jump directly to first occurrence of day_of_week in this month
+        # weekday() returns 0=Monday...6=Sunday, same as DAYS_OF_WEEK
+        days_until_target = (self.day_of_week - month_start.weekday()) % 7
+        first_occurrence = month_start + timedelta(days=days_until_target)
+
+        lesson_dates = []
+        current_date = first_occurrence
+
+        while current_date <= month_end:
+            if current_date >= self.start_date:
+                if self.end_date is None or current_date <= self.end_date:
+                    lesson_dates.append(current_date)
+            current_date += timedelta(days=7)
+
+        return lesson_dates
 
 class Invoice(models.Model):
     INVOICE_TYPES = [
