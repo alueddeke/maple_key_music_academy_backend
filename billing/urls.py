@@ -84,4 +84,16 @@ urlpatterns = [
     # Teacher management endpoints (update/delete only, no create)
     path('management/teachers/<int:pk>/update/', views.management_update_teacher, name='management_update_teacher'),
     path('management/teachers/<int:pk>/delete/', views.management_delete_teacher, name='management_delete_teacher'),
+
+    # Monthly Invoice Batches (Teacher Workflow) - Phase 3
+    path('teacher/batches/', views.teacher_monthly_batches, name='teacher_monthly_batches'),
+    path('teacher/batches/<int:batch_id>/', views.batch_detail, name='batch_detail'),
+    path('teacher/batches/<int:batch_id>/add-lesson/', views.batch_add_lesson, name='batch_add_lesson'),
+    path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
+    path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
+
+    # Management Batch Approval (Phase 4)
+    path('management/batches/pending/', views.management_pending_batches, name='management_pending_batches'),
+    path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
+    path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
 ]
