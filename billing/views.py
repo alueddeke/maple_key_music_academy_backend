@@ -5,7 +5,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem
+from .models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
 from .serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
@@ -23,6 +23,62 @@ logger = logging.getLogger(__name__)
 #run when url endpoints are hit
 
 User = get_user_model()
+
+
+# HELPER FUNCTIONS
+
+def validate_batch_billable_contacts(batch):
+    """
+    Validate that all students in the batch have complete billable contact information.
+
+    Returns:
+        List of error dicts if validation fails, None if all valid.
+        Each error dict: {
+            'student_id': int,
+            'student_name': str,
+            'missing_fields': list of str
+        }
+    """
+    errors = []
+
+    # Get unique students from batch lesson items
+    students = set(item.student for item in batch.lesson_items.all())
+
+    required_fields = [
+        'first_name', 'last_name', 'email', 'phone',
+        'street_address', 'city', 'province', 'postal_code'
+    ]
+
+    for student in students:
+        # Get primary billable contact
+        try:
+            primary_contact = student.billable_contacts.get(is_primary=True)
+        except BillableContact.DoesNotExist:
+            errors.append({
+                'student_id': student.id,
+                'student_name': student.get_full_name(),
+                'missing_fields': ['primary_billable_contact'],
+                'message': f'{student.get_full_name()} has no primary billable contact'
+            })
+            continue
+
+        # Check for missing/empty required fields
+        missing_fields = []
+        for field in required_fields:
+            value = getattr(primary_contact, field, None)
+            if not value or (isinstance(value, str) and not value.strip()):
+                missing_fields.append(field)
+
+        if missing_fields:
+            errors.append({
+                'student_id': student.id,
+                'student_name': student.get_full_name(),
+                'missing_fields': missing_fields,
+                'message': f'{student.get_full_name()} is missing: {", ".join(missing_fields)}'
+            })
+
+    return errors if errors else None
+
 
 # USER MANAGEMENT ENDPOINTS
 
@@ -1757,6 +1813,20 @@ def update_school(request):
 # MONTHLY INVOICE BATCH ENDPOINTS (Teacher Workflow)
 # ============================================================================
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def teacher_assigned_students(request):
+    """Get all students assigned to the current teacher (teacher-only endpoint)"""
+    if request.user.user_type != 'teacher':
+        return Response({'error': 'Teacher access required'}, status=status.HTTP_403_FORBIDDEN)
+
+    # Get active students assigned to this teacher
+    students = request.user.assigned_students.filter(is_active=True)
+    serializer = UserSerializer(students, many=True)
+
+    return Response(serializer.data)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def teacher_monthly_batches(request):
@@ -2009,17 +2079,132 @@ def management_pending_batches(request):
     return Response(serializer.data)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_approved_batches(request):
+    """List all approved batches"""
+    batches = MonthlyInvoiceBatch.objects.filter(
+        status='approved',
+        school=request.user.school
+    ).order_by('-reviewed_at')
+
+    serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_rejected_batches(request):
+    """List all rejected batches"""
+    batches = MonthlyInvoiceBatch.objects.filter(
+        status='draft',
+        rejection_reason__isnull=False,  # Has rejection reason = was rejected
+        school=request.user.school
+    ).order_by('-reviewed_at')
+
+    serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_batch_detail(request, batch_id):
+    """
+    Get batch detail with validation checks.
+    Returns batch data plus validation errors if students have incomplete billable contacts.
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Validate billable contacts for all students in this batch
+    validation_errors = validate_batch_billable_contacts(batch)
+
+    # Serialize batch data
+    serializer = MonthlyInvoiceBatchSerializer(batch)
+    response_data = serializer.data
+
+    # Add validation errors if any
+    if validation_errors:
+        response_data['validation_errors'] = validation_errors
+        response_data['can_approve'] = False
+    else:
+        response_data['can_approve'] = batch.status == 'submitted'
+
+    return Response(response_data)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_edit_lesson_notes(request, batch_id, item_id):
+    """
+    Edit teacher notes for a specific lesson item in a batch.
+    Management can fix minor typos before approving.
+    Only allowed for batches in 'submitted' status.
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'submitted':
+        return Response(
+            {'error': 'Can only edit notes for batches in submitted status'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        lesson_item = batch.lesson_items.get(id=item_id)
+    except BatchLessonItem.DoesNotExist:
+        return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Only allow editing teacher_notes and cancellation_reason
+    allowed_fields = ['teacher_notes', 'cancellation_reason']
+    updated = False
+
+    for field in allowed_fields:
+        if field in request.data:
+            setattr(lesson_item, field, request.data[field])
+            updated = True
+
+    if updated:
+        lesson_item.save()
+
+    serializer = BatchLessonItemSerializer(lesson_item)
+    return Response(serializer.data)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @management_required
 def management_approve_batch(request, batch_id):
     """
-    Approve batch:
-    1. Create Lesson records from BatchLessonItems
-    2. Create teacher payment Invoice
-    3. Create student billing Invoices
-    4. Mark batch as approved
+    Approve batch and generate Helcim CSV (atomic operation).
+
+    Steps:
+    1. Validate all students have complete billable contact data
+    2. Generate StudentInvoice records for each student (completed lessons only)
+    3. Mark batch as approved
+    4. Generate and return Helcim CSV file
+
+    If any step fails, entire transaction is rolled back.
     """
+    from django.db import transaction
+    from .models import StudentInvoice, SchoolSettings
+    from .services.helcim_csv_generator import generate_helcim_csv
+    from collections import defaultdict
+
     try:
         batch = MonthlyInvoiceBatch.objects.get(
             id=batch_id,
@@ -2034,91 +2219,84 @@ def management_approve_batch(request, batch_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Start transaction
-    from django.db import transaction
-    from datetime import datetime
-    from collections import defaultdict
+    # VALIDATION PHASE: Check billable contacts before starting transaction
+    validation_errors = validate_batch_billable_contacts(batch)
+    if validation_errors:
+        return Response(
+            {
+                'error': 'Cannot approve batch - incomplete student data',
+                'validation_errors': validation_errors
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Get school settings for payment terms
+    school_settings = SchoolSettings.get_settings_for_school(batch.school)
 
     try:
         with transaction.atomic():
-            # 1. Create Lesson records
-            created_lessons = []
+            # Group completed lesson items by student (exclude cancelled)
+            completed_items_by_student = defaultdict(list)
 
-            for item in batch.lesson_items.all():
-                # Combine date + time
-                scheduled_datetime = datetime.combine(
-                    item.scheduled_date,
-                    item.start_time
-                )
+            for item in batch.lesson_items.filter(status='completed'):
+                completed_items_by_student[item.student].append(item)
 
-                lesson = Lesson.objects.create(
-                    teacher=batch.teacher,
-                    student=item.student,
-                    school=batch.school,
-                    lesson_type=item.lesson_type,
-                    scheduled_date=scheduled_datetime,
-                    duration=item.duration,
-                    teacher_rate=item.teacher_rate,
-                    student_rate=item.student_rate,
-                    status=item.status,
-                    cancelled_by_type=item.cancelled_by_type,
-                    cancellation_reason=item.cancellation_reason,
-                    teacher_notes=item.teacher_notes,
-                    recurring_schedule=item.recurring_schedule,
-                    completed_date=timezone.now() if item.status == 'completed' else None
-                )
+            if not completed_items_by_student:
+                raise ValueError('No completed lessons in batch')
 
-                # Link back
-                item.created_lesson = lesson
-                item.save()
+            # Create StudentInvoice for each student
+            student_invoices = []
 
-                created_lessons.append(lesson)
+            for student, lesson_items in completed_items_by_student.items():
+                # Get primary billable contact
+                primary_contact = student.billable_contacts.get(is_primary=True)
 
-            # 2. Create teacher payment invoice
-            teacher_invoice = Invoice.objects.create(
-                invoice_type='teacher_payment',
-                teacher=batch.teacher,
-                school=batch.school,
-                status='pending',
-                created_by=request.user
-            )
-
-            # Add lessons to invoice
-            teacher_invoice.lessons.set(created_lessons)
-            teacher_invoice.save()  # Triggers payment_balance calculation
-
-            # 3. Create student billing invoices
-            lessons_by_student = defaultdict(list)
-
-            for lesson in created_lessons:
-                lessons_by_student[lesson.student].append(lesson)
-
-            for student, student_lessons in lessons_by_student.items():
-                student_invoice = Invoice.objects.create(
-                    invoice_type='student_billing',
+                # Create student invoice
+                student_invoice = StudentInvoice(
+                    batch=batch,
                     student=student,
                     school=batch.school,
-                    status='pending',
-                    created_by=request.user
+                    amount=0,  # Will be calculated after adding lesson items
+
+                    # Cache billable contact data
+                    billing_contact_name=f"{primary_contact.first_name} {primary_contact.last_name}",
+                    billing_email=primary_contact.email,
+                    billing_phone=primary_contact.phone,
+                    billing_street_address=primary_contact.street_address,
+                    billing_city=primary_contact.city,
+                    billing_province=primary_contact.province,
+                    billing_postal_code=primary_contact.postal_code,
                 )
-                student_invoice.lessons.set(student_lessons)
+                student_invoice.save()  # Save to get ID for M2M relationship
+
+                # Add lesson items to invoice
+                student_invoice.lesson_items.set(lesson_items)
+
+                # Calculate total amount
+                student_invoice.amount = student_invoice.calculate_amount()
                 student_invoice.save()
 
-            # 4. Mark batch as approved
+                student_invoices.append(student_invoice)
+
+            # Mark batch as approved
             batch.status = 'approved'
             batch.reviewed_by = request.user
             batch.reviewed_at = timezone.now()
-            batch.invoice = teacher_invoice
             batch.save()
 
+            # Generate CSV (this returns HttpResponse)
+            csv_response = generate_helcim_csv(student_invoices, school_settings)
+
+            # Return CSV file directly
+            return csv_response
+
     except Exception as e:
+        # Transaction will auto-rollback on exception
+        logger.error(f'Batch approval failed: {str(e)}')
         return Response(
             {'error': f'Approval failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-    serializer = MonthlyInvoiceBatchSerializer(batch)
-    return Response(serializer.data)
 
 
 @api_view(['POST'])
@@ -2147,13 +2325,14 @@ def management_reject_batch(request, batch_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    batch.status = 'rejected'
+    # Set batch back to draft so teacher can edit and resubmit
+    batch.status = 'draft'
     batch.reviewed_by = request.user
     batch.reviewed_at = timezone.now()
     batch.rejection_reason = rejection_reason
     batch.save()
 
-    # TODO: Send email notification to teacher (Phase 5)
+    # TODO: Send email notification to teacher (future phase)
 
     serializer = MonthlyInvoiceBatchSerializer(batch)
     return Response(serializer.data)

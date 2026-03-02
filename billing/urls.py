@@ -85,6 +85,9 @@ urlpatterns = [
     path('management/teachers/<int:pk>/update/', views.management_update_teacher, name='management_update_teacher'),
     path('management/teachers/<int:pk>/delete/', views.management_delete_teacher, name='management_delete_teacher'),
 
+    # Teacher-specific endpoints
+    path('teacher/students/', views.teacher_assigned_students, name='teacher_assigned_students'),
+
     # Monthly Invoice Batches (Teacher Workflow) - Phase 3
     path('teacher/batches/', views.teacher_monthly_batches, name='teacher_monthly_batches'),
     path('teacher/batches/<int:batch_id>/', views.batch_detail, name='batch_detail'),
@@ -92,8 +95,12 @@ urlpatterns = [
     path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
     path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
 
-    # Management Batch Approval (Phase 4)
+    # Management Batch Approval (Phase 7)
     path('management/batches/pending/', views.management_pending_batches, name='management_pending_batches'),
+    path('management/batches/approved/', views.management_approved_batches, name='management_approved_batches'),
+    path('management/batches/rejected/', views.management_rejected_batches, name='management_rejected_batches'),
+    path('management/batches/<int:batch_id>/', views.management_batch_detail, name='management_batch_detail'),
+    path('management/batches/<int:batch_id>/lessons/<int:item_id>/', views.management_edit_lesson_notes, name='management_edit_lesson_notes'),
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
 ]

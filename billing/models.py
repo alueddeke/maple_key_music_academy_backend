@@ -85,6 +85,11 @@ class SchoolSettings(models.Model):
     inperson_student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00)
     # Deprecated field
     invoice_recipient_email = models.EmailField(blank=True, null=True, help_text="DEPRECATED")
+
+    # Payment terms for Helcim CSV export
+    payment_terms = models.CharField(max_length=50, default="Due in 15 days", help_text="Default payment terms for student invoices")
+    management_notification_email = models.EmailField(blank=True, help_text="Email for management notifications (future use)")
+
     # tracking
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='school_settings_updates')
@@ -870,7 +875,118 @@ class BatchLessonItem(models.Model):
 
         # If completed, charge student_rate × duration
         return self.student_rate * self.duration
-    
+
+
+class StudentInvoice(models.Model):
+    """
+    Student invoice generated when management approves a batch.
+    One invoice per student per batch, containing all completed lessons for that student.
+    Used to generate Helcim CSV for student billing.
+    """
+    # Parent batch
+    batch = models.ForeignKey(
+        MonthlyInvoiceBatch,
+        on_delete=models.CASCADE,
+        related_name='student_invoices',
+        help_text="The batch this invoice was generated from"
+    )
+
+    # Student
+    student = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='helcim_invoices',
+        limit_choices_to={'user_type': 'student'},
+        help_text="Student this invoice is for"
+    )
+
+    # School
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='student_invoices'
+    )
+
+    # Invoice number: INV-YYYY-MM-S{student_id}-NNNN
+    invoice_number = models.CharField(max_length=50, unique=True)
+
+    # Total amount to charge student (sum of all completed lesson charges)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    # Lesson items included in this invoice (completed lessons only)
+    lesson_items = models.ManyToManyField(
+        BatchLessonItem,
+        related_name='student_invoice',
+        help_text="Completed lessons included in this invoice"
+    )
+
+    # Cached billable contact data (from student's primary contact at generation time)
+    # This ensures invoice data doesn't change if student updates their contact info later
+    billing_contact_name = models.CharField(max_length=200)
+    billing_email = models.EmailField()
+    billing_phone = models.CharField(max_length=20)
+    billing_street_address = models.CharField(max_length=200)
+    billing_city = models.CharField(max_length=100)
+    billing_province = models.CharField(max_length=2)  # 2-letter province code
+    billing_postal_code = models.CharField(max_length=10)
+
+    # Timestamps
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    # Audit logging
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-generated_at']
+        verbose_name = 'Student Invoice'
+        verbose_name_plural = 'Student Invoices'
+        # One invoice per student per batch
+        unique_together = ['batch', 'student']
+
+    def __str__(self):
+        return f"{self.invoice_number} - {self.student.get_full_name()} - ${self.amount}"
+
+    def generate_invoice_number(self):
+        """Generate unique invoice number: INV-YYYY-MM-S{student_id}-NNNN"""
+        if not self.invoice_number:
+            prefix = f"INV-{self.batch.year}-{self.batch.month:02d}-S{self.student.id}"
+
+            # Find the last invoice with this prefix
+            last_invoice = StudentInvoice.objects.filter(
+                invoice_number__startswith=prefix
+            ).order_by('-invoice_number').first()
+
+            if last_invoice:
+                try:
+                    last_seq = int(last_invoice.invoice_number.split('-')[-1])
+                    new_seq = last_seq + 1
+                except (ValueError, IndexError):
+                    new_seq = 1
+            else:
+                new_seq = 1
+
+            self.invoice_number = f"{prefix}-{new_seq:04d}"
+
+    def calculate_amount(self):
+        """Calculate total amount from all associated lesson items"""
+        from decimal import Decimal
+        total = sum(
+            item.calculate_student_charge()
+            for item in self.lesson_items.all()
+        ) or Decimal('0.00')
+        return total
+
+    def save(self, *args, **kwargs):
+        # Auto-generate invoice number
+        self.generate_invoice_number()
+
+        # Auto-set school from student if not set
+        if not self.school_id and self.student:
+            self.school = self.student.school
+
+        super().save(*args, **kwargs)
+
+
 class ApprovedEmail(models.Model):
     """Pre-approved email addresses that can register without management review"""
     email = models.EmailField(unique=True)
