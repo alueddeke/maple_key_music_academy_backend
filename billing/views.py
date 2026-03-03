@@ -1574,10 +1574,11 @@ def add_billable_contact(request, student_id):
         student = User.objects.get(pk=student_id, user_type='student', is_active=True)
     except User.DoesNotExist:
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
-    
+
     data = request.data.copy()
     data['student'] = student.id
-    
+    data['school'] = student.school.id  # Set school from student
+
     serializer = BillableContactSerializer(data=data)
     if serializer.is_valid():
         serializer.save()
