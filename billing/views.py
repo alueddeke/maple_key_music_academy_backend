@@ -2075,6 +2075,18 @@ def batch_add_lesson(request, batch_id):
     data = request.data.copy()
     data['is_one_off'] = True
 
+    # Auto-populate rates based on lesson type if not provided
+    if 'teacher_rate' not in data or 'student_rate' not in data:
+        lesson_type = data.get('lesson_type', 'in_person')
+        global_rates = GlobalRateSettings.get_rates()
+
+        if lesson_type == 'online':
+            data['teacher_rate'] = global_rates['online_teacher_rate']
+            data['student_rate'] = global_rates['online_student_rate']
+        else:  # in_person
+            data['teacher_rate'] = request.user.hourly_rate or global_rates['online_teacher_rate']
+            data['student_rate'] = global_rates['inperson_student_rate']
+
     serializer = BatchLessonItemSerializer(data=data)
     if serializer.is_valid():
         serializer.save(batch=batch)
