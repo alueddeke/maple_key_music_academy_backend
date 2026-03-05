@@ -766,7 +766,11 @@ class MonthlyInvoiceBatch(models.Model):
         Returns list of dicts - no actual lesson objects
         """
 
-        schedules = self.teacher.teaching_schedules.filter(is_active=True, school=self.school)
+        schedules = self.teacher.teaching_schedules.filter(
+            is_active=True,
+            school=self.school,
+            student__is_active=True  # Only include schedules for active students
+        )
 
         lessons_data = []
 
@@ -858,8 +862,9 @@ class BatchLessonItem(models.Model):
         """Calculate what teacher gets paid for this lesson"""
         from decimal import Decimal
 
-        # If teacher cancelled, they don't get paid
-        if self.status == 'cancelled' and self.cancelled_by_type == 'teacher':
+        # If cancelled by anyone (teacher or student), teacher doesn't get paid
+        # Future: may add cancellation policy where teacher gets paid for student cancellations
+        if self.status == 'cancelled':
             return Decimal('0.00')
 
         # Otherwise, pay teacher_rate × duration

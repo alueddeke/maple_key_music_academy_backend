@@ -76,6 +76,10 @@ urlpatterns = [
     path('management/students/<int:student_id>/billable-contacts/', views.add_billable_contact, name='add_billable_contact'),
     path('management/billable-contacts/<int:pk>/', views.manage_billable_contact, name='manage_billable_contact'),
 
+    # Recurring lesson schedule endpoints
+    path('management/students/<int:student_id>/schedules/', views.student_recurring_schedules, name='student_recurring_schedules'),
+    path('management/students/<int:student_id>/schedules/<int:schedule_id>/', views.recurring_schedule_detail, name='recurring_schedule_detail'),
+
     # Teacher-student assignment endpoints
     path('management/students/<int:student_id>/assign-teachers/', views.assign_teachers_to_student, name='assign_teachers_to_student'),
     path('management/students/<int:student_id>/unassign-teacher/<int:teacher_id>/', views.unassign_teacher_from_student, name='unassign_teacher_from_student'),

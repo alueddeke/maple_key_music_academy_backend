@@ -5,11 +5,11 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
+from .models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule
 from .serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
-    MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer
+    MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer
 )
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
@@ -1506,7 +1506,7 @@ def management_students(request):
     
     elif request.method == 'POST':
         # Create student with billing contact
-        serializer = StudentCreateSerializer(data=request.data)
+        serializer = StudentCreateSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             student = serializer.save()
             return Response(
@@ -1630,6 +1630,92 @@ def manage_billable_contact(request, pk):
         contact.delete()
         return Response({
             'message': 'Billing contact deleted successfully'
+        }, status=status.HTTP_200_OK)
+
+
+# ============================================================================
+# RECURRING LESSON SCHEDULE ENDPOINTS
+# ============================================================================
+
+@api_view(['GET', 'POST'])
+@management_required
+def student_recurring_schedules(request, student_id):
+    """List or create recurring schedules for a student"""
+    try:
+        student = User.objects.get(pk=student_id, user_type='student', is_active=True, school=request.user.school)
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        # List all recurring schedules for this student
+        schedules = RecurringLessonsSchedule.objects.filter(
+            student=student,
+            school=request.user.school
+        ).order_by('day_of_week', 'start_time')
+
+        serializer = RecurringScheduleSerializer(schedules, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        # Create new recurring schedule
+        data = request.data.copy()
+        data['student'] = student.id
+        data['school'] = request.user.school.id
+
+        # Validate teacher is assigned to student
+        teacher_id = data.get('teacher')
+        if teacher_id:
+            if not student.assigned_teachers.filter(id=teacher_id).exists():
+                return Response({
+                    'error': 'Teacher must be assigned to student before creating schedule'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = RecurringScheduleSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save(created_by=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@management_required
+def recurring_schedule_detail(request, student_id, schedule_id):
+    """Get, update, or delete a specific recurring schedule"""
+    try:
+        student = User.objects.get(pk=student_id, user_type='student', is_active=True, school=request.user.school)
+        schedule = RecurringLessonsSchedule.objects.get(
+            pk=schedule_id,
+            student=student,
+            school=request.user.school
+        )
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+    except RecurringLessonsSchedule.DoesNotExist:
+        return Response({'error': 'Schedule not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = RecurringScheduleSerializer(schedule)
+        return Response(serializer.data)
+
+    elif request.method == 'PUT':
+        # Validate teacher is still assigned if changing teacher
+        teacher_id = request.data.get('teacher')
+        if teacher_id and teacher_id != schedule.teacher.id:
+            if not student.assigned_teachers.filter(id=teacher_id).exists():
+                return Response({
+                    'error': 'Teacher must be assigned to student'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = RecurringScheduleSerializer(schedule, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        schedule.delete()
+        return Response({
+            'message': 'Recurring schedule deleted successfully'
         }, status=status.HTTP_200_OK)
 
 
@@ -1844,11 +1930,20 @@ def teacher_monthly_batches(request):
         batches = MonthlyInvoiceBatch.objects.filter(
             teacher=request.user,
             school=request.user.school
-        ).order_by('-year', '-month')
+        )
+
+        # Filter by month/year if provided in query params (for get-or-create behavior)
+        month = request.query_params.get('month')
+        year = request.query_params.get('year')
+        if month and year:
+            batches = batches.filter(month=int(month), year=int(year))
+        else:
+            # If no filters, return all batches sorted
+            batches = batches.order_by('-year', '-month')
 
         # 2. Translate to JSON: Since 'batches' is a list (QuerySet), we use many=True.
         serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
-        
+
         # 3. Send back to the Frontend.
         return Response(serializer.data)
 
@@ -2054,6 +2149,8 @@ def batch_submit(request, batch_id):
 
     batch.status = 'submitted'
     batch.submitted_at = timezone.now()
+    # Clear rejection reason when resubmitting after rejection
+    batch.rejection_reason = ''
     batch.save()
 
     # TODO: Send email notification to management (Phase 5)

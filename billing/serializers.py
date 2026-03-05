@@ -642,6 +642,14 @@ class StudentCreateSerializer(serializers.Serializer):
         use_student_as_contact = validated_data.pop('use_student_as_contact', False)
         billing_contact_data = validated_data.pop('billing_contact', None)
 
+        # Get school from request context
+        request = self.context.get('request')
+        if not request or not hasattr(request.user, 'school'):
+            raise serializers.ValidationError({
+                'school': 'Unable to determine school from request'
+            })
+        school = request.user.school
+
         with transaction.atomic():
             # Create student user
             student = User.objects.create_user(
@@ -650,6 +658,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 last_name=validated_data['last_name'],
                 phone_number=validated_data.get('phone_number', ''),
                 user_type='student',
+                school=school,  # Set school from request user
                 is_approved=True  # Management-created students are auto-approved
             )
 
@@ -667,6 +676,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 # Use student info but with provided address
                 BillableContact.objects.create(
                     student=student,
+                    school=school,  # Set school
                     contact_type='self',
                     first_name=student.first_name,
                     last_name=student.last_name,
@@ -687,6 +697,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 # Create directly - serializer validation already ensures all fields present
                 BillableContact.objects.create(
                     student=student,
+                    school=school,  # Set school
                     contact_type=billing_contact_data.get('contact_type', 'parent'),
                     first_name=billing_contact_data['first_name'],
                     last_name=billing_contact_data['last_name'],
