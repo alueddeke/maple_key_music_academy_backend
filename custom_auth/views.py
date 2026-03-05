@@ -169,6 +169,8 @@ def google_oauth_callback(request):
             try:
                 approved_email = ApprovedEmail.objects.get(email=user_email)
                 # Email is pre-approved - create user with approved status
+                from billing.models import School
+                default_school = School.objects.first()  # Get default school
                 user = User.objects.create(
                     email=user_email,
                     first_name=user_data.get('given_name', ''),
@@ -176,7 +178,8 @@ def google_oauth_callback(request):
                     user_type=approved_email.user_type,
                     oauth_provider='google',
                     oauth_id=user_data.get('id'),
-                    is_approved=True  # Pre-approved
+                    is_approved=True,  # Pre-approved
+                    school=default_school
                 )
                 print(f"DEBUG: User created from pre-approved email: {user.email}")
             except ApprovedEmail.DoesNotExist:
@@ -185,6 +188,8 @@ def google_oauth_callback(request):
                     reg_request = UserRegistrationRequest.objects.get(email=user_email)
                     if reg_request.status == 'approved':
                         # Registration request was approved - create user
+                        from billing.models import School
+                        default_school = School.objects.first()  # Get default school
                         user = User.objects.create(
                             email=user_email,
                             first_name=user_data.get('given_name', ''),
@@ -192,7 +197,8 @@ def google_oauth_callback(request):
                             user_type=reg_request.user_type,
                             oauth_provider='google',
                             oauth_id=user_data.get('id'),
-                            is_approved=True
+                            is_approved=True,
+                            school=default_school
                         )
                         print(f"DEBUG: User created from approved registration: {user.email}")
                     elif reg_request.status == 'rejected':
@@ -472,12 +478,15 @@ def get_jwt_token(request):
                     password_line = notes_lines[0]  # First line has the password
                     hashed_password = password_line.replace('HASHED_PASSWORD:', '', 1).strip()
 
+                    from billing.models import School
+                    default_school = School.objects.first()  # Get default school
                     user = User.objects.create(
                         email=email,
                         first_name=reg_request.first_name,
                         last_name=reg_request.last_name,
                         user_type=reg_request.user_type,
-                        is_approved=True
+                        is_approved=True,
+                        school=default_school
                     )
                     user.password = hashed_password
                     user.save()

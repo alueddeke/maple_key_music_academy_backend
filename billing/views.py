@@ -1080,12 +1080,15 @@ def setup_account_with_invitation(request, token):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Create user account
+        from billing.models import School
+        default_school = School.objects.first()  # Get default school
         user = User.objects.create_user(
             email=invitation.email,
             password=password if password else None,  # Password is optional (for OAuth users)
             first_name=first_name,
             last_name=last_name,
             user_type=invitation.user_type,
+            school=default_school
         )
         user.is_approved = True  # Pre-approved via invitation
         user.save()
