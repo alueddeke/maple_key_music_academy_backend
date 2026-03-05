@@ -86,18 +86,19 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    'rest_framework', 
+    'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
-    'corsheaders', 
-    
+    'corsheaders',
+    'simple_history',  # Audit logging for model changes
+
     # Django Allauth - Required for OAuth authentication
     'django.contrib.sites',  # Required by django-allauth for multi-site support
     'allauth',  # Main allauth app for authentication
     'allauth.account',  # Handles user accounts and registration
     'allauth.socialaccount',  # Handles social media authentication
     'allauth.socialaccount.providers.google',  # Google OAuth provider
-    
+
     # Custom authentication app
     'custom_auth',  # Your custom auth app for OAuth views and JWT handling
 ]
@@ -112,6 +113,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",  # Required by django-allauth
+    "simple_history.middleware.HistoryRequestMiddleware",  # Tracks user for audit logging
 ]
 
 ROOT_URLCONF = "maple_key_backend.urls"

@@ -1,27 +1,29 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Sum, Q
-from .models import Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings, InvoiceRecipientEmail, GlobalRateSettings, BillableContact
+from .models import (
+    Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings,
+    InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
+    School, SchoolSettings, RecurringLessonsSchedule, MonthlyInvoiceBatch, BatchLessonItem
+)
 
 User = get_user_model()
-
-
-# STEP 2.1: BillableContact Serializer
 class BillableContactSerializer(serializers.ModelSerializer):
     """Serializer for billable contact information"""
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
     full_name = serializers.CharField(source='get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
         model = BillableContact
         fields = [
-            'id', 'student', 'contact_type', 'contact_type_display',
+            'id', 'student', 'school', 'school_name', 'contact_type', 'contact_type_display',
             'first_name', 'last_name', 'full_name',
             'email', 'phone',
             'street_address', 'city', 'province', 'postal_code',
             'is_primary', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'contact_type_display', 'full_name']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'contact_type_display', 'full_name', 'school_name']
 
     def validate(self, data):
         """Ensure at least one primary contact per student"""
@@ -41,12 +43,10 @@ class BillableContactSerializer(serializers.ModelSerializer):
                 })
 
         return data
-
-
-# STEP 2.2: Updated UserSerializer with billable contacts and assigned teachers
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
     assigned_teachers_data = serializers.SerializerMethodField()
     assigned_students_data = serializers.SerializerMethodField()
@@ -55,6 +55,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'user_type', 'user_type_display',
+            'school', 'school_name',
             'phone_number', 'address', 'is_approved', 'is_active',
             'bio', 'instruments', 'hourly_rate',
             'assigned_teachers', 'assigned_teachers_data',
@@ -63,7 +64,7 @@ class UserSerializer(serializers.ModelSerializer):
             'parent_email', 'parent_phone',  # DEPRECATED fields
             'date_joined', 'last_login', 'password'
         ]
-        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display']
+        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display', 'school_name']
         extra_kwargs = {'password': {'write_only': True}}
 
     def get_assigned_teachers_data(self, obj):
@@ -106,6 +107,7 @@ class UserSerializer(serializers.ModelSerializer):
 class LessonSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
     total_cost = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     student_cost = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     is_first_lesson = serializers.SerializerMethodField()
@@ -135,6 +137,7 @@ class LessonSerializer(serializers.ModelSerializer):
 class InvoiceSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
 
@@ -142,6 +145,87 @@ class InvoiceSerializer(serializers.ModelSerializer):
         model = Invoice
         fields = '__all__'
 
+class RecurringScheduleSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
+    student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
+
+    class Meta:
+        model = RecurringLessonsSchedule
+        fields = [
+            'id', 'teacher', 'teacher_name', 'student', 'student_name',
+            'day_of_week', 'day_of_week_display', 'start_time', 'duration',
+            'lesson_type', 'teacher_rate', 'student_rate',
+            'is_active', 'start_date', 'end_date',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['teacher_rate', 'student_rate', 'created_at', 'updated_at']
+
+class BatchLessonItemSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    teacher_payment = serializers.DecimalField(
+        source='calculate_teacher_payment',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    student_charge = serializers.DecimalField(
+        source='calculate_student_charge',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    class Meta:
+        model = BatchLessonItem
+        fields = [
+            'id', 'student', 'student_name',
+            'scheduled_date', 'start_time', 'duration',
+            'lesson_type', 'teacher_rate', 'student_rate',
+            'status', 'cancelled_by_type', 'cancellation_reason',
+            'teacher_notes', 'is_one_off',
+            'teacher_payment', 'student_charge',
+            'created_at'
+        ]
+        read_only_fields = ['teacher_payment', 'student_charge', 'created_at']
+
+class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
+    lesson_items = BatchLessonItemSerializer(many=True, read_only=True)
+    total_teacher_payment = serializers.SerializerMethodField()
+    total_student_charges = serializers.SerializerMethodField()
+    lesson_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MonthlyInvoiceBatch
+        fields = [
+            'id', 'batch_number', 'teacher', 'teacher_name',
+            'month', 'year', 'status',
+            'submitted_at', 'reviewed_by', 'reviewed_at',
+            'rejection_reason', 'invoice',
+            'lesson_items', 'total_teacher_payment', 'total_student_charges',
+            'lesson_count', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'batch_number', 'submitted_at', 'reviewed_by', 'reviewed_at',
+            'invoice', 'created_at', 'updated_at'
+        ]
+
+    def get_total_teacher_payment(self, obj):
+        from decimal import Decimal
+        return sum(
+            item.calculate_teacher_payment()
+            for item in obj.lesson_items.all()
+        ) or Decimal('0.00')
+
+    def get_total_student_charges(self, obj):
+        from decimal import Decimal
+        return sum(
+            item.calculate_student_charge()
+            for item in obj.lesson_items.all()
+        ) or Decimal('0.00')
+
+    def get_lesson_count(self, obj):
+        return obj.lesson_items.count()
 
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):
@@ -236,17 +320,18 @@ class SystemSettingsSerializer(serializers.ModelSerializer):
 class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
     """Serializer for invoice recipient emails"""
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
         model = InvoiceRecipientEmail
-        fields = ['id', 'email', 'created_at', 'created_by', 'created_by_name']
-        read_only_fields = ['id', 'created_at', 'created_by', 'created_by_name']
+        fields = ['id', 'school', 'school_name', 'email', 'created_at', 'created_by', 'created_by_name']
+        read_only_fields = ['id', 'created_at', 'created_by', 'created_by_name', 'school_name']
 
 
-# Step 2: Dual-Rate System Serializers
+
 
 class GlobalRateSettingsSerializer(serializers.ModelSerializer):
-    """Serializer for global rate settings (singleton)"""
+    """Serializer for global rate settings (singleton) - DEPRECATED, use SchoolSettingsSerializer"""
     updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
 
     class Meta:
@@ -256,6 +341,93 @@ class GlobalRateSettingsSerializer(serializers.ModelSerializer):
             'updated_at', 'updated_by', 'updated_by_name'
         ]
         read_only_fields = ['id', 'updated_at', 'updated_by', 'updated_by_name']
+
+
+class SchoolSerializer(serializers.ModelSerializer):
+    """Basic school serializer for school information"""
+
+    class Meta:
+        model = School
+        fields = [
+            'id', 'name', 'subdomain', 'logo', 'primary_color',
+            'hst_rate', 'gst_rate', 'pst_rate', 'tax_number',
+            'billing_cycle_day', 'payment_terms_days', 'cancellation_notice_hours',
+            'email', 'phone_number',
+            'street_address', 'city', 'province', 'postal_code',
+            'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class SchoolDetailSerializer(serializers.ModelSerializer):
+    """Detailed school serializer with computed stats"""
+    user_count = serializers.SerializerMethodField()
+    teacher_count = serializers.SerializerMethodField()
+    student_count = serializers.SerializerMethodField()
+    lesson_count = serializers.SerializerMethodField()
+    invoice_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = School
+        fields = [
+            'id', 'name', 'subdomain', 'logo', 'primary_color',
+            'hst_rate', 'gst_rate', 'pst_rate', 'tax_number',
+            'billing_cycle_day', 'payment_terms_days', 'cancellation_notice_hours',
+            'email', 'phone_number',
+            'street_address', 'city', 'province', 'postal_code',
+            'is_active', 'created_at', 'updated_at',
+            # Stats
+            'user_count', 'teacher_count', 'student_count', 'lesson_count', 'invoice_total'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_user_count(self, obj):
+        """Total users in this school"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.filter(school=obj).count()
+
+    def get_teacher_count(self, obj):
+        """Total teachers in this school"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.filter(school=obj, user_type='teacher').count()
+
+    def get_student_count(self, obj):
+        """Total students in this school"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.filter(school=obj, user_type='student').count()
+
+    def get_lesson_count(self, obj):
+        """Total lessons for this school"""
+        return Lesson.objects.filter(school=obj).count()
+
+    def get_invoice_total(self, obj):
+        """Total invoiced amount for teacher payments"""
+        from decimal import Decimal
+        total = Invoice.objects.filter(
+            school=obj,
+            invoice_type='teacher_payment',
+            status__in=['approved', 'paid']
+        ).aggregate(total=Sum('payment_balance'))['total']
+        return total or Decimal('0.00')
+
+
+class SchoolSettingsSerializer(serializers.ModelSerializer):
+    """Serializer for school-specific settings"""
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    school_name = serializers.CharField(source='school.name', read_only=True)
+
+    class Meta:
+        model = SchoolSettings
+        fields = [
+            'id', 'school', 'school_name',
+            'online_teacher_rate', 'online_student_rate', 'inperson_student_rate',
+            'invoice_recipient_email',  # DEPRECATED field
+            'updated_at', 'updated_by', 'updated_by_name'
+        ]
+        read_only_fields = ['id', 'school', 'school_name', 'updated_at', 'updated_by', 'updated_by_name']
 
 
 class TeacherListSerializer(serializers.ModelSerializer):
@@ -371,9 +543,6 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
             invoice_type='teacher_payment'
         ).order_by('-created_at')[:5]
         return InvoiceSerializer(invoices, many=True).data
-
-
-# STEP 2.3: StudentCreateSerializer for atomic student creation
 class BillingContactInputSerializer(serializers.Serializer):
     """Serializer for billing contact input (without student field) - Canadian format"""
     contact_type = serializers.ChoiceField(choices=['parent', 'guardian', 'self', 'other'], default='parent')
@@ -473,6 +642,14 @@ class StudentCreateSerializer(serializers.Serializer):
         use_student_as_contact = validated_data.pop('use_student_as_contact', False)
         billing_contact_data = validated_data.pop('billing_contact', None)
 
+        # Get school from request context
+        request = self.context.get('request')
+        if not request or not hasattr(request.user, 'school'):
+            raise serializers.ValidationError({
+                'school': 'Unable to determine school from request'
+            })
+        school = request.user.school
+
         with transaction.atomic():
             # Create student user
             student = User.objects.create_user(
@@ -481,6 +658,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 last_name=validated_data['last_name'],
                 phone_number=validated_data.get('phone_number', ''),
                 user_type='student',
+                school=school,  # Set school from request user
                 is_approved=True  # Management-created students are auto-approved
             )
 
@@ -498,6 +676,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 # Use student info but with provided address
                 BillableContact.objects.create(
                     student=student,
+                    school=school,  # Set school
                     contact_type='self',
                     first_name=student.first_name,
                     last_name=student.last_name,
@@ -518,6 +697,7 @@ class StudentCreateSerializer(serializers.Serializer):
                 # Create directly - serializer validation already ensures all fields present
                 BillableContact.objects.create(
                     student=student,
+                    school=school,  # Set school
                     contact_type=billing_contact_data.get('contact_type', 'parent'),
                     first_name=billing_contact_data['first_name'],
                     last_name=billing_contact_data['last_name'],

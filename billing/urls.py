@@ -58,10 +58,15 @@ urlpatterns = [
     path('management/invoice-recipients/add/', views.add_invoice_recipient, name='add_invoice_recipient'),
     path('management/invoice-recipients/<int:pk>/delete/', views.delete_invoice_recipient, name='delete_invoice_recipient'),
 
-    # Step 2: Dual-Rate System Management Endpoints
-    path('management/global-rates/', views.global_rate_settings, name='global_rate_settings'),
-    path('management/teachers/', views.teacher_list, name='management_teacher_list'),
+    # Step 2: Dual-Rate System Management Endpoints (DEPRECATED - use school endpoints)
+    path('management/global-rates/', views.school_settings, name='global_rate_settings'),  # DEPRECATED: redirects to school settings
+    path('management/teachers/', views.teacher_list_with_stats, name='management_teacher_list'),
     path('management/teachers/<int:pk>/', views.teacher_detail, name='management_teacher_detail'),
+
+    # Phase 5: School Management Endpoints
+    path('management/school/', views.get_current_school, name='get_current_school'),
+    path('management/school/update/', views.update_school, name='update_school'),
+    path('management/school/settings/', views.school_settings, name='school_settings'),
 
     # Student management endpoints (full CRUD)
     path('management/students/', views.management_students, name='management_students'),
@@ -71,6 +76,10 @@ urlpatterns = [
     path('management/students/<int:student_id>/billable-contacts/', views.add_billable_contact, name='add_billable_contact'),
     path('management/billable-contacts/<int:pk>/', views.manage_billable_contact, name='manage_billable_contact'),
 
+    # Recurring lesson schedule endpoints
+    path('management/students/<int:student_id>/schedules/', views.student_recurring_schedules, name='student_recurring_schedules'),
+    path('management/students/<int:student_id>/schedules/<int:schedule_id>/', views.recurring_schedule_detail, name='recurring_schedule_detail'),
+
     # Teacher-student assignment endpoints
     path('management/students/<int:student_id>/assign-teachers/', views.assign_teachers_to_student, name='assign_teachers_to_student'),
     path('management/students/<int:student_id>/unassign-teacher/<int:teacher_id>/', views.unassign_teacher_from_student, name='unassign_teacher_from_student'),
@@ -79,4 +88,23 @@ urlpatterns = [
     # Teacher management endpoints (update/delete only, no create)
     path('management/teachers/<int:pk>/update/', views.management_update_teacher, name='management_update_teacher'),
     path('management/teachers/<int:pk>/delete/', views.management_delete_teacher, name='management_delete_teacher'),
+
+    # Teacher-specific endpoints
+    path('teacher/students/', views.teacher_assigned_students, name='teacher_assigned_students'),
+
+    # Monthly Invoice Batches (Teacher Workflow) - Phase 3
+    path('teacher/batches/', views.teacher_monthly_batches, name='teacher_monthly_batches'),
+    path('teacher/batches/<int:batch_id>/', views.batch_detail, name='batch_detail'),
+    path('teacher/batches/<int:batch_id>/add-lesson/', views.batch_add_lesson, name='batch_add_lesson'),
+    path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
+    path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
+
+    # Management Batch Approval (Phase 7)
+    path('management/batches/pending/', views.management_pending_batches, name='management_pending_batches'),
+    path('management/batches/approved/', views.management_approved_batches, name='management_approved_batches'),
+    path('management/batches/rejected/', views.management_rejected_batches, name='management_rejected_batches'),
+    path('management/batches/<int:batch_id>/', views.management_batch_detail, name='management_batch_detail'),
+    path('management/batches/<int:batch_id>/lessons/<int:item_id>/', views.management_edit_lesson_notes, name='management_edit_lesson_notes'),
+    path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
+    path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
 ]
