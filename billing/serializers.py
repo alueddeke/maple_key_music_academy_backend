@@ -194,6 +194,8 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
     total_teacher_payment = serializers.SerializerMethodField()
     total_student_charges = serializers.SerializerMethodField()
     lesson_count = serializers.SerializerMethodField()
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    paystub_url = serializers.SerializerMethodField()
 
     class Meta:
         model = MonthlyInvoiceBatch
@@ -202,8 +204,9 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
             'month', 'year', 'status',
             'submitted_at', 'reviewed_by', 'reviewed_at',
             'rejection_reason', 'invoice',
+            'payment_method', 'payment_method_display', 'payment_date',
             'lesson_items', 'total_teacher_payment', 'total_student_charges',
-            'lesson_count', 'created_at', 'updated_at'
+            'lesson_count', 'paystub_url', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'batch_number', 'submitted_at', 'reviewed_by', 'reviewed_at',
@@ -225,7 +228,13 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
         ) or Decimal('0.00')
 
     def get_lesson_count(self, obj):
-        return obj.lesson_items.count()
+        return obj.lesson_items.filter(status='completed').count()
+
+    def get_paystub_url(self, obj):
+        """Return paystub download URL if batch is approved"""
+        if obj.status == 'approved':
+            return f'/api/billing/teacher/batches/{obj.id}/paystub/'
+        return None
 
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):
