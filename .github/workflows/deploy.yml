@@ -106,14 +106,51 @@ jobs:
             docker run --rm --network maple-key-network postgres:15 \
               pg_isready -h postgres -U ${{ secrets.POSTGRES_USER }} || sleep 5
             
-            # Run migrations
+            # Run migrations with fail-fast behavior
+            echo "========================================="
+            echo "Running database migrations..."
+            echo "========================================="
+            if ! docker run --rm \
+              --network maple-key-network \
+              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
+              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              python manage.py migrate; then
+              echo "========================================="
+              echo "❌ MIGRATION FAILED!"
+              echo "Deployment aborted to prevent database/code mismatch"
+              echo "========================================="
+              # Clean up containers started during this deployment
+              docker stop maple-key-backend postgres nginx 2>/dev/null || true
+              docker rm maple-key-backend postgres nginx 2>/dev/null || true
+              exit 1
+            fi
+            echo "========================================="
+            echo "✅ Migrations completed successfully!"
+            echo "========================================="
+
+            # Verify all migrations are applied
+            echo "Verifying migration status..."
             docker run --rm \
               --network maple-key-network \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
-              python manage.py migrate
-            
+              python manage.py showmigrations billing | tee /tmp/migration_status.txt
+
+            # Check for unapplied migrations (lines with [ ] instead of [X])
+            if grep -q "\[ \]" /tmp/migration_status.txt; then
+              echo "========================================="
+              echo "❌ WARNING: Unapplied migrations detected!"
+              echo "========================================="
+              cat /tmp/migration_status.txt
+              docker stop maple-key-backend postgres nginx 2>/dev/null || true
+              docker rm maple-key-backend postgres nginx 2>/dev/null || true
+              exit 1
+            fi
+            echo "✅ All migrations verified as applied"
+            echo ""
+
             # Collect static files
             docker run --rm \
               --network maple-key-network \
