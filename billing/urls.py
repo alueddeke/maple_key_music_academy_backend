@@ -98,6 +98,7 @@ urlpatterns = [
     path('teacher/batches/<int:batch_id>/add-lesson/', views.batch_add_lesson, name='batch_add_lesson'),
     path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
     path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
+    path('teacher/batches/<int:batch_id>/paystub/', views.download_paystub, name='download_paystub'),
 
     # Management Batch Approval (Phase 7)
     path('management/batches/pending/', views.management_pending_batches, name='management_pending_batches'),

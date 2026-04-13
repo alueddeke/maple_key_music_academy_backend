@@ -672,6 +672,12 @@ class MonthlyInvoiceBatch(models.Model):
         ('rejected', 'Rejected'),  # Management rejected
     ]
 
+    PAYMENT_METHODS = [
+        ('e-transfer', 'E-Transfer'),
+        ('cheque', 'Cheque'),
+        ('direct_deposit', 'Direct Deposit'),
+    ]
+
     # ID
     batch_number = models.CharField(max_length=50, unique=True, blank=True)
 
@@ -696,12 +702,26 @@ class MonthlyInvoiceBatch(models.Model):
 
     # linked invoice
     invoice = models.ForeignKey(
-        Invoice, 
+        Invoice,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='source_batch',
         help_text='The teacher payment invoice created from this batch'
+    )
+
+    # payment tracking
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHODS,
+        blank=True,
+        null=True,
+        help_text="Payment method used for this batch"
+    )
+    payment_date = models.DateField(
+        blank=True,
+        null=True,
+        help_text="Date when payment was processed"
     )
 
     # tracking

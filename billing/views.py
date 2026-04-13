@@ -1,4 +1,5 @@
 from django.shortcuts import render
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -2172,6 +2173,63 @@ def batch_submit(request, batch_id):
 
     serializer = MonthlyInvoiceBatchSerializer(batch)
     return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_paystub(request, batch_id):
+    """
+    Download paystub PDF for approved batch.
+    Teachers can download their own approved batches.
+    Management can download any approved batch.
+    """
+    try:
+        # Check if user is management
+        is_management = request.user.user_type == 'management'
+
+        if is_management:
+            # Management can download any batch
+            batch = MonthlyInvoiceBatch.objects.get(id=batch_id)
+        else:
+            # Teachers can only download their own batches
+            batch = MonthlyInvoiceBatch.objects.get(
+                id=batch_id,
+                teacher=request.user
+            )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Only approved batches can generate paystubs
+    if batch.status != 'approved':
+        return Response(
+            {'error': 'Paystub only available for approved batches'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Generate PDF using TeacherPaystubPDFGenerator
+    from billing.services.teacher_paystub_generator import TeacherPaystubPDFGenerator
+
+    try:
+        generator = TeacherPaystubPDFGenerator(batch)
+        success, pdf_content = generator.generate_pdf()
+
+        if not success or not pdf_content:
+            return Response(
+                {'error': 'Failed to generate paystub PDF'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Return PDF as download
+        response = HttpResponse(pdf_content, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="paystub_{batch.batch_number}.pdf"'
+        return response
+
+    except Exception as e:
+        logger.error(f"Error generating paystub for batch {batch_id}: {str(e)}")
+        return Response(
+            {'error': f'Failed to generate paystub: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 # ============================================================================
