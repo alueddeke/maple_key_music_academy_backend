@@ -402,10 +402,10 @@ class SchoolDetailSerializer(serializers.ModelSerializer):
         return User.objects.filter(school=obj, user_type='teacher').count()
 
     def get_student_count(self, obj):
-        """Total students in this school"""
+        """Total ACTIVE students in this school"""
         from django.contrib.auth import get_user_model
         User = get_user_model()
-        return User.objects.filter(school=obj, user_type='student').count()
+        return User.objects.filter(school=obj, user_type='student', is_active=True).count()
 
     def get_lesson_count(self, obj):
         """Total lessons for this school"""
@@ -457,8 +457,12 @@ class TeacherListSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_students(self, obj):
-        """Count distinct students this teacher has taught"""
-        return Lesson.objects.filter(teacher=obj, status='completed').values('student').distinct().count()
+        """Count distinct ACTIVE students this teacher has taught"""
+        return Lesson.objects.filter(
+            teacher=obj,
+            status='completed',
+            student__is_active=True
+        ).values('student').distinct().count()
 
     def get_total_lessons(self, obj):
         """Count completed lessons for this teacher"""
