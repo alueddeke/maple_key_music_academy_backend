@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule
+from .models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule, GlobalRateSettings
 from .serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
