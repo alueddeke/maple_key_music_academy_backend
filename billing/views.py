@@ -2169,6 +2169,8 @@ def batch_lesson_item(request, batch_id, item_id):
 
     if request.method == 'PUT':
         allowed_fields = ['status', 'cancelled_by_type', 'cancellation_reason', 'teacher_notes']
+        if item.is_one_off:
+            allowed_fields += ['scheduled_date', 'start_time']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
@@ -2389,13 +2391,40 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     except BatchLessonItem.DoesNotExist:
         return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # Only allow editing teacher_notes and cancellation_reason
-    allowed_fields = ['teacher_notes', 'cancellation_reason']
-    updated = False
+    # Validate and apply editable fields
+    allowed_fields = [
+        'scheduled_date', 'start_time', 'duration',
+        'lesson_type', 'status', 'teacher_notes',
+        'cancellation_reason', 'admin_notes',
+    ]
 
+    valid_lesson_types = ['online', 'in_person']
+    valid_statuses = [choice[0] for choice in BatchLessonItem.status.field.choices] if hasattr(BatchLessonItem, 'status') else ['completed', 'confirmed', 'cancelled', 'requested']
+
+    if 'lesson_type' in request.data and request.data['lesson_type'] not in valid_lesson_types:
+        return Response({'error': f"lesson_type must be one of {valid_lesson_types}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if 'status' in request.data:
+        valid_statuses = [c[0] for c in BatchLessonItem._meta.get_field('status').choices]
+        if request.data['status'] not in valid_statuses:
+            return Response({'error': f"Invalid status value"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if 'duration' in request.data:
+        try:
+            duration_val = float(request.data['duration'])
+            if duration_val <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'error': 'duration must be a positive number'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from decimal import Decimal
+    updated = False
     for field in allowed_fields:
         if field in request.data:
-            setattr(lesson_item, field, request.data[field])
+            value = request.data[field]
+            if field == 'duration':
+                value = Decimal(str(value))
+            setattr(lesson_item, field, value)
             updated = True
 
     if updated:
