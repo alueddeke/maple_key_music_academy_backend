@@ -152,10 +152,10 @@ class TeacherPaystubPDFGenerator(BaseInvoicePDFGenerator):
         """Return school business information for footer"""
         school = self.batch.school
 
-        notes_parts = ["<b>School Business Information</b><br/>"]
+        notes_parts = []
 
         if school:
-            notes_parts.append(f"{school.name}<br/>")
+            notes_parts.append(f"<b>{school.name}</b><br/>")
 
             # Build address
             address_parts = []
