@@ -1484,9 +1484,26 @@ def teacher_detail(request, pk):
         teacher.hourly_rate = new_rate
         teacher.save()
 
-        # Return updated teacher data
+        schedules_updated = 0
+        if request.data.get('apply_to_schedules'):
+            # Update active in-person recurring schedules
+            schedules_updated = RecurringLessonsSchedule.objects.filter(
+                teacher=teacher,
+                is_active=True,
+                lesson_type='in_person'
+            ).update(teacher_rate=new_rate)
+
+            # Update lesson items in open (draft/submitted) batches
+            BatchLessonItem.objects.filter(
+                batch__teacher=teacher,
+                batch__status__in=['draft', 'submitted'],
+                lesson_type='in_person'
+            ).update(teacher_rate=new_rate)
+
         serializer = TeacherDetailSerializer(teacher)
-        return Response(serializer.data)
+        response_data = serializer.data
+        response_data['schedules_updated'] = schedules_updated
+        return Response(response_data)
 
 # ============================================================================
 # STUDENT MANAGEMENT ENDPOINTS
@@ -1821,11 +1838,32 @@ def management_update_teacher(request, pk):
         teacher = User.objects.get(pk=pk, user_type='teacher')
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    apply_to_schedules = request.data.get('apply_to_schedules', False)
+    old_rate = teacher.hourly_rate
+
     serializer = UserSerializer(teacher, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
-        return Response(serializer.data)
+
+        schedules_updated = 0
+        rate_changed = 'hourly_rate' in request.data and teacher.hourly_rate != old_rate
+        if apply_to_schedules and rate_changed:
+            schedules_updated = RecurringLessonsSchedule.objects.filter(
+                teacher=teacher,
+                is_active=True,
+                lesson_type='in_person'
+            ).update(teacher_rate=teacher.hourly_rate)
+
+            BatchLessonItem.objects.filter(
+                batch__teacher=teacher,
+                batch__status__in=['draft', 'submitted'],
+                lesson_type='in_person'
+            ).update(teacher_rate=teacher.hourly_rate)
+
+        response_data = serializer.data
+        response_data['schedules_updated'] = schedules_updated
+        return Response(response_data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -2131,6 +2169,8 @@ def batch_lesson_item(request, batch_id, item_id):
 
     if request.method == 'PUT':
         allowed_fields = ['status', 'cancelled_by_type', 'cancellation_reason', 'teacher_notes']
+        if item.is_one_off:
+            allowed_fields += ['scheduled_date', 'start_time']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
@@ -2351,13 +2391,40 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     except BatchLessonItem.DoesNotExist:
         return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # Only allow editing teacher_notes and cancellation_reason
-    allowed_fields = ['teacher_notes', 'cancellation_reason']
-    updated = False
+    # Validate and apply editable fields
+    allowed_fields = [
+        'scheduled_date', 'start_time', 'duration',
+        'lesson_type', 'status', 'teacher_notes',
+        'cancellation_reason', 'admin_notes',
+    ]
 
+    valid_lesson_types = ['online', 'in_person']
+    valid_statuses = [choice[0] for choice in BatchLessonItem.status.field.choices] if hasattr(BatchLessonItem, 'status') else ['completed', 'confirmed', 'cancelled', 'requested']
+
+    if 'lesson_type' in request.data and request.data['lesson_type'] not in valid_lesson_types:
+        return Response({'error': f"lesson_type must be one of {valid_lesson_types}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if 'status' in request.data:
+        valid_statuses = [c[0] for c in BatchLessonItem._meta.get_field('status').choices]
+        if request.data['status'] not in valid_statuses:
+            return Response({'error': f"Invalid status value"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if 'duration' in request.data:
+        try:
+            duration_val = float(request.data['duration'])
+            if duration_val <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'error': 'duration must be a positive number'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from decimal import Decimal
+    updated = False
     for field in allowed_fields:
         if field in request.data:
-            setattr(lesson_item, field, request.data[field])
+            value = request.data[field]
+            if field == 'duration':
+                value = Decimal(str(value))
+            setattr(lesson_item, field, value)
             updated = True
 
     if updated:

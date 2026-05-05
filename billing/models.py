@@ -258,6 +258,7 @@ class Lesson(models.Model):
         ('confirmed', 'Confirmed'),
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
+        ('trial', 'Trial'),
     ]
 
     LESSON_TYPES = [
@@ -842,6 +843,7 @@ class BatchLessonItem(models.Model):
 
     # Notes
     teacher_notes = models.TextField(blank=True)
+    admin_notes = models.TextField(blank=True, default='')
 
     # link to recurring sched (if from schedule)
     recurring_schedule = models.ForeignKey(
@@ -882,24 +884,29 @@ class BatchLessonItem(models.Model):
         """Calculate what teacher gets paid for this lesson"""
         from decimal import Decimal
 
-        # If cancelled by anyone (teacher or student), teacher doesn't get paid
-        # Future: may add cancellation policy where teacher gets paid for student cancellations
         if self.status == 'cancelled':
             return Decimal('0.00')
 
-        # Otherwise, pay teacher_rate × duration
+        # Trial lessons: teacher is paid at their normal rate (student is not charged)
         return self.teacher_rate * self.duration
 
     def calculate_student_charge(self):
         """Calculate what student is billed for this lesson"""
         from decimal import Decimal
 
-        # If cancelled (by anyone), student not charged
-        if self.status == 'cancelled':
+        # Cancelled or trial: student not charged
+        if self.status in ('cancelled', 'trial'):
             return Decimal('0.00')
 
-        # If completed, charge student_rate × duration
         return self.student_rate * self.duration
+
+    def save(self, *args, **kwargs):
+        # Auto-set trial for a student's very first lesson ever recorded
+        if self._state.adding:
+            prior_count = BatchLessonItem.objects.filter(student=self.student).count()
+            if prior_count == 0:
+                self.status = 'trial'
+        super().save(*args, **kwargs)
 
 
 class StudentInvoice(models.Model):

@@ -182,7 +182,7 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
             'scheduled_date', 'start_time', 'duration',
             'lesson_type', 'teacher_rate', 'student_rate',
             'status', 'cancelled_by_type', 'cancellation_reason',
-            'teacher_notes', 'is_one_off',
+            'teacher_notes', 'admin_notes', 'is_one_off',
             'teacher_payment', 'student_charge',
             'created_at'
         ]

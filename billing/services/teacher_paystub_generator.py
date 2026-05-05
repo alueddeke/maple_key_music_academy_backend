@@ -3,8 +3,9 @@ Teacher Paystub PDF Generator
 Generates summary paystubs for teachers from MonthlyInvoiceBatch records.
 """
 from decimal import Decimal
-from reportlab.platypus import Paragraph
+from reportlab.platypus import Paragraph, Spacer
 from .invoicepdf_generator_base import BaseInvoicePDFGenerator
+from .pdf_styles import get_invoice_styles
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,49 @@ class TeacherPaystubPDFGenerator(BaseInvoicePDFGenerator):
         self.batch = batch
         # Call parent with batch as invoice (for buffer setup)
         super().__init__(batch)
+
+    def generate_pdf(self):
+        """
+        Override base class to skip lesson details section.
+        Paystubs show only summary info, not individual lesson breakdown.
+        """
+        try:
+            # Create PDF document
+            doc = self._create_document()
+
+            # Build PDF content
+            story = []
+
+            # Get shared invoice styles
+            pdf_styles = get_invoice_styles()
+
+            # Build paystub sections (skip lessons table - this is a summary only)
+            story.append(self._create_header(pdf_styles))
+            story.append(self._create_divider())
+            story.append(Spacer(1, 20))
+            story.append(self._create_recipient_section(pdf_styles))
+            story.append(Spacer(1, 25))
+
+            # Skip lessons table section - paystubs are summaries only
+            # Lesson count and total are already shown in the right column above
+
+            story.append(Spacer(1, 25))
+            story.append(self._create_notes_section(pdf_styles))
+
+            # Build PDF
+            doc.build(story)
+
+            # Get PDF content
+            pdf_content = self.buffer.getvalue()
+            self.buffer.close()
+
+            logger.info(f"Successfully generated paystub PDF for batch {self.batch.id}")
+            return True, pdf_content
+
+        except Exception as e:
+            logger.error(f"Failed to generate paystub PDF for batch {self.batch.id}: {str(e)}")
+            self.buffer.close()
+            return False, None
 
     def get_invoice_title(self):
         """Return 'PAYSTUB' as the title"""
@@ -74,19 +118,7 @@ class TeacherPaystubPDFGenerator(BaseInvoicePDFGenerator):
             Paragraph(f"<b>Total Amount (CAD):</b> ${total_payment:.2f}", pdf_styles['normal_style']),
         ]
 
-        # Add payment method if recorded
-        if self.batch.payment_method:
-            payment_method_display = self.batch.get_payment_method_display()
-            content.append(Paragraph(f"<b>Payment Method:</b> {payment_method_display}", pdf_styles['normal_style']))
-        else:
-            content.append(Paragraph(f"<b>Payment Method:</b> Not recorded", pdf_styles['normal_style']))
-
-        # Add payment date if recorded
-        if self.batch.payment_date:
-            payment_date_str = self.batch.payment_date.strftime('%B %d, %Y')
-            content.append(Paragraph(f"<b>Payment Date:</b> {payment_date_str}", pdf_styles['normal_style']))
-        else:
-            content.append(Paragraph(f"<b>Payment Date:</b> Not recorded", pdf_styles['normal_style']))
+        # Payment method and payment date removed - will be added in future when management can record payments
 
         return content
 
