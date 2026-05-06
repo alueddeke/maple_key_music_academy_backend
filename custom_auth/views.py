@@ -96,7 +96,13 @@ def google_exchange(request):
     except User.DoesNotExist:
         try:
             approved_email = ApprovedEmail.objects.get(email=user_email)
-            default_school = School.objects.first()  # SEC-05: known issue, Phase 2 scope — port as-is
+            school = getattr(getattr(approved_email, 'approved_by', None), 'school', None)
+            if school is None:
+                logger.error('Cannot derive school for ApprovedEmail user creation: %s', user_email)
+                return Response(
+                    {'error': 'Server configuration error'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             user = User.objects.create(
                 email=user_email,
                 first_name=user_data.get('given_name', ''),
@@ -105,13 +111,20 @@ def google_exchange(request):
                 oauth_provider='google',
                 oauth_id=user_data.get('id'),
                 is_approved=True,
-                school=default_school,
+                school=school,
             )
         except ApprovedEmail.DoesNotExist:
             try:
                 reg_request = UserRegistrationRequest.objects.get(email=user_email)
                 if reg_request.status == 'approved':
-                    default_school = School.objects.first()  # SEC-05, port as-is
+                    # SEC-05: school derived from reviewer (reviewed_by is non-null when status='approved')
+                    school = getattr(getattr(reg_request, 'reviewed_by', None), 'school', None)
+                    if school is None:
+                        logger.error('Cannot derive school for reg_request user creation: %s', user_email)
+                        return Response(
+                            {'error': 'Server configuration error'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        )
                     user = User.objects.create(
                         email=user_email,
                         first_name=user_data.get('given_name', ''),
@@ -120,7 +133,7 @@ def google_exchange(request):
                         oauth_provider='google',
                         oauth_id=user_data.get('id'),
                         is_approved=True,
-                        school=default_school,
+                        school=school,
                     )
                 elif reg_request.status == 'rejected':
                     return Response(
@@ -349,15 +362,20 @@ def get_jwt_token(request):
                     password_line = notes_lines[0]  # First line has the password
                     hashed_password = password_line.replace('HASHED_PASSWORD:', '', 1).strip()
 
-                    from billing.models import School
-                    default_school = School.objects.first()  # Get default school
+                    school = getattr(getattr(reg_request, 'reviewed_by', None), 'school', None)
+                    if school is None:
+                        logger.error('Cannot derive school for reg_request user creation: %s', email)
+                        return Response(
+                            {'error': 'Server configuration error'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        )
                     user = User.objects.create(
                         email=email,
                         first_name=reg_request.first_name,
                         last_name=reg_request.last_name,
                         user_type=reg_request.user_type,
                         is_approved=True,
-                        school=default_school
+                        school=school
                     )
                     user.password = hashed_password
                     user.save()
