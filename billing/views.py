@@ -84,8 +84,9 @@ def validate_batch_billable_contacts(batch):
 # USER MANAGEMENT ENDPOINTS
 
 @api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
 def teacher_list(request):
-    """Public teacher directory + management teacher creation"""
+    """Authenticated teacher directory + management teacher creation"""
     if request.method == 'GET':
         # Public endpoint - show approved teachers only
         # For authenticated users, filter by school; for public, show all (future: subdomain filtering)
@@ -663,51 +664,6 @@ def approve_teacher_invoice(request, invoice_id):
 # DETAIL VIEWS
 
 @api_view(['GET', 'PUT', 'DELETE'])
-def teacher_detail(request, pk):
-    """Teacher detail endpoint - GET is public, PUT/DELETE require authentication"""
-    try:
-        teacher = User.objects.get(pk=pk, user_type='teacher')
-    except User.DoesNotExist:
-        return Response(status=status.HTTP_404_NOT_FOUND)
-    
-    if request.method == 'GET':
-        # Allow anyone to view teacher details (public profile)
-        serializer = UserSerializer(teacher)
-        return Response(serializer.data)
-    
-    elif request.method == 'PUT':
-        # Require authentication to update teacher profile
-        if not request.user.is_authenticated:
-            return Response({
-                'error': 'Authentication required',
-                'message': 'Please provide a valid JWT token to update teacher profile'
-            }, status=status.HTTP_401_UNAUTHORIZED)
-        
-        # Check if the authenticated user is updating their own profile or is management
-        if request.user.id != teacher.id and request.user.user_type != 'management':
-            return Response({
-                'error': 'Access denied',
-                'message': 'You can only update your own profile'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        serializer = UserSerializer(teacher, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    elif request.method == 'DELETE':
-        # Require management to delete teacher profiles
-        if not request.user.is_authenticated or request.user.user_type != 'management':
-            return Response({
-                'error': 'Management access required',
-                'message': 'Only management can delete teacher profiles'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        teacher.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-@api_view(['GET', 'PUT', 'DELETE'])
 @role_required('student', 'management')
 def student_detail(request, pk):
     """Student detail endpoint - students can see themselves, management can see all"""
@@ -928,7 +884,7 @@ def approve_registration_request(request, pk):
         success, message = send_invitation_email(token)
 
         if not success:
-            print(f"WARNING: Failed to send invitation email to {reg_request.email}: {message}")
+            logger.warning('Failed to send invitation email to %s: %s', reg_request.email, message)
 
         return Response({
             'message': 'Registration approved and invitation email sent',
@@ -1080,16 +1036,24 @@ def setup_account_with_invitation(request, token):
                 'error': 'First name and last name are required'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Create user account
-        from billing.models import School
-        default_school = School.objects.first()  # Get default school
+        # Create user account — derive school from invitation chain (never use School.objects.first())
+        school = getattr(getattr(getattr(invitation, 'approved_email', None), 'approved_by', None), 'school', None)
+        if school is None:
+            logger.error(
+                'Cannot derive school for invitation user creation: %s',
+                invitation.approved_email.email if invitation.approved_email else '<unknown>'
+            )
+            return Response(
+                {'error': 'Server configuration error'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         user = User.objects.create_user(
             email=invitation.email,
             password=password if password else None,  # Password is optional (for OAuth users)
             first_name=first_name,
             last_name=last_name,
             user_type=invitation.user_type,
-            school=default_school
+            school=school
         )
         user.is_approved = True  # Pre-approved via invitation
         user.save()
@@ -1449,7 +1413,7 @@ def teacher_detail(request, pk):
     from .serializers import TeacherDetailSerializer
 
     try:
-        teacher = User.objects.get(pk=pk, user_type='teacher')
+        teacher = User.objects.get(pk=pk, user_type='teacher', school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1575,7 +1539,7 @@ def management_student_detail(request, pk):
 def add_billable_contact(request, student_id):
     """Add a new billing contact for a student"""
     try:
-        student = User.objects.get(pk=student_id, user_type='student', is_active=True)
+        student = User.objects.get(pk=student_id, user_type='student', is_active=True, school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1595,7 +1559,7 @@ def add_billable_contact(request, student_id):
 def manage_billable_contact(request, pk):
     """Get, update, or delete a billing contact"""
     try:
-        contact = BillableContact.objects.get(pk=pk)
+        contact = BillableContact.objects.get(pk=pk, school=request.user.school)
     except BillableContact.DoesNotExist:
         return Response({'error': 'Billing contact not found'}, status=status.HTTP_404_NOT_FOUND)
     
