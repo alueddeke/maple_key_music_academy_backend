@@ -126,7 +126,7 @@ def all_teachers(request):
 def approve_teacher(request, teacher_id):
     """Management endpoint to approve pending teachers"""
     try:
-        teacher = User.objects.get(id=teacher_id, user_type='teacher')
+        teacher = User.objects.get(id=teacher_id, user_type='teacher', school=request.user.school)
         teacher.is_approved = True
         teacher.save()
         return Response({'message': 'Teacher approved successfully'})
@@ -652,7 +652,7 @@ def submit_lessons_for_invoice(request):
 def approve_teacher_invoice(request, invoice_id):
     """Management approves teacher payment invoices"""
     try:
-        invoice = Invoice.objects.get(id=invoice_id, invoice_type='teacher_payment')
+        invoice = Invoice.objects.get(id=invoice_id, invoice_type='teacher_payment', school=request.user.school)
         invoice.status = 'approved'
         invoice.approved_by = request.user
         invoice.approved_at = timezone.now()
@@ -952,7 +952,7 @@ def management_all_users(request):
 def management_delete_user(request, pk):
     """Management can delete any user (except themselves)"""
     try:
-        user = User.objects.get(pk=pk)
+        user = User.objects.get(pk=pk, school=request.user.school)
 
         # Prevent self-deletion
         if user.id == request.user.id:
@@ -1117,7 +1117,7 @@ def management_update_invoice(request, pk):
     from .serializers import DetailedInvoiceSerializer
 
     try:
-        invoice = Invoice.objects.get(pk=pk)
+        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
 
         if not invoice.can_be_edited():
             return Response({
@@ -1145,7 +1145,7 @@ def management_update_invoice(request, pk):
 def management_update_invoice_status(request, pk):
     """Management can update invoice status"""
     try:
-        invoice = Invoice.objects.get(pk=pk)
+        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
         new_status = request.data.get('status')
 
         if new_status not in dict(Invoice.STATUS_CHOICES):
@@ -1178,7 +1178,7 @@ def management_update_invoice_status(request, pk):
 def management_recalculate_invoice(request, pk):
     """Management can recalculate invoice totals"""
     try:
-        invoice = Invoice.objects.get(pk=pk)
+        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
 
         if not invoice.can_be_edited():
             return Response({
@@ -1208,7 +1208,7 @@ def management_recalculate_invoice(request, pk):
 def management_reject_invoice(request, pk):
     """Management can reject an invoice with a reason"""
     try:
-        invoice = Invoice.objects.get(pk=pk)
+        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
         rejection_reason = request.data.get('rejection_reason', '').strip()
 
         if not rejection_reason:
@@ -1248,7 +1248,7 @@ def management_regenerate_invoice_pdf(request, pk):
     try:
         from billing.services.teacher_invoicepdf_generator import InvoiceProcessor
 
-        invoice = Invoice.objects.get(pk=pk)
+        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
 
         # Get recipient email if provided
         recipient_email = request.data.get('recipient_email')
@@ -1489,14 +1489,14 @@ def management_students(request):
 def management_student_detail(request, pk):
     """Get, update, or soft-delete a student"""
     try:
-        student = User.objects.get(pk=pk, user_type='student')
+        student = User.objects.get(pk=pk, user_type='student', school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
-    
+
     if request.method == 'GET':
         serializer = UserSerializer(student)
         return Response(serializer.data)
-    
+
     elif request.method == 'PUT':
         # Update student information
         serializer = UserSerializer(student, data=request.data, partial=True)
@@ -1696,7 +1696,7 @@ def recurring_schedule_detail(request, student_id, schedule_id):
 def assign_teachers_to_student(request, student_id):
     """Assign one or more teachers to a student"""
     try:
-        student = User.objects.get(pk=student_id, user_type='student', is_active=True)
+        student = User.objects.get(pk=student_id, user_type='student', is_active=True, school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
     
@@ -1734,8 +1734,8 @@ def assign_teachers_to_student(request, student_id):
 def unassign_teacher_from_student(request, student_id, teacher_id):
     """Remove a teacher assignment from a student"""
     try:
-        student = User.objects.get(pk=student_id, user_type='student')
-        teacher = User.objects.get(pk=teacher_id, user_type='teacher')
+        student = User.objects.get(pk=student_id, user_type='student', school=request.user.school)
+        teacher = User.objects.get(pk=teacher_id, user_type='teacher', school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Student or teacher not found'}, status=status.HTTP_404_NOT_FOUND)
     
@@ -1751,7 +1751,7 @@ def unassign_teacher_from_student(request, student_id, teacher_id):
 def teacher_students(request, teacher_id):
     """Get all students assigned to a teacher"""
     try:
-        teacher = User.objects.get(pk=teacher_id, user_type='teacher')
+        teacher = User.objects.get(pk=teacher_id, user_type='teacher', school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
     
@@ -1782,10 +1782,10 @@ def teacher_students(request, teacher_id):
 def management_update_teacher(request, pk):
     """Update teacher information"""
     try:
-        teacher = User.objects.get(pk=pk, user_type='teacher')
+        teacher = User.objects.get(pk=pk, user_type='teacher', school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
-    
+
     serializer = UserSerializer(teacher, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
@@ -1798,7 +1798,7 @@ def management_update_teacher(request, pk):
 def management_delete_teacher(request, pk):
     """Soft delete a teacher"""
     try:
-        teacher = User.objects.get(pk=pk, user_type='teacher')
+        teacher = User.objects.get(pk=pk, user_type='teacher', school=request.user.school)
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
     

@@ -9,8 +9,15 @@ import pytest
 from decimal import Decimal
 from django.contrib.auth import get_user_model
 from billing.models import School, SchoolSettings
+from rest_framework.test import APIClient
 
 User = get_user_model()
+
+
+@pytest.fixture
+def api_client():
+    """Create an unauthenticated API client for testing."""
+    return APIClient()
 
 
 @pytest.fixture
