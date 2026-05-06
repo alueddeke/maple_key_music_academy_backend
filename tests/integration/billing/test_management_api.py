@@ -278,3 +278,38 @@ class TestRateLockingMechanism:
 
         # Lesson.save() should have set teacher_rate to teacher's new hourly_rate
         assert lesson.teacher_rate == Decimal("100.00")
+
+
+@pytest.mark.django_db
+class TestPhase2BillableContactSchoolScoping:
+    """SEC-07: manage_billable_contact must filter by school=request.user.school."""
+
+    def test_manage_billable_contact_rejects_cross_school(
+        self, api_client, management_user, second_school
+    ):
+        """
+        SEC-07: Management from school A cannot GET billable contact from school B.
+        Currently FAILS — manage_billable_contact does not filter by school.
+        """
+        from billing.models import BillableContact
+
+        school2_student = User.objects.create_user(
+            email="student_s2_contact@test.com", password="test123",
+            user_type="student", school=second_school, is_approved=True
+        )
+        contact = BillableContact.objects.create(
+            student=school2_student,
+            school=second_school,
+            contact_type='parent',
+            first_name='Cross', last_name='School',
+            email='cross@school2.com', phone='416-555-1234',
+            street_address='1 Other St', city='Vancouver',
+            province='BC', postal_code='V6B 1A1',
+            is_primary=True
+        )
+
+        api_client.force_authenticate(user=management_user)
+        url = reverse('manage_billable_contact', kwargs={'pk': contact.id})
+        response = api_client.get(url)
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND

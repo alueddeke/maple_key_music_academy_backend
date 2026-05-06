@@ -122,3 +122,67 @@ class TestGoogleExchangeEndpoint:
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert response.data.get('error_code') == 'registration_rejected'
+
+    def test_google_timeout_returns_504(self, api_client, school):
+        """
+        SEC-02: requests.post to Google token endpoint raises Timeout.
+        Expects HTTP 504 Gateway Timeout (not 400 or 500).
+        Currently FAILS — no Timeout handling exists in google_exchange.
+        """
+        import requests as req_lib
+
+        with patch('custom_auth.views.requests.post',
+                   side_effect=req_lib.exceptions.Timeout):
+            url = reverse(self.URL)
+            response = api_client.post(url, {
+                'code': 'auth_code_abc',
+                'code_verifier': 'verifier_xyz_long_enough_for_validation',
+            }, format='json')
+
+        assert response.status_code == status.HTTP_504_GATEWAY_TIMEOUT
+        assert 'timed out' in response.data.get('error', '').lower()
+
+    def test_google_exchange_creates_user_in_approver_school(
+        self, api_client, school, second_school
+    ):
+        """
+        SEC-05: When google_exchange creates a new user from an ApprovedEmail,
+        the user's school MUST equal ApprovedEmail.approved_by.school — NOT
+        School.objects.first(). This test seeds the approver in `second_school`
+        and asserts the new user lands in `second_school` regardless of
+        which school is "first" in the DB.
+        Currently FAILS — google_exchange uses School.objects.first().
+        """
+        # Approver belongs to second_school (NOT the default 'school' fixture)
+        approver = User.objects.create_user(
+            email='approver_s2@example.com',
+            password='test123',
+            user_type='management',
+            school=second_school,
+            is_approved=True,
+        )
+        ApprovedEmail.objects.create(
+            email='new_oauth_user@example.com',
+            approved_by=approver,
+        )
+
+        mock_token, mock_userinfo = self._mock_google_responses(
+            'new_oauth_user@example.com'
+        )
+
+        with patch('custom_auth.views.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+            url = reverse(self.URL)
+            response = api_client.post(url, {
+                'code': 'auth_code_abc',
+                'code_verifier': 'verifier_xyz_long_enough_for_validation',
+            }, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        created_user = User.objects.get(email='new_oauth_user@example.com')
+        assert created_user.school_id == second_school.id, (
+            f'User school must be derived from ApprovedEmail.approved_by.school '
+            f'(expected {second_school.id}, got {created_user.school_id}). '
+            f'If this fails with school.id, google_exchange is still using '
+            f'School.objects.first() (SEC-05 not yet fixed).'
+        )
