@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Get URLs from environment
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+GOOGLE_API_TIMEOUT = int(os.getenv('GOOGLE_API_TIMEOUT', '10'))
 
 
 @api_view(['POST'])
@@ -45,8 +46,14 @@ def google_exchange(request):
         'redirect_uri': f'{FRONTEND_URL}/oauth-callback',  # must match frontend's redirect_uri
         'code_verifier': code_verifier,                    # PKCE verifier
     }
-    # NOTE: No timeout — port as-is; SEC-02 adds configurable timeout in Phase 2
-    token_response = requests.post(token_url, data=token_data)
+    try:
+        token_response = requests.post(token_url, data=token_data, timeout=GOOGLE_API_TIMEOUT)
+    except requests.exceptions.Timeout:
+        logger.error('Google API timeout after %ds', GOOGLE_API_TIMEOUT)
+        return Response(
+            {'error': 'Google authentication timed out. Please try again.'},
+            status=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
 
     if token_response.status_code != 200:
         return Response(
@@ -60,7 +67,14 @@ def google_exchange(request):
     # Get user info from Google
     user_info_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
     headers = {'Authorization': f'Bearer {access_token}'}
-    user_response = requests.get(user_info_url, headers=headers)
+    try:
+        user_response = requests.get(user_info_url, headers=headers, timeout=GOOGLE_API_TIMEOUT)
+    except requests.exceptions.Timeout:
+        logger.error('Google API timeout after %ds', GOOGLE_API_TIMEOUT)
+        return Response(
+            {'error': 'Google authentication timed out. Please try again.'},
+            status=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
 
     if user_response.status_code != 200:
         return Response(
@@ -141,6 +155,12 @@ def google_exchange(request):
                     },
                     status=status.HTTP_202_ACCEPTED,
                 )
+    except requests.exceptions.Timeout:
+        logger.error('Google API timeout after %ds', GOOGLE_API_TIMEOUT)
+        return Response(
+            {'error': 'Google authentication timed out. Please try again.'},
+            status=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
     except Exception as e:
         logger.exception('Google exchange approval flow error')
         return Response(
