@@ -92,13 +92,6 @@ INSTALLED_APPS = [
     'corsheaders',
     'simple_history',  # Audit logging for model changes
 
-    # Django Allauth - Required for OAuth authentication
-    'django.contrib.sites',  # Required by django-allauth for multi-site support
-    'allauth',  # Main allauth app for authentication
-    'allauth.account',  # Handles user accounts and registration
-    'allauth.socialaccount',  # Handles social media authentication
-    'allauth.socialaccount.providers.google',  # Google OAuth provider
-
     # Custom authentication app
     'custom_auth',  # Your custom auth app for OAuth views and JWT handling
 ]
@@ -112,15 +105,10 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "allauth.account.middleware.AccountMiddleware",  # Required by django-allauth
     "simple_history.middleware.HistoryRequestMiddleware",  # Tracks user for audit logging
 ]
 
 ROOT_URLCONF = "maple_key_backend.urls"
-
-# Site ID - Required by django-allauth for multi-site support
-# This identifies which site in the database this Django instance represents
-SITE_ID = 2
 
 TEMPLATES = [
     {
@@ -252,44 +240,13 @@ SIMPLE_JWT = {
     'JTI_CLAIM': 'jti',                              # Claim name for JWT ID (unique identifier)
 }
 
-# Django Allauth Settings
-# These settings configure how django-allauth handles authentication
-
-# Authentication backends - order matters!
+# Authentication backends
 AUTHENTICATION_BACKENDS = [
-    'django.contrib.auth.backends.ModelBackend',     # Django's default authentication backend
-    'allauth.account.auth_backends.AuthenticationBackend',  # Allauth's authentication backend
+    'django.contrib.auth.backends.ModelBackend',
 ]
 
-# Account settings (for allauth.account) - Updated to new format
-ACCOUNT_UNIQUE_EMAIL = True                          # Email addresses must be unique
-ACCOUNT_EMAIL_VERIFICATION = 'none'                  # Email verification setting ('none', 'optional', 'mandatory')
-ACCOUNT_LOGIN_METHODS = {'email'}                    # Use email for authentication instead of username
-ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']  # Required fields for signup
-
-# Social account settings (for allauth.socialaccount)
-SOCIALACCOUNT_PROVIDERS = {
-    'google': {
-        'SCOPE': [
-            'profile',  # Access to user's basic profile info
-            'email',    # Access to user's email address
-        ],
-        'AUTH_PARAMS': {
-            'access_type': 'online',  # Type of access ('online' or 'offline')
-        },
-        'APP': {
-            'client_id': config('GOOGLE_CLIENT_ID'),
-            'secret': config('GOOGLE_CLIENT_SECRET'),
-            'key': ''
-        }
-    }
-}
-
-# Django Allauth settings
-# Dynamic redirect based on environment
+# Frontend URL (used by PKCE OAuth exchange and password reset)
 FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')
-LOGIN_REDIRECT_URL = f'{FRONTEND_URL}/dashboard'
-SOCIALACCOUNT_LOGIN_ON_GET = True
 
 # CSRF settings
 # Add both HTTP (for local dev) and HTTPS (for production)
