@@ -502,7 +502,7 @@ def get_jwt_token(request):
                 else:
                     return Response({
                         'error': 'Account setup incomplete',
-                        'message': f'Your registration was approved but password data is missing. Please contact support. (Notes: {reg_request.notes[:50] if reg_request.notes else "None"})'
+                        'message': 'Your registration was approved but account setup is incomplete. Please contact support.'
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             elif reg_request.status == 'rejected':
@@ -598,7 +598,9 @@ def refresh_jwt_token(request):
         if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS', False):
             # Blacklist the old refresh token and create a new one
             refresh.blacklist()
-            new_refresh = RefreshToken.for_user(refresh.payload['user_id'])
+            User = get_user_model()
+            user = User.objects.get(pk=refresh.payload['user_id'])
+            new_refresh = RefreshToken.for_user(user)
             return Response({
                 'access_token': str(new_access_token),
                 'refresh_token': str(new_refresh)
@@ -803,9 +805,9 @@ Maple Key Music Academy Team
             [email],
             fail_silently=False,
         )
-        print(f"DEBUG: Password reset email sent to {email}")
+        logger.info('Password reset email sent to %s', email)
     except Exception as e:
-        print(f"ERROR: Failed to send password reset email: {str(e)}")
+        logger.error('Failed to send password reset email to %s: %s', email, str(e))
         return Response({
             'error': 'Failed to send password reset email. Please try again later.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -942,7 +944,7 @@ def password_reset_confirm(request):
     user.set_password(password)
     user.save()
 
-    print(f"DEBUG: Password reset successful for user {user.email}")
+    logger.info('Password reset successful for user %s', user.email)
 
     return Response({
         'message': 'Password reset successful. You can now login with your new password.'
