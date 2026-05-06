@@ -5,9 +5,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from django.http import HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
-from urllib.parse import urlencode
 import requests
 import os
 import logging
@@ -16,308 +14,161 @@ logger = logging.getLogger(__name__)
 
 # Get URLs from environment
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-# For backend callback URL, construct from request in the view since it needs to match environment
 
 
-@csrf_exempt
-@api_view(['GET','POST'])
+@api_view(['POST'])
 @permission_classes([AllowAny])
-def google_oauth(request):
-    """redirect to google for oauth flow"""
-    # Get frontend redirect URI - pass it via OAuth state parameter instead of session
-    # This avoids session cookie issues that cause redirect loops
-    default_frontend_redirect = f'{FRONTEND_URL}/oauth-callback'
-    frontend_redirect_uri = request.GET.get('redirect_uri', default_frontend_redirect)
+def google_exchange(request):
+    """
+    POST /api/auth/google/exchange/
+    Accepts { code, code_verifier } from frontend PKCE flow.
+    Exchanges authorization code with Google server-to-server.
+    Returns { access_token, refresh_token, user } in response body.
+    Tokens are NEVER placed in URL params (SEC-01).
+    """
+    code = request.data.get('code', '').strip()
+    code_verifier = request.data.get('code_verifier', '').strip()
 
-    # Build Google OAuth URL manually
-    import json
-    import base64
+    if not code or not code_verifier:
+        return Response(
+            {'error': 'code and code_verifier are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    # Encode frontend redirect URI in state parameter (OAuth standard approach)
-    state_data = {'redirect_uri': frontend_redirect_uri}
-    state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
-
-    # Get Google OAuth app configuration
-    from allauth.socialaccount.models import SocialApp
-    try:
-        app = SocialApp.objects.get(provider='google')
-    except SocialApp.DoesNotExist:
-        return Response({'error': 'Google OAuth app not configured. Please set up in Django admin.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    # Construct backend callback URL from request to match environment
-    backend_callback_url = request.build_absolute_uri('/api/auth/google/callback/')
-
-    logger.debug(f"Backend callback URL: {backend_callback_url}")
-    logger.debug(f"Request host: {request.get_host()}")
-    logger.debug(f"Request scheme: {request.scheme}")
-
-    google_oauth_url = 'https://accounts.google.com/o/oauth2/v2/auth'
-    params = {
-        'client_id': app.client_id,
-        'redirect_uri': backend_callback_url,
-        'scope': 'email profile',
-        'response_type': 'code',
-        'access_type': 'online',
-        'state': state  # Pass redirect URI via state parameter
+    # Exchange authorization code with Google (server-to-server)
+    token_url = 'https://oauth2.googleapis.com/token'
+    token_data = {
+        'client_id': os.getenv('GOOGLE_CLIENT_ID'),
+        'client_secret': os.getenv('GOOGLE_CLIENT_SECRET'),
+        'code': code,
+        'grant_type': 'authorization_code',
+        'redirect_uri': f'{FRONTEND_URL}/oauth-callback',  # must match frontend's redirect_uri
+        'code_verifier': code_verifier,                    # PKCE verifier
     }
+    # NOTE: No timeout — port as-is; SEC-02 adds configurable timeout in Phase 2
+    token_response = requests.post(token_url, data=token_data)
 
-    redirect_url = f"{google_oauth_url}?{urlencode(params)}"
-    print(f"DEBUG: Full OAuth URL: {redirect_url}")
-    return HttpResponseRedirect(redirect_url)
+    if token_response.status_code != 200:
+        return Response(
+            {'error': 'Failed to exchange code with Google', 'details': token_response.text},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
+    token_info = token_response.json()
+    access_token = token_info.get('access_token')
 
+    # Get user info from Google
+    user_info_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
+    headers = {'Authorization': f'Bearer {access_token}'}
+    user_response = requests.get(user_info_url, headers=headers)
 
-@csrf_exempt
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def google_oauth_callback(request):
-    """Google OAuth callback endpoint"""
-    import logging
-    import sys
-    logger = logging.getLogger(__name__)
+    if user_response.status_code != 200:
+        return Response(
+            {'error': 'Failed to retrieve user info from Google'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    # Force output to stderr immediately
-    sys.stderr.write(f"=== OAuth Callback Started ===\n")
-    sys.stderr.flush()
+    user_data = user_response.json()
+    user_email = user_data.get('email')
+
+    # User find-or-create + approval workflow
+    # Ported from google_oauth_callback (debug prints removed)
+    User = get_user_model()
+    from billing.models import ApprovedEmail, UserRegistrationRequest, School
+    user = None
 
     try:
-        # Step 1: Get the authorization code and state from the request
-        code = request.GET.get('code')
-        state = request.GET.get('state')
-
-        sys.stderr.write(f"Code present: {bool(code)}\n")
-        sys.stderr.flush()
-
-        if not code:
-            return Response({'error': 'No authorization code provided'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Decode state parameter to get frontend redirect URI
-        import json
-        import base64
-        default_frontend_redirect = f'{FRONTEND_URL}/oauth-callback'
+        user = User.objects.get(email=user_email)
+    except User.DoesNotExist:
         try:
-            state_data = json.loads(base64.urlsafe_b64decode(state).decode()) if state else {}
-            frontend_redirect_uri = state_data.get('redirect_uri', default_frontend_redirect)
-        except:
-            frontend_redirect_uri = default_frontend_redirect
-
-        # Step 2: Get Google OAuth app configuration
-        from allauth.socialaccount.models import SocialApp
-        try:
-            app = SocialApp.objects.get(provider='google')
-        except SocialApp.DoesNotExist:
-            return Response({'error': 'Google OAuth app not configured. Please set up in Django admin.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        # Step 3: Exchange code for tokens using Google API directly
-        # Construct backend callback URL to match environment
-        backend_callback_url = request.build_absolute_uri('/api/auth/google/callback/')
-
-        sys.stderr.write(f"Backend callback URL for token exchange: {backend_callback_url}\n")
-        sys.stderr.flush()
-
-        token_url = 'https://oauth2.googleapis.com/token'
-        token_data = {
-            'client_id': app.client_id,
-            'client_secret': app.secret,
-            'code': code,
-            'grant_type': 'authorization_code',
-            'redirect_uri': backend_callback_url
-        }
-
-        sys.stderr.write(f"Sending token request to Google...\n")
-        sys.stderr.flush()
-
-        token_response = requests.post(token_url, data=token_data)
-
-        sys.stderr.write(f"Token exchange status: {token_response.status_code}\n")
-        sys.stderr.write(f"Token response: {token_response.text}\n")
-        sys.stderr.flush()
-
-        if token_response.status_code != 200:
-            return Response({
-                'error': 'Failed to exchange code for token',
-                'details': token_response.text
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        token_info = token_response.json()
-        access_token = token_info.get('access_token')
-        
-        # Step 4: Get user info from Google
-        user_info_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
-        headers = {'Authorization': f'Bearer {access_token}'}
-        user_response = requests.get(user_info_url, headers=headers)
-        
-        if user_response.status_code != 200:
-            return Response({'error': 'Failed to get user info from Google'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        user_data = user_response.json()
-        print(f"DEBUG: User data from Google: {user_data}")
-
-        # Step 5: Hybrid approval system - Check ApprovedEmail OR create registration request
-        User = get_user_model()
-        from billing.models import ApprovedEmail, UserRegistrationRequest
-
-        user_email = user_data.get('email')
-        user = None
-
-        try:
-            # Try to get existing user
-            user = User.objects.get(email=user_email)
-            print(f"DEBUG: Existing user found: {user.email}")
-        except User.DoesNotExist:
-            # User doesn't exist - check if email is pre-approved
+            approved_email = ApprovedEmail.objects.get(email=user_email)
+            default_school = School.objects.first()  # SEC-05: known issue, Phase 2 scope — port as-is
+            user = User.objects.create(
+                email=user_email,
+                first_name=user_data.get('given_name', ''),
+                last_name=user_data.get('family_name', ''),
+                user_type=approved_email.user_type,
+                oauth_provider='google',
+                oauth_id=user_data.get('id'),
+                is_approved=True,
+                school=default_school,
+            )
+        except ApprovedEmail.DoesNotExist:
             try:
-                approved_email = ApprovedEmail.objects.get(email=user_email)
-                # Email is pre-approved - create user with approved status
-                from billing.models import School
-                default_school = School.objects.first()  # Get default school
-                user = User.objects.create(
-                    email=user_email,
-                    first_name=user_data.get('given_name', ''),
-                    last_name=user_data.get('family_name', ''),
-                    user_type=approved_email.user_type,
-                    oauth_provider='google',
-                    oauth_id=user_data.get('id'),
-                    is_approved=True,  # Pre-approved
-                    school=default_school
-                )
-                print(f"DEBUG: User created from pre-approved email: {user.email}")
-            except ApprovedEmail.DoesNotExist:
-                # Not pre-approved - check for existing registration request
-                try:
-                    reg_request = UserRegistrationRequest.objects.get(email=user_email)
-                    if reg_request.status == 'approved':
-                        # Registration request was approved - create user
-                        from billing.models import School
-                        default_school = School.objects.first()  # Get default school
-                        user = User.objects.create(
-                            email=user_email,
-                            first_name=user_data.get('given_name', ''),
-                            last_name=user_data.get('family_name', ''),
-                            user_type=reg_request.user_type,
-                            oauth_provider='google',
-                            oauth_id=user_data.get('id'),
-                            is_approved=True,
-                            school=default_school
-                        )
-                        print(f"DEBUG: User created from approved registration: {user.email}")
-                    elif reg_request.status == 'rejected':
-                        error_url = f"{frontend_redirect_uri}?error=registration_rejected&message=Your registration request was rejected. Please contact support."
-                        return HttpResponseRedirect(error_url)
-                    else:  # pending
-                        error_url = f"{frontend_redirect_uri}?error=approval_pending&message=Your registration is pending management approval. You will be able to login once approved."
-                        return HttpResponseRedirect(error_url)
-                except UserRegistrationRequest.DoesNotExist:
-                    # No registration request - create one
-                    UserRegistrationRequest.objects.create(
+                reg_request = UserRegistrationRequest.objects.get(email=user_email)
+                if reg_request.status == 'approved':
+                    default_school = School.objects.first()  # SEC-05, port as-is
+                    user = User.objects.create(
                         email=user_email,
                         first_name=user_data.get('given_name', ''),
                         last_name=user_data.get('family_name', ''),
-                        user_type='teacher',  # Default
+                        user_type=reg_request.user_type,
                         oauth_provider='google',
                         oauth_id=user_data.get('id'),
-                        status='pending'
+                        is_approved=True,
+                        school=default_school,
                     )
-                    print(f"DEBUG: Registration request created for: {user_email}")
-                    error_url = f"{frontend_redirect_uri}?error=approval_required&message=Thank you for registering! Your request is pending management approval. You will be able to login once approved."
-                    return HttpResponseRedirect(error_url)
-        except Exception as e:
-            print(f"DEBUG: Error in approval flow: {str(e)}")
-            return Response({'error': f'Approval flow error: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                elif reg_request.status == 'rejected':
+                    return Response(
+                        {
+                            'error_code': 'registration_rejected',
+                            'message': 'Registration rejected. Contact support.',
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                else:  # pending
+                    return Response(
+                        {
+                            'error_code': 'approval_pending',
+                            'message': 'Your registration is pending management approval.',
+                        },
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+            except UserRegistrationRequest.DoesNotExist:
+                UserRegistrationRequest.objects.create(
+                    email=user_email,
+                    first_name=user_data.get('given_name', ''),
+                    last_name=user_data.get('family_name', ''),
+                    user_type='teacher',  # default — management reassigns if needed
+                    oauth_provider='google',
+                    oauth_id=user_data.get('id'),
+                    status='pending',
+                )
+                return Response(
+                    {
+                        'error_code': 'new_registration',
+                        'message': 'Thank you for registering! Await approval.',
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
+    except Exception as e:
+        logger.exception('Google exchange approval flow error')
+        return Response(
+            {'error': f'Approval flow error: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
-        # Make sure we have a user object (could be None if registration request was created)
-        if not user:
-            error_url = f"{frontend_redirect_uri}?error=no_user&message=Unable to complete login. Please try again."
-            return HttpResponseRedirect(error_url)
+    # Successful user found or created — issue JWT
+    refresh = RefreshToken.for_user(user)
 
-        # Step 7: Generate JWT tokens
-        try:
-            refresh = RefreshToken.for_user(user)
-            print(f"DEBUG: JWT tokens generated successfully for user {user.email}")
-        except Exception as e:
-            print(f"DEBUG: JWT token generation failed: {str(e)}")
-            return Response({'error': f'JWT token generation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        # Get user name from Google data or use email as fallback
-        user_name = f"{user.first_name} {user.last_name}".strip()
-        if not user_name:
-            user_name = user_data.get('name', user.email)  # Use Google's name or email
+    user_name = f"{user.first_name} {user.last_name}".strip()
+    if not user_name:
+        user_name = user_data.get('name', user.email)
 
-        # Prepare user data for URL encoding
-        user_data_dict = {
+    return Response({
+        'access_token': str(refresh.access_token),
+        'refresh_token': str(refresh),
+        'user': {
             'email': user.email,
             'name': user_name,
             'user_id': user.id,
             'user_type': user.user_type,
-            'is_approved': user.is_approved
+            'is_approved': user.is_approved,
         }
-
-        # Build redirect URL with tokens and user data (using frontend_redirect_uri from state)
-        params = {
-            'access_token': str(refresh.access_token),
-            'refresh_token': str(refresh),
-            'user': urlencode(user_data_dict)
-        }
-
-        redirect_url = f"{frontend_redirect_uri}?{urlencode(params)}"
-
-        # Redirect to frontend with tokens
-        return HttpResponseRedirect(redirect_url)
-        
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    })
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def oauth_success(request):
-    """Handle successful OAuth login and redirect to frontend with JWT tokens"""
-    try:
-        # Check if user is authenticated (Django Allauth should have logged them in)
-        if not request.user.is_authenticated:
-            return HttpResponseRedirect('/login?error=not_authenticated')
 
-        # Get frontend redirect URI from session
-        default_frontend_redirect = f'{FRONTEND_URL}/oauth-callback'
-        frontend_redirect_uri = request.session.get('frontend_redirect_uri', default_frontend_redirect)
-        
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(request.user)
-        
-        # Get user name
-        user_name = f"{request.user.first_name} {request.user.last_name}".strip()
-        if not user_name:
-            user_name = request.user.email
-        
-        # Prepare user data for URL encoding
-        user_data = {
-            'email': request.user.email,
-            'name': user_name,
-            'user_id': request.user.id,
-            'user_type': getattr(request.user, 'user_type', 'teacher'),
-            'is_approved': getattr(request.user, 'is_approved', False)
-        }
-        
-        # Build redirect URL with tokens and user data
-        params = {
-            'access_token': str(refresh.access_token),
-            'refresh_token': str(refresh),
-            'user': urlencode(user_data)
-        }
-        
-        redirect_url = f"{frontend_redirect_uri}?{urlencode(params)}"
-        
-        # Clear session data
-        if 'frontend_redirect_uri' in request.session:
-            del request.session['frontend_redirect_uri']
-        
-        # Redirect to frontend with tokens
-        return HttpResponseRedirect(redirect_url)
-        
-    except Exception as e:
-        return HttpResponseRedirect('/login?error=oauth_error')
-
- 
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
