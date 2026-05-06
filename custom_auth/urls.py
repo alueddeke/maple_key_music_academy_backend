@@ -2,10 +2,8 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    # OAuth endpoints
-    path('google/', views.google_oauth, name='google_oauth'),
-    path('google/callback/', views.google_oauth_callback, name='google_callback'),
-    path('oauth-success/', views.oauth_success, name='oauth_success'),
+    # PKCE OAuth endpoints
+    path('google/exchange/', views.google_exchange, name='google_exchange'),
 
     # Registration endpoints
     path('register/', views.register_with_email, name='register_with_email'),
