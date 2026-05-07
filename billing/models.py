@@ -280,7 +280,6 @@ class Lesson(models.Model):
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
-    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)  # DEPRECATED: Use teacher_rate/student_rate
     teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, help_text="Rate paid to teacher for this lesson")
     student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
@@ -406,9 +405,6 @@ class Lesson(models.Model):
         # If lesson is marked as trial after rates were set, update student_rate to $0
         elif self.is_trial and self.student_rate != Decimal('0.00'):
             self.student_rate = Decimal('0.00')
-
-        # Maintain backward compatibility: sync 'rate' with teacher_rate for existing code
-        self.rate = self.teacher_rate
 
         super().save(*args, **kwargs)
     
