@@ -1,5 +1,5 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from simple_history.models import HistoricalRecords
@@ -607,21 +607,21 @@ class Invoice(models.Model):
         year = today.strftime('%Y')
         month = today.strftime('%m')
 
-        # Get the count of invoices created this month
         prefix = f"INV-{year}-{month}"
-        last_invoice = Invoice.objects.filter(
-            invoice_number__startswith=prefix
-        ).order_by('-invoice_number').first()
 
-        if last_invoice and last_invoice.invoice_number:
-            # Extract the sequence number and increment
-            try:
-                last_seq = int(last_invoice.invoice_number.split('-')[-1])
-                new_seq = last_seq + 1
-            except (ValueError, IndexError):
+        with transaction.atomic():
+            last_invoice = Invoice.objects.filter(
+                invoice_number__startswith=prefix
+            ).select_for_update().order_by('-invoice_number').first()
+
+            if last_invoice and last_invoice.invoice_number:
+                try:
+                    last_seq = int(last_invoice.invoice_number.split('-')[-1])
+                    new_seq = last_seq + 1
+                except (ValueError, IndexError):
+                    new_seq = 1
+            else:
                 new_seq = 1
-        else:
-            new_seq = 1
 
         return f"{prefix}-{new_seq:04d}"
 
@@ -968,21 +968,21 @@ class StudentInvoice(models.Model):
         if not self.invoice_number:
             prefix = f"INV-{self.batch.year}-{self.batch.month:02d}-S{self.student.id}"
 
-            # Find the last invoice with this prefix
-            last_invoice = StudentInvoice.objects.filter(
-                invoice_number__startswith=prefix
-            ).order_by('-invoice_number').first()
+            with transaction.atomic():
+                last_invoice = StudentInvoice.objects.filter(
+                    invoice_number__startswith=prefix
+                ).select_for_update().order_by('-invoice_number').first()
 
-            if last_invoice:
-                try:
-                    last_seq = int(last_invoice.invoice_number.split('-')[-1])
-                    new_seq = last_seq + 1
-                except (ValueError, IndexError):
+                if last_invoice:
+                    try:
+                        last_seq = int(last_invoice.invoice_number.split('-')[-1])
+                        new_seq = last_seq + 1
+                    except (ValueError, IndexError):
+                        new_seq = 1
+                else:
                     new_seq = 1
-            else:
-                new_seq = 1
 
-            self.invoice_number = f"{prefix}-{new_seq:04d}"
+                self.invoice_number = f"{prefix}-{new_seq:04d}"
 
     def calculate_amount(self):
         """Calculate total amount from all associated lesson items"""
