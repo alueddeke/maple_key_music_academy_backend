@@ -498,37 +498,6 @@ def management_reject_invoice(request, pk):
         return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
-@api_view(['POST'])
-@management_required
-def management_regenerate_invoice_pdf(request, pk):
-    """Management can regenerate and resend invoice PDF"""
-    try:
-        from billing.services.teacher_invoicepdf_generator import InvoiceProcessor
-
-        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
-
-        # Get recipient email if provided
-        recipient_email = request.data.get('recipient_email')
-
-        # Regenerate PDF and send email
-        success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(
-            invoice, recipient_email
-        )
-
-        if success:
-            return Response({
-                'message': 'Invoice PDF regenerated and sent successfully'
-            })
-        else:
-            return Response({
-                'error': 'Failed to regenerate invoice',
-                'details': message
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    except Invoice.DoesNotExist:
-        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
-
-
 # SYSTEM SETTINGS ENDPOINTS
 
 @api_view(['GET'])

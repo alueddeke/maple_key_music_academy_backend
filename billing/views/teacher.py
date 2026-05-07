@@ -414,17 +414,6 @@ def submit_lessons_for_invoice(request):
             student_invoice.lessons.set(student_lessons)
             student_invoices_created.append(student_invoice)
 
-        # Generate PDF and send email
-        try:
-            from billing.services.teacher_invoicepdf_generator import InvoiceProcessor
-            success, message, pdf_content = InvoiceProcessor.generate_and_send_invoice(invoice)
-            if success:
-                logger.info(f"PDF generated and email sent for invoice {invoice.id} with {len(student_invoices_created)} student invoices")
-            else:
-                logger.warning(f"Failed to generate PDF or send email for invoice {invoice.id}: {message}")
-        except Exception as e:
-            logger.error(f"Error generating PDF or sending email for invoice {invoice.id}: {str(e)}")
-
         # Return the created invoice with lesson details
         serializer = InvoiceSerializer(invoice)
         return Response({
