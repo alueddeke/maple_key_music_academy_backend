@@ -14,6 +14,7 @@ from custom_auth.decorators import (
     teacher_required, management_required, teacher_or_management_required
 )
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -156,7 +157,7 @@ def submit_lessons_for_invoice(request):
 
             # Generate email if not provided (same logic as creation)
             if not student_email:
-                temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
+                temp_email = f"noemail_{uuid.uuid4().hex[:12]}@maplekeymusic.internal"
                 student_email = temp_email
 
             # Check if student exists
@@ -251,7 +252,7 @@ def submit_lessons_for_invoice(request):
             else:
                 # Create student with just name (no email)
                 # Generate temp email and use get_or_create for atomicity
-                temp_email = f"{student_name.lower().replace(' ', '.')}@temp.com"
+                temp_email = f"noemail_{uuid.uuid4().hex[:12]}@maplekeymusic.internal"
                 student, created = User.objects.get_or_create(
                     email=temp_email,
                     user_type='student',
