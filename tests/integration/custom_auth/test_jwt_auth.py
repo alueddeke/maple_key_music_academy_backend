@@ -117,3 +117,90 @@ class TestJWTLogin:
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert 'error' in response.data
         assert 'Registration rejected' in response.data['error']
+
+
+@pytest.mark.django_db
+class TestJWTRefresh:
+    """Integration tests for POST /api/auth/token/refresh/ (refresh_jwt_token)."""
+
+    def test_valid_refresh_returns_new_access_token(self, api_client, teacher_user):
+        refresh = RefreshToken.for_user(teacher_user)
+        url = reverse('refresh_jwt_token')
+        response = api_client.post(url, {
+            'refresh': str(refresh),
+        }, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        assert 'access_token' in response.data
+        assert isinstance(response.data['access_token'], str)
+        assert len(response.data['access_token']) > 0
+
+    def test_missing_refresh_returns_400(self, api_client):
+        url = reverse('refresh_jwt_token')
+        response = api_client.post(url, {}, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'error' in response.data
+        assert 'required' in response.data['error'].lower()
+
+    def test_invalid_refresh_returns_401(self, api_client):
+        url = reverse('refresh_jwt_token')
+        response = api_client.post(url, {
+            'refresh': 'not-a-jwt',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert 'error' in response.data
+        assert 'Invalid refresh token' in response.data['error']
+
+    def test_blacklisted_refresh_returns_401(self, api_client, teacher_user):
+        refresh = RefreshToken.for_user(teacher_user)
+        refresh.blacklist()
+
+        url = reverse('refresh_jwt_token')
+        response = api_client.post(url, {
+            'refresh': str(refresh),
+        }, format='json')
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+@pytest.mark.django_db
+class TestJWTLogout:
+    """Integration tests for POST /api/auth/logout/ (logout)."""
+
+    def test_logout_blacklists_refresh_token(self, api_client, teacher_user):
+        refresh = RefreshToken.for_user(teacher_user)
+        refresh_str = str(refresh)
+
+        # Step 1: Logout with the valid refresh token
+        logout_url = reverse('logout')
+        logout_response = api_client.post(logout_url, {
+            'refresh': refresh_str,
+        }, format='json')
+
+        assert logout_response.status_code == status.HTTP_200_OK
+        assert 'message' in logout_response.data
+        assert 'Successfully logged out' in logout_response.data['message']
+
+        # Step 2: Attempt to reuse the same refresh token — must be rejected
+        refresh_url = reverse('refresh_jwt_token')
+        refresh_response = api_client.post(refresh_url, {
+            'refresh': refresh_str,
+        }, format='json')
+
+        assert refresh_response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_logout_missing_refresh_returns_400(self, api_client):
+        url = reverse('logout')
+        response = api_client.post(url, {}, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_logout_invalid_refresh_returns_401(self, api_client):
+        url = reverse('logout')
+        response = api_client.post(url, {
+            'refresh': 'garbage',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
