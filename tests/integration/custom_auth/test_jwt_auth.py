@@ -204,3 +204,41 @@ class TestJWTLogout:
         }, format='json')
 
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+@pytest.mark.django_db
+class TestUserProfile:
+    """Integration tests for GET /api/auth/user/ (user_profile)."""
+
+    def test_authenticated_user_returns_200_with_profile(self, api_client, teacher_user):
+        api_client.force_authenticate(user=teacher_user)
+        url = reverse('user_profile')
+        response = api_client.get(url)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['user']['email'] == teacher_user.email
+        assert response.data['user']['user_type'] == 'teacher'
+        assert 'first_name' in response.data['user']
+
+    def test_unauthenticated_returns_401(self, api_client):
+        url = reverse('user_profile')
+        response = api_client.get(url)
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_invalid_bearer_token_returns_401(self, api_client):
+        api_client.credentials(HTTP_AUTHORIZATION='Bearer not-a-real-jwt')
+        url = reverse('user_profile')
+        response = api_client.get(url)
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_valid_jwt_bearer_returns_200(self, api_client, teacher_user):
+        refresh = RefreshToken.for_user(teacher_user)
+        access = str(refresh.access_token)
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
+        url = reverse('user_profile')
+        response = api_client.get(url)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['user']['email'] == teacher_user.email
