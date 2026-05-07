@@ -602,17 +602,22 @@ class Invoice(models.Model):
 
     def generate_invoice_number(self):
         """Generate unique invoice number: INV-YYYY-MM-NNNN"""
+        import hashlib
         from datetime import datetime
+        from django.db import connection
         today = datetime.now()
-        year = today.strftime('%Y')
-        month = today.strftime('%m')
-
-        prefix = f"INV-{year}-{month}"
+        prefix = f"INV-{today.strftime('%Y')}-{today.strftime('%m')}"
 
         with transaction.atomic():
+            # Advisory lock by prefix — serializes concurrent callers even when
+            # no rows exist yet (select_for_update cannot lock non-existent rows).
+            lock_id = int(hashlib.sha256(prefix.encode()).hexdigest()[:15], 16) % (2 ** 63)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_id])
+
             last_invoice = Invoice.objects.filter(
                 invoice_number__startswith=prefix
-            ).select_for_update().order_by('-invoice_number').first()
+            ).order_by('-invoice_number').first()
 
             if last_invoice and last_invoice.invoice_number:
                 try:
@@ -623,7 +628,7 @@ class Invoice(models.Model):
             else:
                 new_seq = 1
 
-        return f"{prefix}-{new_seq:04d}"
+            return f"{prefix}-{new_seq:04d}"
 
     def save(self, *args, **kwargs):
         # Ensure only one of teacher or student is set
@@ -970,12 +975,20 @@ class StudentInvoice(models.Model):
     def generate_invoice_number(self):
         """Generate unique invoice number: INV-YYYY-MM-S{student_id}-NNNN"""
         if not self.invoice_number:
+            import hashlib
+            from django.db import connection
             prefix = f"INV-{self.batch.year}-{self.batch.month:02d}-S{self.student.id}"
 
             with transaction.atomic():
+                # Advisory lock by prefix — serializes concurrent callers even when
+                # no rows exist yet (select_for_update cannot lock non-existent rows).
+                lock_id = int(hashlib.sha256(prefix.encode()).hexdigest()[:15], 16) % (2 ** 63)
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_id])
+
                 last_invoice = StudentInvoice.objects.filter(
                     invoice_number__startswith=prefix
-                ).select_for_update().order_by('-invoice_number').first()
+                ).order_by('-invoice_number').first()
 
                 if last_invoice:
                     try:
