@@ -75,51 +75,49 @@ def test_concurrent_student_invoice_number_generation_produces_unique_numbers(
     """
     today = datetime.now()
 
-    student = User.objects.create_user(
-        email="race_student@test.com",
-        password="testpass123",
-        user_type="student",
-        first_name="Race",
-        last_name="Student",
-        school=school,
-        is_approved=True,
+    # Two students — unique_together(batch, student) prevents two invoices for the same student
+    student_a = User.objects.create_user(
+        email="race_student_a@test.com", password="testpass123",
+        user_type="student", first_name="Race", last_name="StudentA",
+        school=school, is_approved=True,
+    )
+    student_b = User.objects.create_user(
+        email="race_student_b@test.com", password="testpass123",
+        user_type="student", first_name="Race", last_name="StudentB",
+        school=school, is_approved=True,
     )
 
     batch = MonthlyInvoiceBatch.objects.create(
-        teacher=teacher_user,
-        school=school,
-        month=today.month,
-        year=today.year,
+        teacher=teacher_user, school=school,
+        month=today.month, year=today.year,
     )
 
     batch_id = batch.id
-    student_id = student.id
+    student_a_id = student_a.id
+    student_b_id = student_b.id
     school_id = school.id
 
-    def _save():
+    def _save(sid):
         connection.close()
         _batch = MonthlyInvoiceBatch.objects.get(id=batch_id)
-        _student = User.objects.get(id=student_id)
+        _student = User.objects.get(id=sid)
         from billing.models import School
         _school = School.objects.get(id=school_id)
         inv = StudentInvoice(
-            batch=_batch,
-            student=_student,
-            school=_school,
+            batch=_batch, student=_student, school=_school,
             amount=Decimal("0.00"),
             billing_contact_name="Race Student",
-            billing_email="race@test.com",
+            billing_email=f"race{sid}@test.com",
             billing_phone="4165551234",
             billing_street_address="1 Race St",
-            billing_city="Toronto",
-            billing_province="ON",
+            billing_city="Toronto", billing_province="ON",
             billing_postal_code="M5H 2N2",
         )
         inv.save()
         return inv.invoice_number
 
     with ThreadPoolExecutor(max_workers=2) as ex:
-        futures = [ex.submit(_save), ex.submit(_save)]
+        futures = [ex.submit(_save, student_a_id), ex.submit(_save, student_b_id)]
         results = [f.result(timeout=10) for f in futures]
 
     assert results[0] != results[1], (
