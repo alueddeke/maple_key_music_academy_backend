@@ -626,10 +626,6 @@ class Invoice(models.Model):
         return f"{prefix}-{new_seq:04d}"
 
     def save(self, *args, **kwargs):
-        # Generate invoice number if not set
-        if not self.invoice_number:
-            self.invoice_number = self.generate_invoice_number()
-
         # Ensure only one of teacher or student is set
         if self.invoice_type == 'teacher_payment' and self.student:
             self.student = None
@@ -642,7 +638,15 @@ class Invoice(models.Model):
             self.payment_balance = calculated_total
             self.total_amount = calculated_total
 
-        super().save(*args, **kwargs)
+        if not self.invoice_number:
+            # Outer atomic ensures the select_for_update() lock inside
+            # generate_invoice_number() is held until super().save() inserts
+            # the row — inner atomic() becomes a savepoint, lock held by outer.
+            with transaction.atomic():
+                self.invoice_number = self.generate_invoice_number()
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
     
     def __str__(self):
         if self.invoice_type == 'teacher_payment':
@@ -994,14 +998,18 @@ class StudentInvoice(models.Model):
         return total
 
     def save(self, *args, **kwargs):
-        # Auto-generate invoice number
-        self.generate_invoice_number()
-
-        # Auto-set school from student if not set
         if not self.school_id and self.student:
             self.school = self.student.school
 
-        super().save(*args, **kwargs)
+        if not self.invoice_number:
+            # Outer atomic ensures the select_for_update() lock inside
+            # generate_invoice_number() is held until super().save() inserts
+            # the row — inner atomic() becomes a savepoint, lock held by outer.
+            with transaction.atomic():
+                self.generate_invoice_number()
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
 
 
 class ApprovedEmail(models.Model):
