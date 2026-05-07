@@ -149,10 +149,6 @@ class User(AbstractUser):
         limit_choices_to={'user_type': 'teacher'},
         blank=True
     )
-    # DEPRECATED: parent_email and parent_phone - replaced by BillableContact model
-    parent_email = models.EmailField(blank=True, help_text="DEPRECATED: Use BillableContact instead")
-    parent_phone = models.CharField(max_length=15, blank=True, help_text="DEPRECATED: Use BillableContact instead")
-    
     # Override to use email as username
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name', 'user_type']
