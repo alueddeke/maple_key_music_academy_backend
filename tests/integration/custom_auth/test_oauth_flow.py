@@ -130,6 +130,30 @@ class TestGoogleOAuthFlow:
         created_user = User.objects.get(email='approved_reg@example.com')
         assert created_user.school_id == management_user.school_id
 
+    def test_rejected_registration_request_returns_403(self, api_client, school):
+        """
+        UserRegistrationRequest with status='rejected' returns 403 with
+        error_code='registration_rejected'. No User row is created.
+        """
+        UserRegistrationRequest.objects.create(
+            email='rejected_oauth@example.com',
+            first_name='R',
+            last_name='J',
+            user_type='teacher',
+            status='rejected',
+        )
+        mock_token, mock_userinfo = self._mock_google_responses('rejected_oauth@example.com')
+        with patch('custom_auth.views.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+            response = api_client.post(reverse('google_exchange'), {
+                'code': 'auth_code_abc',
+                'code_verifier': 'verifier_xyz_long_enough',
+            }, format='json')
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data.get('error_code') == 'registration_rejected'
+        assert not User.objects.filter(email='rejected_oauth@example.com').exists()
+
     def test_pending_registration_request_returns_202_approval_pending(self, api_client, school):
         """
         UserRegistrationRequest with status='pending' returns 202 with
@@ -198,6 +222,7 @@ class TestGoogleOAuthFlow:
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert response.data.get('error') == 'Failed to exchange code with Google'
+        assert 'details' not in response.data
 
     def test_google_userinfo_failure_returns_400(self, api_client, school):
         """
