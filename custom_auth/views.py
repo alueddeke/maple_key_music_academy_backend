@@ -56,8 +56,9 @@ def google_exchange(request):
         )
 
     if token_response.status_code != 200:
+        logger.warning('Google token exchange failed: %s', token_response.text)
         return Response(
-            {'error': 'Failed to exchange code with Google', 'details': token_response.text},
+            {'error': 'Failed to exchange code with Google'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
