@@ -166,13 +166,8 @@ def google_exchange(request):
                     },
                     status=status.HTTP_202_ACCEPTED,
                 )
-    except requests.exceptions.Timeout:
-        logger.error('Google API timeout after %ds', GOOGLE_API_TIMEOUT)
-        return Response(
-            {'error': 'Google authentication timed out. Please try again.'},
-            status=status.HTTP_504_GATEWAY_TIMEOUT,
-        )
     except Exception as e:
+        # Catch-all for unexpected DB errors during user find-or-create flow
         logger.exception('Google exchange approval flow error')
         return Response(
             {'error': f'Approval flow error: {str(e)}'},
