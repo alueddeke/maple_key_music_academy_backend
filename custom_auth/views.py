@@ -3,7 +3,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.conf import settings
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 import requests
 import os
@@ -514,16 +514,17 @@ def refresh_jwt_token(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def user_profile(request):
     """
     Get current user profile endpoint
-    
+
     This endpoint returns information about the currently authenticated user.
     It requires a valid JWT access token in the Authorization header.
-    
+
     Expected headers:
     Authorization: Bearer <access_token>
-    
+
     Returns:
     {
         "user": {
@@ -542,15 +543,6 @@ def user_profile(request):
         }
     }
     """
-    from rest_framework.permissions import IsAuthenticated
-    from rest_framework.decorators import permission_classes
-    
-    # Check if user is authenticated
-    if not request.user.is_authenticated:
-        return Response({
-            'error': 'Authentication required'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-    
     # Get user name
     user_name = f"{request.user.first_name} {request.user.last_name}".strip()
     if not user_name:
