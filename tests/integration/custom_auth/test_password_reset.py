@@ -124,6 +124,15 @@ class TestPasswordResetConfirm:
         assert teacher_user.check_password('NewSecure!Pass1') is True
         assert teacher_user.check_password('testpass123') is False
 
+        # Token must be invalidated after use — second attempt must be rejected
+        second_response = api_client.post(url, {
+            'uid': uid,
+            'token': token,
+            'password': 'AnotherPass!2',
+            'confirm_password': 'AnotherPass!2',
+        }, format='json')
+        assert second_response.status_code == status.HTTP_400_BAD_REQUEST
+
     def test_password_mismatch_returns_400(self, api_client, teacher_user):
         """Mismatched passwords return 400 and old password remains valid."""
         uid = urlsafe_base64_encode(force_bytes(teacher_user.pk))
