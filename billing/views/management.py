@@ -1,5 +1,6 @@
 from django.shortcuts import render
 from django.http import HttpResponse
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -154,7 +155,7 @@ def approved_email_list(request):
     from ..invitation_utils import create_and_send_invitation
 
     if request.method == 'GET':
-        approved_emails = ApprovedEmail.objects.all()
+        approved_emails = ApprovedEmail.objects.filter(approved_by__school=request.user.school)
         serializer = ApprovedEmailSerializer(approved_emails, many=True)
         return Response(serializer.data)
 
@@ -185,7 +186,7 @@ def approved_email_delete(request, pk):
     from ..models import ApprovedEmail
 
     try:
-        approved_email = ApprovedEmail.objects.get(pk=pk)
+        approved_email = ApprovedEmail.objects.get(pk=pk, approved_by__school=request.user.school)
         approved_email.delete()
         return Response({'message': 'Approved email deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
     except ApprovedEmail.DoesNotExist:
@@ -199,12 +200,19 @@ def registration_request_list(request):
     from ..models import UserRegistrationRequest
     from ..serializers import UserRegistrationRequestSerializer
 
-    # Filter by status if provided
+    # Filter by status if provided. Pending requests have no school yet (assigned at approval),
+    # so all management can see pending requests. Reviewed requests are scoped to this school.
     status_filter = request.GET.get('status')
-    if status_filter:
-        requests = UserRegistrationRequest.objects.filter(status=status_filter)
+    if status_filter == 'pending':
+        requests = UserRegistrationRequest.objects.filter(status='pending')
+    elif status_filter:
+        requests = UserRegistrationRequest.objects.filter(
+            status=status_filter, reviewed_by__school=request.user.school
+        )
     else:
-        requests = UserRegistrationRequest.objects.all()
+        requests = UserRegistrationRequest.objects.filter(
+            Q(status='pending') | Q(reviewed_by__school=request.user.school)
+        )
 
     serializer = UserRegistrationRequestSerializer(requests, many=True)
     return Response(serializer.data)
