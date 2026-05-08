@@ -738,10 +738,10 @@ def password_reset_validate_token(request):
             'error': 'Missing uid or token'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    User = get_user_model()
     try:
         # Decode user ID
         user_id = force_str(urlsafe_base64_decode(uid))
-        User = get_user_model()
         user = User.objects.get(pk=user_id)
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         return Response({
@@ -804,10 +804,10 @@ def password_reset_confirm(request):
             'error': 'Passwords do not match'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    User = get_user_model()
     try:
         # Decode user ID
         user_id = force_str(urlsafe_base64_decode(uid))
-        User = get_user_model()
         user = User.objects.get(pk=user_id)
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         return Response({
