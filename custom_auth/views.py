@@ -174,6 +174,16 @@ def google_exchange(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+    # Reject unapproved users before issuing any token
+    if not user.is_approved:
+        return Response(
+            {
+                'error_code': 'approval_pending',
+                'message': 'Your account is pending management approval.',
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     # Successful user found or created — issue JWT
     refresh = RefreshToken.for_user(user)
 
