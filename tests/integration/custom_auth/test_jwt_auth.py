@@ -125,6 +125,7 @@ class TestJWTRefresh:
 
     def test_valid_refresh_returns_new_access_token(self, api_client, teacher_user):
         refresh = RefreshToken.for_user(teacher_user)
+        original_access = str(refresh.access_token)
         url = reverse('refresh_jwt_token')
         response = api_client.post(url, {
             'refresh': str(refresh),
@@ -134,6 +135,7 @@ class TestJWTRefresh:
         assert 'access_token' in response.data
         assert isinstance(response.data['access_token'], str)
         assert len(response.data['access_token']) > 0
+        assert response.data['access_token'] != original_access  # must be a new token
 
     def test_missing_refresh_returns_400(self, api_client):
         url = reverse('refresh_jwt_token')
