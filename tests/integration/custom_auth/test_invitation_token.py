@@ -165,6 +165,30 @@ class TestInvitationTokenSetup:
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
+    def test_setup_missing_last_name_returns_400(self, api_client, management_user):
+        """Missing last_name returns 400."""
+        inv = _make_invitation('partial2@example.com', management_user)
+
+        url = reverse('setup_account_with_invitation', kwargs={'token': inv.token})
+        response = api_client.post(url, {
+            'first_name': 'X',
+            'password': 'StrongPass!1',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_setup_missing_password_returns_400(self, api_client, management_user):
+        """Missing password returns 400."""
+        inv = _make_invitation('partial3@example.com', management_user)
+
+        url = reverse('setup_account_with_invitation', kwargs={'token': inv.token})
+        response = api_client.post(url, {
+            'first_name': 'X',
+            'last_name': 'Y',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
     def test_setup_when_user_already_exists_returns_400(self, api_client, management_user):
         """Duplicate email setup returns 400 and exactly one user remains."""
         User.objects.create_user(
