@@ -12,8 +12,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Get URLs from environment
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 GOOGLE_API_TIMEOUT = int(os.getenv('GOOGLE_API_TIMEOUT', '10'))
 
 
@@ -43,7 +41,7 @@ def google_exchange(request):
         'client_secret': os.getenv('GOOGLE_CLIENT_SECRET'),
         'code': code,
         'grant_type': 'authorization_code',
-        'redirect_uri': f'{FRONTEND_URL}/oauth-callback',  # must match frontend's redirect_uri
+        'redirect_uri': f'{settings.FRONTEND_URL}/oauth-callback',  # must match frontend's redirect_uri
         'code_verifier': code_verifier,                    # PKCE verifier
     }
     try:

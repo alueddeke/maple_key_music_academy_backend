@@ -34,6 +34,7 @@ class TestPasswordResetRequest:
         assert 'If an account exists' in response.data['message']
         assert len(mail.outbox) == 1
         assert 'Password Reset' in mail.outbox[0].subject
+        assert 'reset-password' in mail.outbox[0].body
         assert teacher_user.email in mail.outbox[0].to
 
     def test_nonexistent_user_returns_same_message_no_email(self, api_client, db):
