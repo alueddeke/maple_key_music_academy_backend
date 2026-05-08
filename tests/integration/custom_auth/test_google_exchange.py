@@ -127,7 +127,6 @@ class TestGoogleExchangeEndpoint:
         """
         SEC-02: requests.post to Google token endpoint raises Timeout.
         Expects HTTP 504 Gateway Timeout (not 400 or 500).
-        Currently FAILS — no Timeout handling exists in google_exchange.
         """
         import requests as req_lib
 
@@ -151,7 +150,6 @@ class TestGoogleExchangeEndpoint:
         School.objects.first(). This test seeds the approver in `second_school`
         and asserts the new user lands in `second_school` regardless of
         which school is "first" in the DB.
-        Currently FAILS — google_exchange uses School.objects.first().
         """
         # Approver belongs to second_school (NOT the default 'school' fixture)
         approver = User.objects.create_user(

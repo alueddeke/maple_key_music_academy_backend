@@ -1061,6 +1061,10 @@ class UserRegistrationRequest(models.Model):
     oauth_provider = models.CharField(max_length=50, blank=True)  # 'google', etc.
     oauth_id = models.CharField(max_length=100, blank=True)
 
+    # School (set at registration so pending requests can be scoped by school)
+    school = models.ForeignKey('School', on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name='registration_requests')
+
     # Approval workflow
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     requested_at = models.DateTimeField(auto_now_add=True)

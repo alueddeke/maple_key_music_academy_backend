@@ -1,6 +1,5 @@
 from django.shortcuts import render
 from django.http import HttpResponse
-from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -196,23 +195,14 @@ def approved_email_delete(request, pk):
 @api_view(['GET'])
 @management_required
 def registration_request_list(request):
-    """Management can view all registration requests"""
+    """Management can view all registration requests scoped to their school"""
     from ..models import UserRegistrationRequest
     from ..serializers import UserRegistrationRequestSerializer
 
-    # Filter by status if provided. Pending requests have no school yet (assigned at approval),
-    # so all management can see pending requests. Reviewed requests are scoped to this school.
+    requests = UserRegistrationRequest.objects.filter(school=request.user.school)
     status_filter = request.GET.get('status')
-    if status_filter == 'pending':
-        requests = UserRegistrationRequest.objects.filter(status='pending')
-    elif status_filter:
-        requests = UserRegistrationRequest.objects.filter(
-            status=status_filter, reviewed_by__school=request.user.school
-        )
-    else:
-        requests = UserRegistrationRequest.objects.filter(
-            Q(status='pending') | Q(reviewed_by__school=request.user.school)
-        )
+    if status_filter:
+        requests = requests.filter(status=status_filter)
 
     serializer = UserRegistrationRequestSerializer(requests, many=True)
     return Response(serializer.data)

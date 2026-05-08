@@ -26,6 +26,7 @@ def google_exchange(request):
     """
     code = request.data.get('code', '').strip()
     code_verifier = request.data.get('code_verifier', '').strip()
+    school_id = request.data.get('school_id')
 
     if not code or not code_verifier:
         return Response(
@@ -88,6 +89,13 @@ def google_exchange(request):
     User = get_user_model()
     from billing.models import ApprovedEmail, UserRegistrationRequest, School
     user = None
+
+    exchange_school = None
+    if school_id:
+        try:
+            exchange_school = School.objects.get(pk=school_id)
+        except School.DoesNotExist:
+            pass  # Optional field — invalid ID is silently ignored
 
     try:
         user = User.objects.get(email=user_email)
@@ -158,6 +166,7 @@ def google_exchange(request):
                     oauth_provider='google',
                     oauth_id=user_data.get('id'),
                     status='pending',
+                    school=exchange_school,
                 )
                 return Response(
                     {
@@ -229,7 +238,7 @@ def register_with_email(request):
         "email": "user@example.com"
     }
     """
-    from billing.models import ApprovedEmail, UserRegistrationRequest
+    from billing.models import ApprovedEmail, UserRegistrationRequest, School
 
     User = get_user_model()
 
@@ -238,6 +247,14 @@ def register_with_email(request):
     first_name = request.data.get('first_name', '').strip()
     last_name = request.data.get('last_name', '').strip()
     user_type = request.data.get('user_type', 'teacher')  # Default to teacher
+    school_id = request.data.get('school_id')
+
+    school = None
+    if school_id:
+        try:
+            school = School.objects.get(pk=school_id)
+        except School.DoesNotExist:
+            return Response({'error': 'Invalid school'}, status=status.HTTP_400_BAD_REQUEST)
 
     # Validate required fields
     if not email or not first_name or not last_name:
@@ -296,7 +313,8 @@ def register_with_email(request):
                 first_name=first_name,
                 last_name=last_name,
                 user_type=user_type,
-                status='pending'
+                status='pending',
+                school=school,
             )
 
             return Response({
