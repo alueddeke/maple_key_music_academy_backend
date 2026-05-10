@@ -9,9 +9,22 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name="batchlessonitem",
-            name="admin_notes",
-            field=models.TextField(blank=True, default=""),
+        # SeparateDatabaseAndState: ORM state uses AddField (so Django tracks the field),
+        # but the DB operation uses IF NOT EXISTS — safe whether or not the column
+        # already exists (production had it from main's 0040 migration).
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddField(
+                    model_name="batchlessonitem",
+                    name="admin_notes",
+                    field=models.TextField(blank=True, default=""),
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql="ALTER TABLE billing_batchlessonitem ADD COLUMN IF NOT EXISTS admin_notes TEXT NOT NULL DEFAULT '';",
+                    reverse_sql="ALTER TABLE billing_batchlessonitem DROP COLUMN IF EXISTS admin_notes;",
+                ),
+            ],
         ),
     ]
