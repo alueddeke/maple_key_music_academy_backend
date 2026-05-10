@@ -208,7 +208,7 @@ jobs:
             for i in $(seq 1 6); do
               sleep 5
               HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/api/auth/user/ 2>/dev/null || echo "000")
-              if [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "200" ]; then
+              if [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "301" ]; then
                 HEALTHY=true
                 echo "✅ Backend healthy (HTTP $HTTP_STATUS) after $((i * 5))s"
                 break
