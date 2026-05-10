@@ -521,16 +521,27 @@ def teacher_monthly_batches(request):
             defaults={'status': 'draft'} # If creating, set status to 'draft'
         )
 
-        # 4. Automation: If this is a NEW batch, we need to populate it.
-        if created:
-            # We ask the MODEL to tell us what lessons were scheduled.
-            scheduled_lessons = batch.get_scheduled_lessons_data()
+        # 4. Automation: Sync lessons from recurring schedules
+        # IMPORTANT: This now runs EVERY time (not just when created=True)
+        # to ensure new recurring schedules added mid-month appear in existing batches
 
-            # maybe use bulk create in future instead of looping each record one by one
-            # We loop through that list of data and save each one as a database record.
-            for lesson_data in scheduled_lessons:
+        # Get all expected lessons from active recurring schedules
+        scheduled_lessons = batch.get_scheduled_lessons_data()
+
+        # For each expected lesson, check if it already exists in the batch
+        for lesson_data in scheduled_lessons:
+            # Check if this lesson already exists (same student, date, time)
+            existing_lesson = BatchLessonItem.objects.filter(
+                batch=batch,
+                student=lesson_data['student'],
+                scheduled_date=lesson_data['scheduled_date'],
+                start_time=lesson_data['start_time'],
+            ).first()
+
+            # Only create if it doesn't already exist (preserves manual edits)
+            if not existing_lesson:
                 BatchLessonItem.objects.create(
-                    batch=batch, # Link this item to our main Batch header
+                    batch=batch,
                     student=lesson_data['student'],
                     scheduled_date=lesson_data['scheduled_date'],
                     start_time=lesson_data['start_time'],
