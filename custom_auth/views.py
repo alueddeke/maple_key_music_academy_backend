@@ -3,17 +3,15 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.conf import settings
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from django.views.decorators.csrf import csrf_exempt
 import requests
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Get URLs from environment
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+GOOGLE_API_TIMEOUT = int(os.getenv('GOOGLE_API_TIMEOUT', '10'))
 
 
 @api_view(['POST'])
@@ -28,6 +26,7 @@ def google_exchange(request):
     """
     code = request.data.get('code', '').strip()
     code_verifier = request.data.get('code_verifier', '').strip()
+    school_id = request.data.get('school_id')
 
     if not code or not code_verifier:
         return Response(
@@ -42,15 +41,22 @@ def google_exchange(request):
         'client_secret': os.getenv('GOOGLE_CLIENT_SECRET'),
         'code': code,
         'grant_type': 'authorization_code',
-        'redirect_uri': f'{FRONTEND_URL}/oauth-callback',  # must match frontend's redirect_uri
+        'redirect_uri': f'{settings.FRONTEND_URL}/oauth-callback',  # must match frontend's redirect_uri
         'code_verifier': code_verifier,                    # PKCE verifier
     }
-    # NOTE: No timeout — port as-is; SEC-02 adds configurable timeout in Phase 2
-    token_response = requests.post(token_url, data=token_data)
+    try:
+        token_response = requests.post(token_url, data=token_data, timeout=GOOGLE_API_TIMEOUT)
+    except requests.exceptions.Timeout:
+        logger.error('Google API timeout after %ds', GOOGLE_API_TIMEOUT)
+        return Response(
+            {'error': 'Google authentication timed out. Please try again.'},
+            status=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
 
     if token_response.status_code != 200:
+        logger.warning('Google token exchange failed: %s', token_response.text)
         return Response(
-            {'error': 'Failed to exchange code with Google', 'details': token_response.text},
+            {'error': 'Failed to exchange code with Google'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -60,7 +66,14 @@ def google_exchange(request):
     # Get user info from Google
     user_info_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
     headers = {'Authorization': f'Bearer {access_token}'}
-    user_response = requests.get(user_info_url, headers=headers)
+    try:
+        user_response = requests.get(user_info_url, headers=headers, timeout=GOOGLE_API_TIMEOUT)
+    except requests.exceptions.Timeout:
+        logger.error('Google API timeout after %ds', GOOGLE_API_TIMEOUT)
+        return Response(
+            {'error': 'Google authentication timed out. Please try again.'},
+            status=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
 
     if user_response.status_code != 200:
         return Response(
@@ -77,12 +90,25 @@ def google_exchange(request):
     from billing.models import ApprovedEmail, UserRegistrationRequest, School
     user = None
 
+    exchange_school = None
+    if school_id:
+        try:
+            exchange_school = School.objects.get(pk=school_id)
+        except School.DoesNotExist:
+            pass  # Optional field — invalid ID is silently ignored
+
     try:
         user = User.objects.get(email=user_email)
     except User.DoesNotExist:
         try:
             approved_email = ApprovedEmail.objects.get(email=user_email)
-            default_school = School.objects.first()  # SEC-05: known issue, Phase 2 scope — port as-is
+            school = getattr(getattr(approved_email, 'approved_by', None), 'school', None)
+            if school is None:
+                logger.error('Cannot derive school for ApprovedEmail user creation: %s', user_email)
+                return Response(
+                    {'error': 'Server configuration error'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             user = User.objects.create(
                 email=user_email,
                 first_name=user_data.get('given_name', ''),
@@ -91,13 +117,20 @@ def google_exchange(request):
                 oauth_provider='google',
                 oauth_id=user_data.get('id'),
                 is_approved=True,
-                school=default_school,
+                school=school,
             )
         except ApprovedEmail.DoesNotExist:
             try:
                 reg_request = UserRegistrationRequest.objects.get(email=user_email)
                 if reg_request.status == 'approved':
-                    default_school = School.objects.first()  # SEC-05, port as-is
+                    # SEC-05: school derived from reviewer (reviewed_by is non-null when status='approved')
+                    school = getattr(getattr(reg_request, 'reviewed_by', None), 'school', None)
+                    if school is None:
+                        logger.error('Cannot derive school for reg_request user creation: %s', user_email)
+                        return Response(
+                            {'error': 'Server configuration error'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        )
                     user = User.objects.create(
                         email=user_email,
                         first_name=user_data.get('given_name', ''),
@@ -106,7 +139,7 @@ def google_exchange(request):
                         oauth_provider='google',
                         oauth_id=user_data.get('id'),
                         is_approved=True,
-                        school=default_school,
+                        school=school,
                     )
                 elif reg_request.status == 'rejected':
                     return Response(
@@ -133,6 +166,7 @@ def google_exchange(request):
                     oauth_provider='google',
                     oauth_id=user_data.get('id'),
                     status='pending',
+                    school=exchange_school,
                 )
                 return Response(
                     {
@@ -142,10 +176,21 @@ def google_exchange(request):
                     status=status.HTTP_202_ACCEPTED,
                 )
     except Exception as e:
+        # Catch-all for unexpected DB errors during user find-or-create flow
         logger.exception('Google exchange approval flow error')
         return Response(
             {'error': f'Approval flow error: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Reject unapproved users before issuing any token
+    if not user.is_approved:
+        return Response(
+            {
+                'error_code': 'approval_pending',
+                'message': 'Your account is pending management approval.',
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
     # Successful user found or created — issue JWT
@@ -193,7 +238,7 @@ def register_with_email(request):
         "email": "user@example.com"
     }
     """
-    from billing.models import ApprovedEmail, UserRegistrationRequest
+    from billing.models import ApprovedEmail, UserRegistrationRequest, School
 
     User = get_user_model()
 
@@ -202,6 +247,14 @@ def register_with_email(request):
     first_name = request.data.get('first_name', '').strip()
     last_name = request.data.get('last_name', '').strip()
     user_type = request.data.get('user_type', 'teacher')  # Default to teacher
+    school_id = request.data.get('school_id')
+
+    school = None
+    if school_id:
+        try:
+            school = School.objects.get(pk=school_id)
+        except School.DoesNotExist:
+            return Response({'error': 'Invalid school'}, status=status.HTTP_400_BAD_REQUEST)
 
     # Validate required fields
     if not email or not first_name or not last_name:
@@ -260,7 +313,8 @@ def register_with_email(request):
                 first_name=first_name,
                 last_name=last_name,
                 user_type=user_type,
-                status='pending'
+                status='pending',
+                school=school,
             )
 
             return Response({
@@ -329,15 +383,20 @@ def get_jwt_token(request):
                     password_line = notes_lines[0]  # First line has the password
                     hashed_password = password_line.replace('HASHED_PASSWORD:', '', 1).strip()
 
-                    from billing.models import School
-                    default_school = School.objects.first()  # Get default school
+                    school = getattr(getattr(reg_request, 'reviewed_by', None), 'school', None)
+                    if school is None:
+                        logger.error('Cannot derive school for reg_request user creation: %s', email)
+                        return Response(
+                            {'error': 'Server configuration error'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        )
                     user = User.objects.create(
                         email=email,
                         first_name=reg_request.first_name,
                         last_name=reg_request.last_name,
                         user_type=reg_request.user_type,
                         is_approved=True,
-                        school=default_school
+                        school=school
                     )
                     user.password = hashed_password
                     user.save()
@@ -353,7 +412,7 @@ def get_jwt_token(request):
                 else:
                     return Response({
                         'error': 'Account setup incomplete',
-                        'message': f'Your registration was approved but password data is missing. Please contact support. (Notes: {reg_request.notes[:50] if reg_request.notes else "None"})'
+                        'message': 'Your registration was approved but account setup is incomplete. Please contact support.'
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             elif reg_request.status == 'rejected':
@@ -449,7 +508,9 @@ def refresh_jwt_token(request):
         if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS', False):
             # Blacklist the old refresh token and create a new one
             refresh.blacklist()
-            new_refresh = RefreshToken.for_user(refresh.payload['user_id'])
+            User = get_user_model()
+            user = User.objects.get(pk=refresh.payload['user_id'])
+            new_refresh = RefreshToken.for_user(user)
             return Response({
                 'access_token': str(new_access_token),
                 'refresh_token': str(new_refresh)
@@ -471,16 +532,17 @@ def refresh_jwt_token(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def user_profile(request):
     """
     Get current user profile endpoint
-    
+
     This endpoint returns information about the currently authenticated user.
     It requires a valid JWT access token in the Authorization header.
-    
+
     Expected headers:
     Authorization: Bearer <access_token>
-    
+
     Returns:
     {
         "user": {
@@ -499,15 +561,6 @@ def user_profile(request):
         }
     }
     """
-    from rest_framework.permissions import IsAuthenticated
-    from rest_framework.decorators import permission_classes
-    
-    # Check if user is authenticated
-    if not request.user.is_authenticated:
-        return Response({
-            'error': 'Authentication required'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-    
     # Get user name
     user_name = f"{request.user.first_name} {request.user.last_name}".strip()
     if not user_name:
@@ -654,9 +707,9 @@ Maple Key Music Academy Team
             [email],
             fail_silently=False,
         )
-        print(f"DEBUG: Password reset email sent to {email}")
+        logger.info('Password reset email sent to %s', email)
     except Exception as e:
-        print(f"ERROR: Failed to send password reset email: {str(e)}")
+        logger.error('Failed to send password reset email to %s: %s', email, str(e))
         return Response({
             'error': 'Failed to send password reset email. Please try again later.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -698,10 +751,10 @@ def password_reset_validate_token(request):
             'error': 'Missing uid or token'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    User = get_user_model()
     try:
         # Decode user ID
         user_id = force_str(urlsafe_base64_decode(uid))
-        User = get_user_model()
         user = User.objects.get(pk=user_id)
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         return Response({
@@ -764,10 +817,10 @@ def password_reset_confirm(request):
             'error': 'Passwords do not match'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    User = get_user_model()
     try:
         # Decode user ID
         user_id = force_str(urlsafe_base64_decode(uid))
-        User = get_user_model()
         user = User.objects.get(pk=user_id)
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         return Response({
@@ -793,7 +846,7 @@ def password_reset_confirm(request):
     user.set_password(password)
     user.save()
 
-    print(f"DEBUG: Password reset successful for user {user.email}")
+    logger.info('Password reset successful for user %s', user.email)
 
     return Response({
         'message': 'Password reset successful. You can now login with your new password.'

@@ -32,7 +32,7 @@ Requires JWT token with `teacher` role.
 
 ### Optional Fields
 - `student_email` - If provided, will look up existing student or create new one
-  - If omitted, creates student with temporary email: `{name}@temp.com`
+  - If omitted, creates student with a UUID-based placeholder email: `noemail_{uuid12}@maplekeymusic.internal`
   - If student already exists with that email, uses existing student record
 - `duration` - Hours taught (max: 9999.99, typically 0.25 - 100)
 - `rate` - Hourly rate (defaults to teacher's configured rate)
@@ -47,9 +47,8 @@ Requires JWT token with `teacher` role.
    - If not found: creates new student with provided email
 
 2. **Without email:**
-   - Generates temporary email: `student.name@temp.com`
-   - Searches for existing student with that temp email
-   - If found: uses existing student
+   - Generates UUID-based placeholder email: `noemail_{uuid12}@maplekeymusic.internal`
+   - Creates a new student with that placeholder (no collision on same-name students)
    - If not found: creates new student
 
 This means you can submit multiple lessons for the same student (by name) and they'll be correctly associated!

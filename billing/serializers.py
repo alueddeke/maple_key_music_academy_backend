@@ -61,7 +61,6 @@ class UserSerializer(serializers.ModelSerializer):
             'assigned_teachers', 'assigned_teachers_data',
             'assigned_students_data',
             'billable_contacts',
-            'parent_email', 'parent_phone',  # DEPRECATED fields
             'date_joined', 'last_login', 'password'
         ]
         read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display', 'school_name']
@@ -276,7 +275,7 @@ class DetailedUserSerializer(serializers.ModelSerializer):
             'bio', 'instruments', 'hourly_rate',
             'assigned_teachers', 'assigned_teachers_data',
             'billable_contacts',
-            'parent_email', 'parent_phone', 'date_joined', 'last_login'
+            'date_joined', 'last_login'
         ]
         read_only_fields = ['date_joined', 'last_login']
 

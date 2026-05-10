@@ -1,5 +1,5 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from simple_history.models import HistoricalRecords
@@ -149,10 +149,6 @@ class User(AbstractUser):
         limit_choices_to={'user_type': 'teacher'},
         blank=True
     )
-    # DEPRECATED: parent_email and parent_phone - replaced by BillableContact model
-    parent_email = models.EmailField(blank=True, help_text="DEPRECATED: Use BillableContact instead")
-    parent_phone = models.CharField(max_length=15, blank=True, help_text="DEPRECATED: Use BillableContact instead")
-    
     # Override to use email as username
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name', 'user_type']
@@ -281,7 +277,6 @@ class Lesson(models.Model):
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
-    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)  # DEPRECATED: Use teacher_rate/student_rate
     teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, help_text="Rate paid to teacher for this lesson")
     student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
@@ -407,9 +402,6 @@ class Lesson(models.Model):
         # If lesson is marked as trial after rates were set, update student_rate to $0
         elif self.is_trial and self.student_rate != Decimal('0.00'):
             self.student_rate = Decimal('0.00')
-
-        # Maintain backward compatibility: sync 'rate' with teacher_rate for existing code
-        self.rate = self.teacher_rate
 
         super().save(*args, **kwargs)
     
@@ -611,34 +603,35 @@ class Invoice(models.Model):
 
     def generate_invoice_number(self):
         """Generate unique invoice number: INV-YYYY-MM-NNNN"""
+        import hashlib
         from datetime import datetime
+        from django.db import connection
         today = datetime.now()
-        year = today.strftime('%Y')
-        month = today.strftime('%m')
+        prefix = f"INV-{today.strftime('%Y')}-{today.strftime('%m')}"
 
-        # Get the count of invoices created this month
-        prefix = f"INV-{year}-{month}"
-        last_invoice = Invoice.objects.filter(
-            invoice_number__startswith=prefix
-        ).order_by('-invoice_number').first()
+        with transaction.atomic():
+            # Advisory lock by prefix — serializes concurrent callers even when
+            # no rows exist yet (select_for_update cannot lock non-existent rows).
+            lock_id = int(hashlib.sha256(prefix.encode()).hexdigest()[:15], 16) % (2 ** 63)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_id])
 
-        if last_invoice and last_invoice.invoice_number:
-            # Extract the sequence number and increment
-            try:
-                last_seq = int(last_invoice.invoice_number.split('-')[-1])
-                new_seq = last_seq + 1
-            except (ValueError, IndexError):
+            last_invoice = Invoice.objects.filter(
+                invoice_number__startswith=prefix
+            ).order_by('-invoice_number').first()
+
+            if last_invoice and last_invoice.invoice_number:
+                try:
+                    last_seq = int(last_invoice.invoice_number.split('-')[-1])
+                    new_seq = last_seq + 1
+                except (ValueError, IndexError):
+                    new_seq = 1
+            else:
                 new_seq = 1
-        else:
-            new_seq = 1
 
-        return f"{prefix}-{new_seq:04d}"
+            return f"{prefix}-{new_seq:04d}"
 
     def save(self, *args, **kwargs):
-        # Generate invoice number if not set
-        if not self.invoice_number:
-            self.invoice_number = self.generate_invoice_number()
-
         # Ensure only one of teacher or student is set
         if self.invoice_type == 'teacher_payment' and self.student:
             self.student = None
@@ -651,7 +644,15 @@ class Invoice(models.Model):
             self.payment_balance = calculated_total
             self.total_amount = calculated_total
 
-        super().save(*args, **kwargs)
+        if not self.invoice_number:
+            # Outer atomic ensures the select_for_update() lock inside
+            # generate_invoice_number() is held until super().save() inserts
+            # the row — inner atomic() becomes a savepoint, lock held by outer.
+            with transaction.atomic():
+                self.invoice_number = self.generate_invoice_number()
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
     
     def __str__(self):
         if self.invoice_type == 'teacher_payment':
@@ -981,23 +982,31 @@ class StudentInvoice(models.Model):
     def generate_invoice_number(self):
         """Generate unique invoice number: INV-YYYY-MM-S{student_id}-NNNN"""
         if not self.invoice_number:
+            import hashlib
+            from django.db import connection
             prefix = f"INV-{self.batch.year}-{self.batch.month:02d}-S{self.student.id}"
 
-            # Find the last invoice with this prefix
-            last_invoice = StudentInvoice.objects.filter(
-                invoice_number__startswith=prefix
-            ).order_by('-invoice_number').first()
+            with transaction.atomic():
+                # Advisory lock by prefix — serializes concurrent callers even when
+                # no rows exist yet (select_for_update cannot lock non-existent rows).
+                lock_id = int(hashlib.sha256(prefix.encode()).hexdigest()[:15], 16) % (2 ** 63)
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_id])
 
-            if last_invoice:
-                try:
-                    last_seq = int(last_invoice.invoice_number.split('-')[-1])
-                    new_seq = last_seq + 1
-                except (ValueError, IndexError):
+                last_invoice = StudentInvoice.objects.filter(
+                    invoice_number__startswith=prefix
+                ).order_by('-invoice_number').first()
+
+                if last_invoice:
+                    try:
+                        last_seq = int(last_invoice.invoice_number.split('-')[-1])
+                        new_seq = last_seq + 1
+                    except (ValueError, IndexError):
+                        new_seq = 1
+                else:
                     new_seq = 1
-            else:
-                new_seq = 1
 
-            self.invoice_number = f"{prefix}-{new_seq:04d}"
+                self.invoice_number = f"{prefix}-{new_seq:04d}"
 
     def calculate_amount(self):
         """Calculate total amount from all associated lesson items"""
@@ -1009,14 +1018,18 @@ class StudentInvoice(models.Model):
         return total
 
     def save(self, *args, **kwargs):
-        # Auto-generate invoice number
-        self.generate_invoice_number()
-
-        # Auto-set school from student if not set
         if not self.school_id and self.student:
             self.school = self.student.school
 
-        super().save(*args, **kwargs)
+        if not self.invoice_number:
+            # Outer atomic ensures the select_for_update() lock inside
+            # generate_invoice_number() is held until super().save() inserts
+            # the row — inner atomic() becomes a savepoint, lock held by outer.
+            with transaction.atomic():
+                self.generate_invoice_number()
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
 
 
 class ApprovedEmail(models.Model):
@@ -1054,6 +1067,10 @@ class UserRegistrationRequest(models.Model):
     # OAuth info (if applicable)
     oauth_provider = models.CharField(max_length=50, blank=True)  # 'google', etc.
     oauth_id = models.CharField(max_length=100, blank=True)
+
+    # School (set at registration so pending requests can be scoped by school)
+    school = models.ForeignKey('School', on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name='registration_requests')
 
     # Approval workflow
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')

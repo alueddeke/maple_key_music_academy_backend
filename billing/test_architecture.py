@@ -76,17 +76,15 @@ class ArchitectureTest:
         assert teacher.is_approved == False, "Teachers should need approval"
         assert teacher.bio == 'Piano instructor', "Teacher fields should work"
         
-        # Create student user  
+        # Create student user
         student = User.objects.create_user(
             email='student@test.com',
             password='test123',
             first_name='Jane',
             last_name='Student',
             user_type='student',
-            parent_email='parent@test.com'
         )
         assert student.bio == '', "Students should have empty teacher fields"
-        assert student.parent_email == 'parent@test.com', "Student fields should work"
         
         # Approve teacher for further tests
         teacher.is_approved = True
