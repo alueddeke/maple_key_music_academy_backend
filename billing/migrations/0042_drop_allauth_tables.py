@@ -9,7 +9,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('billing', '0039_historicalmonthlyinvoicebatch_payment_date_and_more'),
+        ('billing', '0041_add_trial_lesson_status'),
     ]
 
     operations = [
