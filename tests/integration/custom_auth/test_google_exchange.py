@@ -184,3 +184,27 @@ class TestGoogleExchangeEndpoint:
             f'If this fails with school.id, google_exchange is still using '
             f'School.objects.first() (SEC-05 not yet fixed).'
         )
+
+    def test_unapproved_existing_user_returns_403(self, api_client, unapproved_teacher):
+        """
+        LOCK-01 / BUG-01: Existing user with is_approved=False calls google_exchange.
+        Must receive 403 with error_code='approval_pending' — no JWT issued.
+        The is_approved guard lives at custom_auth/views.py:187.
+        """
+        mock_token, mock_userinfo = self._mock_google_responses(
+            unapproved_teacher.email,
+            google_id='google_unapproved_id_456',
+        )
+
+        with patch('custom_auth.views.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+            url = reverse(self.URL)
+            response = api_client.post(url, {
+                'code': 'auth_code_abc',
+                'code_verifier': 'verifier_xyz_long_enough',
+            }, format='json')
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data.get('error_code') == 'approval_pending'
+        assert 'access_token' not in response.data
+        assert 'refresh_token' not in response.data
