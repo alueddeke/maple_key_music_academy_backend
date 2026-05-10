@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('billing', '0040_batchlessonitem_admin_notes_main'),
+        ('billing', '0040_batchlessonitem_admin_notes'),
     ]
 
     operations = [
