@@ -540,16 +540,23 @@ def teacher_monthly_batches(request):
 
             # Only create if it doesn't already exist (preserves manual edits)
             if not existing_lesson:
+                # Auto-default trial: first lesson for a student (no prior Lesson records)
+                item_status = lesson_data['status']
+                student = lesson_data['student']
+                prior_lesson_count = Lesson.objects.filter(student=student).count()
+                if prior_lesson_count == 0:
+                    item_status = 'trial'
+
                 BatchLessonItem.objects.create(
                     batch=batch,
-                    student=lesson_data['student'],
+                    student=student,
                     scheduled_date=lesson_data['scheduled_date'],
                     start_time=lesson_data['start_time'],
                     duration=lesson_data['duration'],
                     lesson_type=lesson_data['lesson_type'],
                     teacher_rate=lesson_data['teacher_rate'],
                     student_rate=lesson_data['student_rate'],
-                    status=lesson_data['status'],
+                    status=item_status,
                     recurring_schedule=lesson_data['recurring_schedule'],
                     is_one_off=False
                 )
@@ -644,6 +651,17 @@ def batch_add_lesson(request, batch_id):
         else:  # in_person
             data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
             data['student_rate'] = global_settings.inperson_student_rate
+
+    # Auto-default trial: first lesson for a student (no prior Lesson records)
+    student_id = data.get('student_id') or data.get('student')
+    if student_id:
+        try:
+            student_obj = User.objects.get(id=student_id)
+            prior_lesson_count = Lesson.objects.filter(student=student_obj).count()
+            if prior_lesson_count == 0:
+                data['status'] = 'trial'
+        except Exception:
+            pass
 
     serializer = BatchLessonItemSerializer(data=data)
     if serializer.is_valid():

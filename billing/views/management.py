@@ -1234,8 +1234,17 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     except BatchLessonItem.DoesNotExist:
         return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # Only allow editing teacher_notes and cancellation_reason
-    allowed_fields = ['teacher_notes', 'cancellation_reason']
+    # Only allow editing specific fields; status restricted to trial/completed/cancelled
+    allowed_fields = ['teacher_notes', 'cancellation_reason', 'status']
+
+    if 'status' in request.data:
+        allowed_statuses = ['trial', 'completed', 'cancelled']
+        if request.data['status'] not in allowed_statuses:
+            return Response(
+                {'error': f"Invalid status. Allowed values: {', '.join(allowed_statuses)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
     updated = False
 
     for field in allowed_fields:
@@ -1300,14 +1309,37 @@ def management_approve_batch(request, batch_id):
 
     try:
         with transaction.atomic():
-            # Group completed lesson items by student (exclude cancelled)
+            from decimal import Decimal
+
+            # Group completed AND trial items by student (cancelled items skipped entirely)
             completed_items_by_student = defaultdict(list)
+            trial_items = []
 
             for item in batch.lesson_items.filter(status='completed'):
                 completed_items_by_student[item.student].append(item)
 
-            if not completed_items_by_student:
-                raise ValueError('No completed lessons in batch')
+            for item in batch.lesson_items.filter(status='trial'):
+                trial_items.append(item)
+
+            if not completed_items_by_student and not trial_items:
+                raise ValueError('No completed or trial lessons in batch')
+
+            # Create Lesson records for trial items (teacher paid, student not invoiced)
+            for item in trial_items:
+                Lesson.objects.create(
+                    teacher=batch.teacher,
+                    student=item.student,
+                    school=batch.school,
+                    lesson_type=item.lesson_type,
+                    is_trial=True,
+                    scheduled_date=item.scheduled_date,
+                    duration=item.duration,
+                    teacher_rate=item.teacher_rate,
+                    student_rate=Decimal('0.00'),
+                    status='trial',
+                    completed_date=None,
+                    teacher_notes=item.teacher_notes,
+                )
 
             # Create StudentInvoice for each student
             student_invoices = []
