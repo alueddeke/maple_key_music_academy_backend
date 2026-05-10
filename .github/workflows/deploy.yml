@@ -34,7 +34,7 @@ jobs:
     # needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -59,7 +59,7 @@ jobs:
     needs: build_and_push
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
+
     steps:
       - name: Deploy to VPC
         uses: appleboy/ssh-action@v1.0.3
@@ -69,44 +69,48 @@ jobs:
           key: ${{ secrets.VPC_SSH_KEY }}
           port: ${{ secrets.VPC_PORT || 22 }}
           script: |
+            set -e
+
             # Login to Docker Hub
             echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
-            
-            # Create Docker volumes if they don't exist
+
+            # Ensure volumes and network exist
             docker volume create postgres_data || true
             docker volume create static_volume || true
-            
-            # Create network if it doesn't exist
             docker network create maple-key-network || true
-            
-            # Pull latest images
-            docker pull postgres:15
+
+            # Pull new image BEFORE touching any running container
             docker pull ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
-            
-            # Stop and remove existing containers
-            docker stop maple-key-backend postgres nginx || true
-            docker rm maple-key-backend postgres nginx || true
-            
-            # Run PostgreSQL container with persistent volume
-            docker run -d \
-              --name postgres \
-              --restart unless-stopped \
-              --network maple-key-network \
-              -e POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
-              -e POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
-              -e POSTGRES_DB="${{ secrets.POSTGRES_DB }}" \
-              -v postgres_data:/var/lib/postgresql/data \
-              postgres:15
-            
-            # Wait for PostgreSQL to be ready
-            echo "Waiting for PostgreSQL to be ready..."
-            sleep 10
-            
-            # Test PostgreSQL connection
+
+            # ===== ENSURE POSTGRES IS RUNNING =====
+            # Reuse the existing container if healthy — don't restart it unnecessarily.
+            # Only start a fresh postgres if the container is absent or stopped.
+            if ! docker ps --filter "name=^postgres$" --filter "status=running" -q | grep -q .; then
+              echo "PostgreSQL not running — starting..."
+              docker rm postgres 2>/dev/null || true
+              docker run -d \
+                --name postgres \
+                --restart unless-stopped \
+                --network maple-key-network \
+                -e POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
+                -e POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
+                -e POSTGRES_DB="${{ secrets.POSTGRES_DB }}" \
+                -v postgres_data:/var/lib/postgresql/data \
+                postgres:15
+              echo "Waiting for PostgreSQL to be ready..."
+              sleep 10
+            else
+              echo "PostgreSQL already running — reusing existing instance"
+            fi
+
+            # Verify postgres is reachable
             docker run --rm --network maple-key-network postgres:15 \
-              pg_isready -h postgres -U ${{ secrets.POSTGRES_USER }} || sleep 5
-            
-            # Run migrations with fail-fast behavior
+              pg_isready -h postgres -U ${{ secrets.POSTGRES_USER }} \
+              || { echo "❌ Cannot reach PostgreSQL — aborting"; exit 1; }
+
+            # ===== MIGRATION GATE =====
+            # Runs against the LIVE database BEFORE stopping any running container.
+            # If this fails, production keeps serving traffic unchanged.
             echo "========================================="
             echo "Running database migrations..."
             echo "========================================="
@@ -125,21 +129,15 @@ jobs:
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py migrate; then
               echo "========================================="
-              echo "❌ MIGRATION FAILED!"
-              echo "Deployment aborted to prevent database/code mismatch"
+              echo "❌ MIGRATION FAILED — deploy aborted"
+              echo "Production is unchanged and still serving traffic."
               echo "========================================="
-              # Clean up containers started during this deployment
-              docker stop maple-key-backend postgres nginx 2>/dev/null || true
-              docker rm maple-key-backend postgres nginx 2>/dev/null || true
               exit 1
             fi
-            echo "========================================="
-            echo "✅ Migrations completed successfully!"
-            echo "========================================="
+            echo "✅ Migrations completed successfully"
 
-            # Verify all migrations are applied
-            echo "Verifying migration status..."
-            docker run --rm \
+            # Verify no unapplied migrations remain
+            if ! docker run --rm \
               --network maple-key-network \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
@@ -152,22 +150,18 @@ jobs:
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
-              python manage.py showmigrations billing | tee /tmp/migration_status.txt
-
-            # Check for unapplied migrations (lines with [ ] instead of [X])
-            if grep -q "\[ \]" /tmp/migration_status.txt; then
-              echo "========================================="
-              echo "❌ WARNING: Unapplied migrations detected!"
-              echo "========================================="
-              cat /tmp/migration_status.txt
-              docker stop maple-key-backend postgres nginx 2>/dev/null || true
-              docker rm maple-key-backend postgres nginx 2>/dev/null || true
+              python manage.py migrate --check; then
+              echo "❌ Unapplied migrations detected after migrate run — deploy aborted"
               exit 1
             fi
             echo "✅ All migrations verified as applied"
-            echo ""
 
-            # Collect static files
+            # ===== SAFE TO SWAP CONTAINERS =====
+            # Migrations passed. Capture current image for rollback before touching anything.
+            OLD_IMAGE=$(docker inspect maple-key-backend --format='{{.Config.Image}}' 2>/dev/null || echo "")
+            echo "Old image for rollback: ${OLD_IMAGE:-none}"
+
+            # Collect static files (throwaway container, postgres still running)
             docker run --rm \
               --network maple-key-network \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
@@ -183,8 +177,11 @@ jobs:
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py collectstatic --noinput
-            
-            # Run backend container with Gunicorn
+
+            # Swap backend container (postgres stays running throughout)
+            docker stop maple-key-backend 2>/dev/null || true
+            docker rm maple-key-backend 2>/dev/null || true
+
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
@@ -201,8 +198,60 @@ jobs:
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
-            
-            # Create Docker Nginx configuration
+
+            # ===== HEALTH CHECK WITH ROLLBACK =====
+            # Poll /api/auth/user/ — expects 401 (auth required) meaning Django is up.
+            # 502 means the container failed to start.
+            echo "Health checking new backend (30s window)..."
+            HEALTHY=false
+            for i in $(seq 1 6); do
+              sleep 5
+              HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/auth/user/ 2>/dev/null || echo "000")
+              if [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "200" ]; then
+                HEALTHY=true
+                echo "✅ Backend healthy (HTTP $HTTP_STATUS) after $((i * 5))s"
+                break
+              fi
+              echo "  Attempt $i/6: HTTP $HTTP_STATUS — waiting..."
+            done
+
+            if [ "$HEALTHY" = "false" ]; then
+              echo "========================================="
+              echo "❌ Health check failed — rolling back"
+              echo "========================================="
+              echo "Failed container logs:"
+              docker logs maple-key-backend --tail 50 2>/dev/null || true
+              docker stop maple-key-backend 2>/dev/null || true
+              docker rm maple-key-backend 2>/dev/null || true
+              if [ -n "$OLD_IMAGE" ]; then
+                echo "Restoring previous image: $OLD_IMAGE"
+                docker run -d \
+                  --name maple-key-backend \
+                  --restart unless-stopped \
+                  --network maple-key-network \
+                  -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
+                  -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+                  -e DEBUG="False" \
+                  -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
+                  -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
+                  -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+                  -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
+                  -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
+                  -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
+                  -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+                  -v static_volume:/app/staticfiles \
+                  "$OLD_IMAGE"
+                echo "⚠️  Rolled back to $OLD_IMAGE — production restored"
+              else
+                echo "⚠️  No previous image to roll back to — manual intervention required"
+              fi
+              exit 1
+            fi
+
+            # Swap nginx (backend is healthy, safe to briefly interrupt nginx)
+            docker stop nginx 2>/dev/null || true
+            docker rm nginx 2>/dev/null || true
+
             cat > /tmp/nginx.conf << 'EOF'
             server {
                 listen 80;
@@ -236,8 +285,7 @@ jobs:
                 }
             }
             EOF
-            
-            # Run Docker Nginx as reverse proxy
+
             docker run -d \
               --name nginx \
               --restart unless-stopped \
@@ -246,10 +294,10 @@ jobs:
               -v /tmp/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
               -v static_volume:/usr/share/nginx/html/static:ro \
               nginx:alpine
-            
+
             # ===== SETUP HOST NGINX =====
             echo "Setting up host Nginx..."
-            
+
             # Install Nginx if not already installed
             if ! command -v nginx &> /dev/null; then
               echo "Installing Nginx..."
@@ -263,11 +311,11 @@ jobs:
               sudo apt update
               sudo apt install -y certbot python3-certbot-nginx
             fi
-            
+
             # Enable and start Nginx
             sudo systemctl enable nginx
             sudo systemctl start nginx
-            
+
             # Create Nginx configuration for api.maplekeymusic.com (only if it doesn't exist)
             # Note: Certbot will automatically add SSL configuration and HTTPS redirect
             # We don't overwrite if file exists to preserve SSL config
@@ -294,13 +342,13 @@ jobs:
             }
             NGINX_EOF
             fi
-            
+
             # Enable the site
             sudo ln -sf /etc/nginx/sites-available/api.maplekeymusic.com /etc/nginx/sites-enabled/
-            
+
             # Remove default site if it exists
             sudo rm -f /etc/nginx/sites-enabled/default
-            
+
             # Test Nginx configuration
             sudo nginx -t
 
@@ -313,23 +361,15 @@ jobs:
             # Check if certificate already exists
             if ! sudo certbot certificates 2>/dev/null | grep -q "api.maplekeymusic.com"; then
               echo "Obtaining new SSL certificate from Let's Encrypt..."
-              # Obtain SSL certificate (non-interactive)
-              # --nginx: Use Nginx plugin to auto-configure
-              # --non-interactive: Don't prompt for input
-              # --agree-tos: Agree to Let's Encrypt terms
-              # --redirect: Automatically redirect HTTP to HTTPS
-              # --email: Contact email for urgent renewal/security notices
               sudo certbot --nginx \
                 --non-interactive \
                 --agree-tos \
                 --redirect \
                 --email ${{ secrets.CERTBOT_EMAIL }} \
                 -d api.maplekeymusic.com
-
               echo "✅ SSL certificate obtained and configured!"
             else
               echo "SSL certificate already exists. Checking for renewal..."
-              # Try to renew if it's close to expiration (certbot handles the check)
               sudo certbot renew --quiet
               echo "✅ SSL certificate is up to date!"
             fi
@@ -337,27 +377,23 @@ jobs:
             # Configure firewall
             sudo ufw allow 80/tcp || true
             sudo ufw allow 443/tcp || true
-            
+
             echo "✅ Host Nginx configured for api.maplekeymusic.com"
-            
+
             # Clean up old images
             docker image prune -f
-            
-            # Verify deployment
-            sleep 5
+
+            # Final verification
+            sleep 3
             if docker ps | grep -q maple-key-backend && docker ps | grep -q postgres && docker ps | grep -q nginx; then
               echo "✅ Backend, PostgreSQL, and Nginx deployed successfully!"
-              echo "Testing backend health..."
-              curl -f http://localhost:8000/ || echo "⚠️  Backend may not be responding yet"
-              echo "Testing via domain..."
-              curl -f http://api.maplekeymusic.com/ || echo "⚠️  Domain routing may need DNS propagation"
+              FINAL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://api.maplekeymusic.com/api/auth/user/ 2>/dev/null || echo "000")
+              echo "Final API health check: HTTP $FINAL_STATUS (expect 401)"
+              if [ "$FINAL_STATUS" != "401" ] && [ "$FINAL_STATUS" != "200" ]; then
+                echo "⚠️  API not returning expected status — check logs: docker logs maple-key-backend"
+              fi
             else
-              echo "❌ Deployment failed!"
-              echo "Backend logs:"
-              docker logs maple-key-backend
-              echo "PostgreSQL logs:"
-              docker logs postgres
-              echo "Nginx logs:"
-              docker logs nginx
+              echo "❌ Container check failed!"
+              docker logs maple-key-backend --tail 30 2>/dev/null || true
               exit 1
             fi
