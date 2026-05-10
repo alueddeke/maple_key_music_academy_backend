@@ -186,6 +186,7 @@ jobs:
               --name maple-key-backend \
               --restart unless-stopped \
               --network maple-key-network \
+              -p 127.0.0.1:8001:8000 \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
               -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
               -e DEBUG="False" \
@@ -200,13 +201,13 @@ jobs:
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
 
             # ===== HEALTH CHECK WITH ROLLBACK =====
-            # Poll /api/auth/user/ — expects 401 (auth required) meaning Django is up.
-            # 502 means the container failed to start.
+            # Poll /api/auth/user/ directly on port 8001 (loopback-bound, bypasses nginx).
+            # Expects 401 (auth required) meaning Django/gunicorn is up.
             echo "Health checking new backend (30s window)..."
             HEALTHY=false
             for i in $(seq 1 6); do
               sleep 5
-              HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/auth/user/ 2>/dev/null || echo "000")
+              HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/api/auth/user/ 2>/dev/null || echo "000")
               if [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "200" ]; then
                 HEALTHY=true
                 echo "✅ Backend healthy (HTTP $HTTP_STATUS) after $((i * 5))s"
