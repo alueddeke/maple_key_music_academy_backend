@@ -843,6 +843,7 @@ class BatchLessonItem(models.Model):
 
     # Notes
     teacher_notes = models.TextField(blank=True)
+    admin_notes = models.TextField(blank=True, default='')
 
     # link to recurring sched (if from schedule)
     recurring_schedule = models.ForeignKey(
