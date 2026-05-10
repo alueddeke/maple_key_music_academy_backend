@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
+from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, GlobalRateSettings
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer
@@ -625,15 +625,14 @@ def batch_add_lesson(request, batch_id):
     # Auto-populate rates based on lesson type if not provided
     if 'teacher_rate' not in data or 'student_rate' not in data:
         lesson_type = data.get('lesson_type', 'in_person')
-        from ..models import GlobalRateSettings
-        global_rates = GlobalRateSettings.get_rates()
+        global_settings = GlobalRateSettings.get_settings()
 
         if lesson_type == 'online':
-            data['teacher_rate'] = global_rates['online_teacher_rate']
-            data['student_rate'] = global_rates['online_student_rate']
+            data['teacher_rate'] = global_settings.online_teacher_rate
+            data['student_rate'] = global_settings.online_student_rate
         else:  # in_person
-            data['teacher_rate'] = request.user.hourly_rate or global_rates['online_teacher_rate']
-            data['student_rate'] = global_rates['inperson_student_rate']
+            data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
+            data['student_rate'] = global_settings.inperson_student_rate
 
     serializer = BatchLessonItemSerializer(data=data)
     if serializer.is_valid():
