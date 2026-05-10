@@ -672,9 +672,26 @@ def teacher_detail(request, pk):
         teacher.hourly_rate = new_rate
         teacher.save()
 
-        # Return updated teacher data
+        schedules_updated = 0
+        if request.data.get('apply_to_schedules'):
+            # Update active in-person recurring schedules
+            schedules_updated = RecurringLessonsSchedule.objects.filter(
+                teacher=teacher,
+                is_active=True,
+                lesson_type='in_person'
+            ).update(teacher_rate=new_rate)
+
+            # Update lesson items in open (draft/submitted) batches
+            BatchLessonItem.objects.filter(
+                batch__teacher=teacher,
+                batch__status__in=['draft', 'submitted'],
+                lesson_type='in_person'
+            ).update(teacher_rate=new_rate)
+
         serializer = TeacherDetailSerializer(teacher)
-        return Response(serializer.data)
+        response_data = serializer.data
+        response_data['schedules_updated'] = schedules_updated
+        return Response(response_data)
 
 # ============================================================================
 # STUDENT MANAGEMENT ENDPOINTS
@@ -1010,10 +1027,31 @@ def management_update_teacher(request, pk):
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
 
+    apply_to_schedules = request.data.get('apply_to_schedules', False)
+    old_rate = teacher.hourly_rate
+
     serializer = UserSerializer(teacher, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
-        return Response(serializer.data)
+
+        schedules_updated = 0
+        rate_changed = 'hourly_rate' in request.data and teacher.hourly_rate != old_rate
+        if apply_to_schedules and rate_changed:
+            schedules_updated = RecurringLessonsSchedule.objects.filter(
+                teacher=teacher,
+                is_active=True,
+                lesson_type='in_person'
+            ).update(teacher_rate=teacher.hourly_rate)
+
+            BatchLessonItem.objects.filter(
+                batch__teacher=teacher,
+                batch__status__in=['draft', 'submitted'],
+                lesson_type='in_person'
+            ).update(teacher_rate=teacher.hourly_rate)
+
+        response_data = serializer.data
+        response_data['schedules_updated'] = schedules_updated
+        return Response(response_data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
