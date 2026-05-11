@@ -240,11 +240,11 @@ def google_exchange(request):
                     },
                     status=status.HTTP_202_ACCEPTED,
                 )
-    except Exception as e:
+    except Exception:
         # Catch-all for unexpected DB errors during user find-or-create flow
         logger.exception('Google exchange approval flow error')
         return Response(
-            {'error': f'Approval flow error: {str(e)}'},
+            {'error': 'An unexpected error occurred. Please try again.'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
