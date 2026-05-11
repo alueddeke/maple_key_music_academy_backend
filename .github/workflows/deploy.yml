@@ -225,7 +225,7 @@ jobs:
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
-              --health-cmd "curl -f http://localhost:8000/api/auth/user/ || exit 1" \
+              --health-cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/auth/user/ | grep -qE '^(200|401)$'" \
               --health-interval 30s \
               --health-timeout 10s \
               --health-retries 3 \
@@ -285,6 +285,7 @@ jobs:
                   -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
                   -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
                   -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+                  -v /var/log/maple-key:/var/log/maple-key \
                   -v static_volume:/app/staticfiles \
                   "$OLD_IMAGE"
                 echo "⚠️  Rolled back to $OLD_IMAGE — production restored"
