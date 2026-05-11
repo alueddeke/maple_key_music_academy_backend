@@ -215,6 +215,9 @@ jobs:
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py collectstatic --noinput
 
+            # Create log directory on host (survives container restarts)
+            mkdir -p /var/log/maple-key
+
             # Swap backend container (postgres stays running throughout)
             docker stop maple-key-backend 2>/dev/null || true
             docker rm maple-key-backend 2>/dev/null || true
@@ -234,6 +237,7 @@ jobs:
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -v /var/log/maple-key:/var/log/maple-key \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
 
