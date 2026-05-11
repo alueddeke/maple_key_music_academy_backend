@@ -331,18 +331,21 @@ if not DEBUG:
         'formatter': 'json',
     }
 
+_log_formatters = {
+    'console': {
+        'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
+    },
+}
+if not DEBUG:
+    _log_formatters['json'] = {
+        '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
+        'format': '%(asctime)s %(levelname)s %(name)s %(message)s',
+    }
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'formatters': {
-        'json': {
-            '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
-            'format': '%(asctime)s %(levelname)s %(name)s %(message)s',
-        },
-        'console': {
-            'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
-        },
-    },
+    'formatters': _log_formatters,
     'handlers': _log_handlers,
     'loggers': {
         'django': {
