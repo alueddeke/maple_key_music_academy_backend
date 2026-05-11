@@ -225,6 +225,10 @@ jobs:
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
+              --health-cmd "curl -f http://localhost:8000/api/auth/user/ || exit 1" \
+              --health-interval 30s \
+              --health-timeout 10s \
+              --health-retries 3 \
               --network maple-key-network \
               -p 127.0.0.1:8001:8000 \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
@@ -324,6 +328,13 @@ jobs:
                     proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
                     proxy_redirect off;
                     proxy_buffering off;
+                    proxy_next_upstream error timeout invalid_header http_502 http_503;
+                }
+
+                error_page 503 @maintenance;
+                location @maintenance {
+                    default_type application/json;
+                    return 503 '{"error": "service_unavailable", "message": "Backend is starting up or unhealthy. Please retry shortly."}';
                 }
             }
             EOF
