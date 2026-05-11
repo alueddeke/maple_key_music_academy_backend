@@ -61,8 +61,8 @@ class TestGoogleOAuthFlow:
         user_count_before = User.objects.count()
 
         mock_token, mock_userinfo = self._mock_google_responses('returning@example.com')
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -86,8 +86,8 @@ class TestGoogleOAuthFlow:
         )
 
         mock_token, mock_userinfo = self._mock_google_responses('preapproved@example.com')
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -116,8 +116,8 @@ class TestGoogleOAuthFlow:
         )
 
         mock_token, mock_userinfo = self._mock_google_responses('approved_reg@example.com')
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -143,8 +143,8 @@ class TestGoogleOAuthFlow:
             status='rejected',
         )
         mock_token, mock_userinfo = self._mock_google_responses('rejected_oauth@example.com')
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -168,8 +168,8 @@ class TestGoogleOAuthFlow:
         )
 
         mock_token, mock_userinfo = self._mock_google_responses('pending@example.com')
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -190,8 +190,8 @@ class TestGoogleOAuthFlow:
         assert not UserRegistrationRequest.objects.filter(email='brand_new@example.com').exists()
 
         mock_token, mock_userinfo = self._mock_google_responses('brand_new@example.com')
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -214,7 +214,7 @@ class TestGoogleOAuthFlow:
         mock_token.text = 'invalid_grant'
         mock_token.json.return_value = {'error': 'invalid_grant'}
 
-        with patch('custom_auth.views.requests.post', return_value=mock_token):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'bad_code',
                 'code_verifier': 'verifier_xyz_long_enough',
@@ -236,8 +236,8 @@ class TestGoogleOAuthFlow:
         mock_userinfo = MagicMock()
         mock_userinfo.status_code = 401
 
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             response = api_client.post(reverse('google_exchange'), {
                 'code': 'auth_code_abc',
                 'code_verifier': 'verifier_xyz_long_enough',

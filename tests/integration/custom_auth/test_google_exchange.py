@@ -63,8 +63,8 @@ class TestGoogleExchangeEndpoint:
 
         mock_token, mock_userinfo = self._mock_google_responses('existing@example.com')
 
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             url = reverse(self.URL)
             response = api_client.post(url, {
                 'code': 'auth_code_abc',
@@ -112,8 +112,8 @@ class TestGoogleExchangeEndpoint:
             'rejected@example.com', google_id='google_rejected_id'
         )
 
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             url = reverse(self.URL)
             response = api_client.post(url, {
                 'code': 'auth_code_abc',
@@ -130,7 +130,7 @@ class TestGoogleExchangeEndpoint:
         """
         import requests as req_lib
 
-        with patch('custom_auth.views.requests.post',
+        with patch('custom_auth.views.oauth.requests.post',
                    side_effect=req_lib.exceptions.Timeout):
             url = reverse(self.URL)
             response = api_client.post(url, {
@@ -168,8 +168,8 @@ class TestGoogleExchangeEndpoint:
             'new_oauth_user@example.com'
         )
 
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             url = reverse(self.URL)
             response = api_client.post(url, {
                 'code': 'auth_code_abc',
@@ -196,8 +196,8 @@ class TestGoogleExchangeEndpoint:
             google_id='google_unapproved_id_456',
         )
 
-        with patch('custom_auth.views.requests.post', return_value=mock_token), \
-             patch('custom_auth.views.requests.get', return_value=mock_userinfo):
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
             url = reverse(self.URL)
             response = api_client.post(url, {
                 'code': 'auth_code_abc',
