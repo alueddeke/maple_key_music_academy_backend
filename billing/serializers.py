@@ -174,6 +174,11 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
         decimal_places=2,
         read_only=True
     )
+    def validate_duration(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Duration must be greater than 0.")
+        return value
+
     class Meta:
         model = BatchLessonItem
         fields = [

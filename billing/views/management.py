@@ -1234,8 +1234,10 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     except BatchLessonItem.DoesNotExist:
         return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # Only allow editing specific fields; status restricted to trial/completed/cancelled
-    allowed_fields = ['teacher_notes', 'cancellation_reason', 'status']
+    allowed_fields = [
+        'teacher_notes', 'cancellation_reason', 'status',
+        'scheduled_date', 'start_time', 'duration', 'lesson_type', 'admin_notes',
+    ]
 
     if 'status' in request.data:
         allowed_statuses = ['trial', 'completed', 'cancelled']
@@ -1245,18 +1247,12 @@ def management_edit_lesson_notes(request, batch_id, item_id):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-    updated = False
-
-    for field in allowed_fields:
-        if field in request.data:
-            setattr(lesson_item, field, request.data[field])
-            updated = True
-
-    if updated:
-        lesson_item.save()
-
-    serializer = BatchLessonItemSerializer(lesson_item)
-    return Response(serializer.data)
+    update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
+    serializer = BatchLessonItemSerializer(lesson_item, data=update_data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['POST'])
