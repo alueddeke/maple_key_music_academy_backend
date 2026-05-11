@@ -104,7 +104,8 @@ def logout(request):
         return Response({
             'error': 'Invalid refresh token'
         }, status=status.HTTP_401_UNAUTHORIZED)
-    except Exception as e:
+    except Exception:
+        logger.exception('Logout failed unexpectedly')
         return Response({
             'error': 'Logout failed'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

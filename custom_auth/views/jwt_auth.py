@@ -182,7 +182,8 @@ def refresh_jwt_token(request):
         return Response({
             'error': 'Invalid refresh token'
         }, status=status.HTTP_401_UNAUTHORIZED)
-    except Exception as e:
+    except Exception:
+        logger.exception('Token refresh failed unexpectedly')
         return Response({
             'error': 'Token refresh failed'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
