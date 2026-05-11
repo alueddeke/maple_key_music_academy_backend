@@ -66,9 +66,9 @@ def setup_account_with_invitation(request, token):
         last_name = request.data.get('last_name')
         password = request.data.get('password')
 
-        if not first_name or not last_name:
+        if not first_name or not last_name or not password:
             return Response({
-                'error': 'First name and last name are required'
+                'error': 'First name, last name, and password are required'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Create user account — derive school from invitation chain (never use School.objects.first())

@@ -103,7 +103,9 @@ class TestOwnsResourceOrManagement:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=80,
+            school=teacher_user.school,
+            teacher_rate=80,
+            student_rate=80,
             duration=1.0,
             scheduled_date=datetime.now(),
             status="confirmed"
@@ -136,6 +138,7 @@ class TestOwnsResourceOrManagement:
             password="testpass123",
             user_type="teacher",
             hourly_rate=80,
+            school=teacher_user.school,
             is_approved=True
         )
 
@@ -143,7 +146,9 @@ class TestOwnsResourceOrManagement:
         lesson = Lesson.objects.create(
             teacher=other_teacher,  # Different teacher
             student=student_user,
-            rate=80,
+            school=teacher_user.school,
+            teacher_rate=80,
+            student_rate=80,
             duration=1.0,
             scheduled_date=datetime.now(),
             status="confirmed"
@@ -173,7 +178,9 @@ class TestOwnsResourceOrManagement:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
-            rate=80,
+            school=teacher_user.school,
+            teacher_rate=80,
+            student_rate=80,
             duration=1.0,
             scheduled_date=datetime.now(),
             status="confirmed"
@@ -197,34 +204,37 @@ class TestOwnsResourceOrManagement:
 class TestUserApprovalSystem:
     """Test that approval status affects access."""
 
-    def test_management_auto_approved(self, db):
+    def test_management_auto_approved(self, school):
         """Management users are auto-approved upon creation."""
         manager = User.objects.create_user(
             email="newmanager@test.com",
             password="testpass123",
-            user_type="management"
+            user_type="management",
+            school=school
         )
 
         # Management should be auto-approved
         assert manager.is_approved is True
 
-    def test_teacher_not_auto_approved(self, db):
+    def test_teacher_not_auto_approved(self, school):
         """Teachers are not auto-approved and require management approval."""
         teacher = User.objects.create_user(
             email="newteacher@test.com",
             password="testpass123",
-            user_type="teacher"
+            user_type="teacher",
+            school=school
         )
 
         # Teachers should NOT be auto-approved
         assert teacher.is_approved is False
 
-    def test_student_not_auto_approved(self, db):
+    def test_student_not_auto_approved(self, school):
         """Students are not auto-approved and require management approval."""
         student = User.objects.create_user(
             email="newstudent@test.com",
             password="testpass123",
-            user_type="student"
+            user_type="student",
+            school=school
         )
 
         # Students should NOT be auto-approved

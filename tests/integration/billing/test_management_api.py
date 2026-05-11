@@ -181,6 +181,7 @@ class TestRateLockingMechanism:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="online",
             teacher_rate=Decimal("45.00"),  # Locked rate
@@ -208,6 +209,7 @@ class TestRateLockingMechanism:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="in_person",
             teacher_rate=Decimal("80.00"),  # Locked at teacher's hourly_rate
@@ -237,14 +239,13 @@ class TestRateLockingMechanism:
         response = authenticated_management_client.patch(url, data, format='json')
         assert response.status_code == status.HTTP_200_OK
 
-        # Create a new online lesson (rates auto-set in Lesson.save() when None)
+        # Create a new online lesson (rates auto-set in Lesson.save() from defaults)
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="online",
-            teacher_rate=None,  # Explicitly None to trigger auto-set
-            student_rate=None,  # Explicitly None to trigger auto-set
             status="completed"
         )
 
@@ -265,14 +266,13 @@ class TestRateLockingMechanism:
         # Refresh teacher data
         teacher_user.refresh_from_db()
 
-        # Create a new in-person lesson (rates auto-set in Lesson.save() when None)
+        # Create a new in-person lesson (rates auto-set in Lesson.save() from defaults)
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="in_person",
-            teacher_rate=None,  # Explicitly None to trigger auto-set
-            student_rate=None,  # Explicitly None to trigger auto-set
             status="completed"
         )
 
