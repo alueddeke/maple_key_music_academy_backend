@@ -531,6 +531,9 @@ def teacher_monthly_batches(request):
         # Get all expected lessons from active recurring schedules
         scheduled_lessons = batch.get_scheduled_lessons_data()
 
+        # Track which students have already been assigned a trial in this loop
+        trial_assigned_students: set = set()
+
         # For each expected lesson, check if it already exists in the batch
         for lesson_data in scheduled_lessons:
             # Check if this lesson already exists (same student, date, time)
@@ -543,12 +546,17 @@ def teacher_monthly_batches(request):
 
             # Only create if it doesn't already exist (preserves manual edits)
             if not existing_lesson:
-                # Auto-default trial: first lesson for a student (no prior Lesson records)
                 item_status = lesson_data['status']
                 student = lesson_data['student']
-                prior_lesson_count = Lesson.objects.filter(student=student).count()
-                if prior_lesson_count == 0:
-                    item_status = 'trial'
+
+                # Auto-default trial: only the very first lesson for a student with no
+                # existing Lesson records. One trial per student per batch creation.
+                if student.id not in trial_assigned_students:
+                    prior_lesson_count = Lesson.objects.filter(student=student).count()
+                    prior_batch_item_count = BatchLessonItem.objects.filter(student=student).count()
+                    if prior_lesson_count == 0 and prior_batch_item_count == 0:
+                        item_status = 'trial'
+                        trial_assigned_students.add(student.id)
 
                 BatchLessonItem.objects.create(
                     batch=batch,
@@ -655,13 +663,14 @@ def batch_add_lesson(request, batch_id):
             data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
             data['student_rate'] = global_settings.inperson_student_rate
 
-    # Auto-default trial: first lesson for a student (no prior Lesson records)
+    # Auto-default trial: only if student has no Lesson records AND no BatchLessonItems
     student_id = data.get('student_id') or data.get('student')
     if student_id:
         try:
             student_obj = User.objects.get(id=student_id)
             prior_lesson_count = Lesson.objects.filter(student=student_obj).count()
-            if prior_lesson_count == 0:
+            prior_batch_item_count = BatchLessonItem.objects.filter(student=student_obj).count()
+            if prior_lesson_count == 0 and prior_batch_item_count == 0:
                 data['status'] = 'trial'
         except Exception:
             pass
@@ -698,6 +707,8 @@ def batch_lesson_item(request, batch_id, item_id):
 
     if request.method == 'PUT':
         allowed_fields = ['status', 'cancelled_by_type', 'cancellation_reason', 'teacher_notes']
+        if item.is_one_off:
+            allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
