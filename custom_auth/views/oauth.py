@@ -128,6 +128,12 @@ def google_exchange(request):
                 is_approved=True,
                 school=school,
             )
+        # Guard: existing users must be approved before the invitation fast path issues a JWT.
+        if not inv_user.is_approved:
+            return Response(
+                {'error_code': 'approval_pending', 'message': 'Account not yet approved.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         invitation.mark_as_used()
         refresh = RefreshToken.for_user(inv_user)
         inv_name = f"{inv_user.first_name} {inv_user.last_name}".strip() or user_data.get('name', inv_user.email)
