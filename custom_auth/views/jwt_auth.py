@@ -58,45 +58,17 @@ def get_jwt_token(request):
             reg_request = UserRegistrationRequest.objects.get(email=email)
 
             if reg_request.status == 'approved':
-                # Registration was approved but user not created yet - create user now
-                # Extract hashed password from notes field
-                if reg_request.notes and reg_request.notes.startswith('HASHED_PASSWORD:'):
-                    # Extract just the hashed password (might have management notes appended)
-                    notes_lines = reg_request.notes.split('\n')
-                    password_line = notes_lines[0]  # First line has the password
-                    hashed_password = password_line.replace('HASHED_PASSWORD:', '', 1).strip()
-
-                    school = getattr(getattr(reg_request, 'reviewed_by', None), 'school', None)
-                    if school is None:
-                        logger.error('Cannot derive school for reg_request user creation: %s', email)
-                        return Response(
-                            {'error': 'Server configuration error'},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        )
-                    user = User.objects.create(
-                        email=email,
-                        first_name=reg_request.first_name,
-                        last_name=reg_request.last_name,
-                        user_type=reg_request.user_type,
-                        is_approved=True,
-                        school=school
-                    )
-                    user.password = hashed_password
-                    user.save()
-
-                    # Try to authenticate again
-                    user = authenticate(request, username=email, password=password)
-
-                    if user is None:
-                        return Response({
-                            'error': 'Invalid email or password',
-                            'message': 'Authentication failed after account creation. Please try registering again.'
-                        }, status=status.HTTP_401_UNAUTHORIZED)
-                else:
-                    return Response({
+                # Account was approved but user record does not exist yet.
+                # The approval workflow sends an invitation link for the user to set
+                # their own password via Google OAuth; there is no password-based
+                # login path for email-registered users at this stage.
+                return Response(
+                    {
                         'error': 'Account setup incomplete',
-                        'message': 'Your registration was approved but account setup is incomplete. Please contact support.'
-                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                        'message': 'Your account was approved. Please use your invitation link to set up a password, or contact support.',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             elif reg_request.status == 'rejected':
                 return Response({
