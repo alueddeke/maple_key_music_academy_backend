@@ -331,7 +331,6 @@ class TestPhase2ManagementSchoolScoping:
     ):
         """
         SEC-04: Management from school A cannot approve invoice belonging to school B.
-        Currently FAILS — approve_teacher_invoice does not filter by school.
         """
         from billing.models import Invoice
         from decimal import Decimal
@@ -362,7 +361,6 @@ class TestPhase2ManagementSchoolScoping:
     ):
         """
         SEC-04: Management from school A cannot delete user belonging to school B.
-        Currently FAILS — management_delete_user does not filter by school.
         """
         school2_user = User.objects.create_user(
             email="victim@school2.com", password="test123",

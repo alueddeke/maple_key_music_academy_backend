@@ -223,7 +223,6 @@ class TestTeacherListAuthentication:
     def test_unauthenticated_teacher_list_returns_401(self, api_client):
         """
         SEC-03: Unauthenticated GET to /api/billing/teachers/ must return 401, not teacher PII.
-        Currently FAILS — DRF default IsAuthenticatedOrReadOnly allows GET.
         """
         url = reverse('teacher_list')
         response = api_client.get(url)
@@ -232,7 +231,6 @@ class TestTeacherListAuthentication:
     def test_unauthenticated_teacher_detail_returns_401(self, api_client, school):
         """
         SEC-03: Unauthenticated GET to /api/billing/teachers/<pk>/ must return 401.
-        Currently FAILS — public teacher_detail returns full UserSerializer to anonymous callers.
         """
         teacher = User.objects.create_user(
             email="pub_teacher@test.com", password="test123",

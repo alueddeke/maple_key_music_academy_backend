@@ -289,7 +289,6 @@ class TestPhase2BillableContactSchoolScoping:
     ):
         """
         SEC-07: Management from school A cannot GET billable contact from school B.
-        Currently FAILS — manage_billable_contact does not filter by school.
         """
         from billing.models import BillableContact
 
