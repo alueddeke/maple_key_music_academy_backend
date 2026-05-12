@@ -312,3 +312,55 @@ EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@maplekey.com')
 TEST_EMAIL_RECIPIENT = config('TEST_EMAIL_RECIPIENT', default='antonilueddeke@gmail.com')
+
+# Structured logging — JSON format for production, console for local dev
+# File handler built conditionally: RotatingFileHandler requires /var/log/maple-key/
+# to exist and must not be instantiated in local dev or CI (DEBUG=True).
+_log_handlers = {
+    'console': {
+        'class': 'logging.StreamHandler',
+        'formatter': 'console',
+    },
+}
+if not DEBUG:
+    _log_handlers['file'] = {
+        'class': 'logging.handlers.RotatingFileHandler',
+        'filename': '/var/log/maple-key/app.log',
+        'maxBytes': 10 * 1024 * 1024,  # 10 MB
+        'backupCount': 5,
+        'formatter': 'json',
+    }
+
+_log_formatters = {
+    'console': {
+        'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
+    },
+}
+if not DEBUG:
+    _log_formatters['json'] = {
+        '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
+        'format': '%(asctime)s %(levelname)s %(name)s %(message)s',
+    }
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': _log_formatters,
+    'handlers': _log_handlers,
+    'loggers': {
+        'django': {
+            'handlers': ['console'] if DEBUG else ['console', 'file'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'] if DEBUG else ['console', 'file'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+    },
+    'root': {
+        'handlers': ['console'] if DEBUG else ['console', 'file'],
+        'level': 'WARNING',
+    },
+}

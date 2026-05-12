@@ -8,30 +8,60 @@ on:
       - production
   workflow_dispatch:
 jobs:
-  # test:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #
-  #     - name: Set up Python
-  #       uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.11'
-  #
-  #     - name: Cache pip dependencies
-  #       uses: actions/cache@v3
-  #       with:
-  #         path: ~/.cache/pip
-  #         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-  #         restore-keys: |
-  #           ${{ runner.os }}-pip-
-  #
-  #     - name: Install dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         pip install -r requirements.txt
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: ci_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://ci_user:ci_password@localhost:5432/ci_db
+          SECRET_KEY: ci-secret-key-not-used-in-production
+          DEBUG: "True"
+          ALLOWED_HOSTS: "localhost,127.0.0.1"
+          GOOGLE_CLIENT_ID: ci-client-id
+          GOOGLE_CLIENT_SECRET: ci-client-secret
+          CORS_ALLOWED_ORIGINS: http://localhost:5173
+          FRONTEND_URL: http://localhost:5173
+          RESEND_API_KEY: ci-resend-key
+          DEFAULT_FROM_EMAIL: ci@test.com
+        run: pytest tests/
+
   build_and_push:
-    # needs: test
+    needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
@@ -58,9 +88,16 @@ jobs:
   deploy:
     needs: build_and_push
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Deploy to VPC
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -178,6 +215,9 @@ jobs:
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py collectstatic --noinput
 
+            # Create log directory on host (survives container restarts)
+            mkdir -p /var/log/maple-key
+
             # Swap backend container (postgres stays running throughout)
             docker stop maple-key-backend 2>/dev/null || true
             docker rm maple-key-backend 2>/dev/null || true
@@ -185,6 +225,10 @@ jobs:
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
+              --health-cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/auth/user/ | grep -qE '^(200|401)$'" \
+              --health-interval 30s \
+              --health-timeout 10s \
+              --health-retries 3 \
               --network maple-key-network \
               -p 127.0.0.1:8001:8000 \
               -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
@@ -197,6 +241,7 @@ jobs:
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -v /var/log/maple-key:/var/log/maple-key \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
 
@@ -240,6 +285,7 @@ jobs:
                   -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
                   -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
                   -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+                  -v /var/log/maple-key:/var/log/maple-key \
                   -v static_volume:/app/staticfiles \
                   "$OLD_IMAGE"
                 echo "⚠️  Rolled back to $OLD_IMAGE — production restored"
@@ -283,6 +329,13 @@ jobs:
                     proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
                     proxy_redirect off;
                     proxy_buffering off;
+                    proxy_next_upstream error timeout invalid_header http_502 http_503;
+                }
+
+                error_page 503 @maintenance;
+                location @maintenance {
+                    default_type application/json;
+                    return 503 '{"error": "service_unavailable", "message": "Backend is starting up or unhealthy. Please retry shortly."}';
                 }
             }
             EOF
@@ -398,3 +451,11 @@ jobs:
               docker logs maple-key-backend --tail 30 2>/dev/null || true
               exit 1
             fi
+
+      - name: Tag successful deploy
+        run: |
+          TAG="deploy-$(date -u +%Y-%m-%d-%H)"
+          git tag "$TAG"
+          git push origin "$TAG"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

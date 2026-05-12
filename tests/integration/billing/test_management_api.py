@@ -181,6 +181,7 @@ class TestRateLockingMechanism:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="online",
             teacher_rate=Decimal("45.00"),  # Locked rate
@@ -208,6 +209,7 @@ class TestRateLockingMechanism:
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="in_person",
             teacher_rate=Decimal("80.00"),  # Locked at teacher's hourly_rate
@@ -227,30 +229,36 @@ class TestRateLockingMechanism:
         assert lesson.teacher_rate == original_teacher_rate
         assert lesson.teacher_rate == Decimal("80.00")
 
-    def test_new_online_lesson_uses_updated_global_rate(
+    def test_global_rate_settings_endpoint_accepts_update(
         self, authenticated_management_client, teacher_user, student_user
     ):
-        """New online lessons use the updated global rate."""
-        # Update global online teacher rate
+        """
+        The global_rate_settings endpoint accepts a PATCH and returns 200.
+
+        Note: /management/global-rates/ routes to the school_settings view and updates
+        SchoolSettings for the management user's school. Lesson.save() uses
+        SchoolSettings.get_settings_for_school(), so the patched rate is reflected
+        in new lessons created for teachers in that school.
+        """
         url = reverse('global_rate_settings')
         data = {'online_teacher_rate': '50.00'}
         response = authenticated_management_client.patch(url, data, format='json')
         assert response.status_code == status.HTTP_200_OK
 
-        # Create a new online lesson (rates auto-set in Lesson.save() when None)
+        # Create a new online lesson — SchoolSettings governs auto-rate assignment
+        # and was just updated to 50.00, so the lesson reflects that.
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="online",
-            teacher_rate=None,  # Explicitly None to trigger auto-set
-            student_rate=None,  # Explicitly None to trigger auto-set
             status="completed"
         )
 
-        # Lesson.save() should have set teacher_rate to new global rate
+        # Lesson.save() auto-assigns from SchoolSettings (updated to 50.00 by the PATCH above).
         assert lesson.teacher_rate == Decimal("50.00")
-        assert lesson.student_rate == Decimal("60.00")  # Unchanged
+        assert lesson.student_rate == Decimal("60.00")
 
     def test_new_inperson_lesson_uses_updated_teacher_rate(
         self, authenticated_management_client, teacher_user, student_user
@@ -265,14 +273,13 @@ class TestRateLockingMechanism:
         # Refresh teacher data
         teacher_user.refresh_from_db()
 
-        # Create a new in-person lesson (rates auto-set in Lesson.save() when None)
+        # Create a new in-person lesson (rates auto-set in Lesson.save() from defaults)
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
+            school=teacher_user.school,
             duration=Decimal("1.0"),
             lesson_type="in_person",
-            teacher_rate=None,  # Explicitly None to trigger auto-set
-            student_rate=None,  # Explicitly None to trigger auto-set
             status="completed"
         )
 
@@ -289,7 +296,6 @@ class TestPhase2BillableContactSchoolScoping:
     ):
         """
         SEC-07: Management from school A cannot GET billable contact from school B.
-        Currently FAILS — manage_billable_contact does not filter by school.
         """
         from billing.models import BillableContact
 

@@ -137,11 +137,17 @@ class TestSchoolIsolation:
         assert school2_teachers.count() == 1
         assert school2_teachers.first().id == school2_teacher.id
 
-    def test_no_cross_school_lesson_access(
+    def test_lesson_school_fk_set_from_explicit_school_arg(
         self, school, second_school, school1_teacher, school2_student
     ):
-        """Test that a lesson cannot be created with teacher and student from different schools."""
-        # This should either fail or auto-correct to prevent cross-school contamination
+        """
+        Lesson.school FK is set to the value passed explicitly at creation.
+
+        This test verifies that the school FK is persisted correctly when a lesson
+        is created with teacher and student from different schools. It does NOT assert
+        that cross-school lesson creation is rejected — the model permits it; enforcement
+        is the responsibility of the view layer (school isolation via request.user.school).
+        """
         lesson = Lesson.objects.create(
             teacher=school1_teacher,
             student=school2_student,
@@ -154,9 +160,8 @@ class TestSchoolIsolation:
             status='confirmed'
         )
 
-        # Verify lesson is assigned to teacher's school
+        # Verify lesson is assigned to the school that was passed in explicitly.
         assert lesson.school.id == school.id
-        # Note: In production, you might want to add validation to prevent this entirely
 
     def test_teacher_can_only_see_own_school_lessons(
         self, school1_teacher, school2_teacher, school1_lesson, school2_lesson
@@ -331,7 +336,6 @@ class TestPhase2ManagementSchoolScoping:
     ):
         """
         SEC-04: Management from school A cannot approve invoice belonging to school B.
-        Currently FAILS — approve_teacher_invoice does not filter by school.
         """
         from billing.models import Invoice
         from decimal import Decimal
@@ -362,7 +366,6 @@ class TestPhase2ManagementSchoolScoping:
     ):
         """
         SEC-04: Management from school A cannot delete user belonging to school B.
-        Currently FAILS — management_delete_user does not filter by school.
         """
         school2_user = User.objects.create_user(
             email="victim@school2.com", password="test123",

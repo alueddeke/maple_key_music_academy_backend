@@ -15,6 +15,8 @@ from custom_auth.decorators import (
 )
 import logging
 import uuid
+from django.db import transaction
+from django.core.exceptions import FieldDoesNotExist
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -229,199 +231,200 @@ def submit_lessons_for_invoice(request):
                 'message': 'Please update student billing information in Student Management before submitting this invoice. All fields (name, email, phone, street address, city, province, postal code) are required.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Create lessons and collect them for the invoice
-        created_lessons = []
+        with transaction.atomic():
+            # Create lessons and collect them for the invoice
+            created_lessons = []
 
-        for lesson_data in lessons_data:
-            # Handle student lookup/creation
-            student_name = lesson_data.get('student_name')
-            student_email = lesson_data.get('student_email')
+            for lesson_data in lessons_data:
+                # Handle student lookup/creation
+                student_name = lesson_data.get('student_name')
+                student_email = lesson_data.get('student_email')
 
-            if student_email:
-                # Find or create student by email using get_or_create for atomicity
-                student, created = User.objects.get_or_create(
-                    email=student_email,
-                    user_type='student',
-                    defaults={
-                        'first_name': student_name.split()[0] if student_name else '',
-                        'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        'is_approved': True,  # Auto-approve students created by teachers
-                        'school': request.user.school  # Auto-assign teacher's school
+                if student_email:
+                    # Find or create student by email using get_or_create for atomicity
+                    student, created = User.objects.get_or_create(
+                        email=student_email,
+                        user_type='student',
+                        defaults={
+                            'first_name': student_name.split()[0] if student_name else '',
+                            'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                            'is_approved': True,  # Auto-approve students created by teachers
+                            'school': request.user.school  # Auto-assign teacher's school
+                        }
+                    )
+                else:
+                    # Create student with just name (no email)
+                    # Generate temp email and use get_or_create for atomicity
+                    temp_email = f"noemail_{uuid.uuid4().hex[:12]}@maplekeymusic.internal"
+                    student, created = User.objects.get_or_create(
+                        email=temp_email,
+                        user_type='student',
+                        defaults={
+                            'first_name': student_name.split()[0] if student_name else '',
+                            'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
+                            'is_approved': True,
+                            'school': request.user.school  # Auto-assign teacher's school
+                        }
+                    )
+
+                # If student was just created, create a placeholder billable contact
+                # Management must complete this information before approving the invoice
+                if created:
+                    # Handle both old 'state' and new 'province' field names for backward compatibility
+                    contact_data = {
+                        'student': student,
+                        'school': request.user.school,  # Auto-assign teacher's school
+                        'contact_type': 'parent',
+                        'first_name': 'INCOMPLETE',
+                        'last_name': 'INCOMPLETE',
+                        'email': student_email or temp_email,
+                        'phone': 'INCOMPLETE',
+                        'street_address': 'INCOMPLETE - Please update in Student Management',
+                        'city': 'INCOMPLETE',
+                        'postal_code': 'INCOMPLETE',
+                        'is_primary': True
                     }
-                )
-            else:
-                # Create student with just name (no email)
-                # Generate temp email and use get_or_create for atomicity
-                temp_email = f"noemail_{uuid.uuid4().hex[:12]}@maplekeymusic.internal"
-                student, created = User.objects.get_or_create(
-                    email=temp_email,
-                    user_type='student',
-                    defaults={
-                        'first_name': student_name.split()[0] if student_name else '',
-                        'last_name': ' '.join(student_name.split()[1:]) if student_name and len(student_name.split()) > 1 else '',
-                        'is_approved': True,
-                        'school': request.user.school  # Auto-assign teacher's school
-                    }
-                )
 
-            # If student was just created, create a placeholder billable contact
-            # Management must complete this information before approving the invoice
-            if created:
-                # Handle both old 'state' and new 'province' field names for backward compatibility
-                contact_data = {
-                    'student': student,
-                    'school': request.user.school,  # Auto-assign teacher's school
-                    'contact_type': 'parent',
-                    'first_name': 'INCOMPLETE',
-                    'last_name': 'INCOMPLETE',
-                    'email': student_email or temp_email,
-                    'phone': 'INCOMPLETE',
-                    'street_address': 'INCOMPLETE - Please update in Student Management',
-                    'city': 'INCOMPLETE',
-                    'postal_code': 'INCOMPLETE',
-                    'is_primary': True
-                }
+                    # Detect which field name to use (province vs state) for backward compatibility
+                    try:
+                        BillableContact._meta.get_field('province')
+                        contact_data['province'] = 'XX'
+                    except FieldDoesNotExist:
+                        contact_data['state'] = 'XX'
 
-                # Detect which field name to use (province vs state) for backward compatibility
+                    BillableContact.objects.create(**contact_data)
+
+                # Create lesson with dual-rate system
+                lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
+
+                # Determine rates based on lesson type using SchoolSettings
+                from billing.models import SchoolSettings
+                from decimal import Decimal
+
+                # Get rates from school settings (with fallback to legacy GlobalRateSettings if needed)
                 try:
-                    BillableContact._meta.get_field('province')
-                    contact_data['province'] = 'XX'
-                except:
-                    contact_data['state'] = 'XX'
+                    school_settings = SchoolSettings.get_settings_for_school(request.user.school)
+                    if lesson_type == 'online':
+                        # Online lessons use school rates
+                        teacher_rate = school_settings.online_teacher_rate
+                        student_rate = school_settings.online_student_rate
+                    else:
+                        # In-person lessons: teacher gets their hourly_rate, student pays school in-person rate
+                        teacher_rate = request.user.hourly_rate
+                        student_rate = school_settings.inperson_student_rate
+                except Exception as e:
+                    # Fallback to legacy GlobalRateSettings for backward compatibility
+                    from billing.models import GlobalRateSettings
+                    logger.warning(f"Failed to load SchoolSettings, falling back to GlobalRateSettings: {e}")
+                    global_rates = GlobalRateSettings.get_settings()
+                    if lesson_type == 'online':
+                        teacher_rate = global_rates.online_teacher_rate
+                        student_rate = global_rates.online_student_rate
+                    else:
+                        teacher_rate = request.user.hourly_rate
+                        student_rate = global_rates.inperson_student_rate
 
-                BillableContact.objects.create(**contact_data)
 
-            # Create lesson with dual-rate system
-            lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
-
-            # Determine rates based on lesson type using SchoolSettings
-            from billing.models import SchoolSettings
-            from decimal import Decimal
-
-            # Get rates from school settings (with fallback to legacy GlobalRateSettings if needed)
-            try:
-                school_settings = SchoolSettings.get_settings_for_school(request.user.school)
-                if lesson_type == 'online':
-                    # Online lessons use school rates
-                    teacher_rate = school_settings.online_teacher_rate
-                    student_rate = school_settings.online_student_rate
+                # Determine trial status
+                if 'is_trial' in lesson_data:
+                    # Teacher explicitly set trial status - respect their choice
+                    is_trial = lesson_data.get('is_trial', False)
+                    explicitly_set = True
+                    logger.info(f"Teacher explicitly set is_trial={is_trial} for student {student.email}")
                 else:
-                    # In-person lessons: teacher gets their hourly_rate, student pays school in-person rate
-                    teacher_rate = request.user.hourly_rate
-                    student_rate = school_settings.inperson_student_rate
-            except Exception as e:
-                # Fallback to legacy GlobalRateSettings for backward compatibility
-                from billing.models import GlobalRateSettings
-                logger.warning(f"Failed to load SchoolSettings, falling back to GlobalRateSettings: {e}")
-                global_rates = GlobalRateSettings.get_settings()
-                if lesson_type == 'online':
-                    teacher_rate = global_rates.online_teacher_rate
-                    student_rate = global_rates.online_student_rate
-                else:
-                    teacher_rate = request.user.hourly_rate
-                    student_rate = global_rates.inperson_student_rate
+                    # No explicit setting - auto-detect based on student history
+                    if not Lesson.student_has_completed_lesson(student):
+                        is_trial = True
+                        logger.info(f"Auto-detected first lesson for student {student.email} - marking as trial")
+                    else:
+                        is_trial = False
+                    explicitly_set = False
 
+                if is_trial:
+                    student_rate = Decimal('0.00')
+                    logger.info(f"Trial lesson for {student.email} - student_rate=$0.00, teacher_rate={teacher_rate}")
 
-            # Determine trial status
-            if 'is_trial' in lesson_data:
-                # Teacher explicitly set trial status - respect their choice
-                is_trial = lesson_data.get('is_trial', False)
-                explicitly_set = True
-                logger.info(f"Teacher explicitly set is_trial={is_trial} for student {student.email}")
-            else:
-                # No explicit setting - auto-detect based on student history
-                if not Lesson.student_has_completed_lesson(student):
-                    is_trial = True
-                    logger.info(f"Auto-detected first lesson for student {student.email} - marking as trial")
-                else:
-                    is_trial = False
-                explicitly_set = False
+                # Create lesson
+                lesson = Lesson(
+                    teacher=request.user,
+                    student=student,
+                    school=request.user.school,  # Auto-assign teacher's school
+                    lesson_type=lesson_type,
+                    is_trial=is_trial,
+                    scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
+                    duration=lesson_data.get('duration', 1.0),
+                    teacher_rate=teacher_rate,
+                    student_rate=student_rate,
+                    status='completed',  # Mark as completed since teacher is submitting for payment
+                    completed_date=timezone.now(),
+                    teacher_notes=lesson_data.get('teacher_notes', '')
+                )
 
-            if is_trial:
-                student_rate = Decimal('0.00')
-                logger.info(f"Trial lesson for {student.email} - student_rate=$0.00, teacher_rate={teacher_rate}")
+                # Mark if trial status was explicitly set (to prevent auto-detection override in save())
+                if explicitly_set:
+                    lesson._is_trial_explicitly_set = True
 
-            # Create lesson
-            lesson = Lesson(
+                # Save the lesson
+                lesson.save()
+
+                created_lessons.append(lesson)
+
+            # Create invoice
+            invoice = Invoice.objects.create(
+                invoice_type='teacher_payment',
                 teacher=request.user,
-                student=student,
                 school=request.user.school,  # Auto-assign teacher's school
-                lesson_type=lesson_type,
-                is_trial=is_trial,
-                scheduled_date=lesson_data.get('scheduled_date', timezone.now()),
-                duration=lesson_data.get('duration', 1.0),
-                teacher_rate=teacher_rate,
-                student_rate=student_rate,
-                status='completed',  # Mark as completed since teacher is submitting for payment
-                completed_date=timezone.now(),
-                teacher_notes=lesson_data.get('teacher_notes', '')
-            )
-
-            # Mark if trial status was explicitly set (to prevent auto-detection override in save())
-            if explicitly_set:
-                lesson._is_trial_explicitly_set = True
-
-            # Save the lesson
-            lesson.save()
-
-            created_lessons.append(lesson)
-
-        # Create invoice
-        invoice = Invoice.objects.create(
-            invoice_type='teacher_payment',
-            teacher=request.user,
-            school=request.user.school,  # Auto-assign teacher's school
-            status='pending',  # Ready for management approval
-            due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=14)),  # 2 weeks
-            created_by=request.user,
-            payment_balance=0  # Will be calculated after lessons are added
-        )
-
-        # Add lessons to invoice
-        invoice.lessons.set(created_lessons)
-
-        # Recalculate payment balance and total amount
-        calculated_total = invoice.calculate_payment_balance()
-        invoice.payment_balance = calculated_total
-        invoice.total_amount = calculated_total
-        invoice.save()
-
-        # Create student invoices
-        # Group lessons by student
-        from collections import defaultdict
-        lessons_by_student = defaultdict(list)
-        for lesson in created_lessons:
-            lessons_by_student[lesson.student].append(lesson)
-
-        student_invoices_created = []
-        for student, student_lessons in lessons_by_student.items():
-            # Calculate total for this student using student_rate (not teacher_rate)
-            student_total = sum(lesson.student_cost() for lesson in student_lessons)
-
-            # Create student invoice
-            student_invoice = Invoice.objects.create(
-                invoice_type='student_billing',
-                student=student,
-                school=request.user.school,  # Auto-assign teacher's school
-                status='pending',  # Waiting for student payment
-                due_date=timezone.now() + timezone.timedelta(days=14),  # 14 days payment term
+                status='pending',  # Ready for management approval
+                due_date=data.get('due_date', timezone.now() + timezone.timedelta(days=14)),  # 2 weeks
                 created_by=request.user,
-                payment_balance=student_total,
-                total_amount=student_total
+                payment_balance=0  # Will be calculated after lessons are added
             )
 
-            # Add lessons to student invoice
-            student_invoice.lessons.set(student_lessons)
-            student_invoices_created.append(student_invoice)
+            # Add lessons to invoice
+            invoice.lessons.set(created_lessons)
 
-        # Return the created invoice with lesson details
-        serializer = InvoiceSerializer(invoice)
-        return Response({
-            'message': 'Lessons submitted and invoice created successfully',
-            'invoice': serializer.data,
-            'lessons_created': len(created_lessons),
-            'student_invoices_created': len(student_invoices_created)
-        }, status=status.HTTP_201_CREATED)
+            # Recalculate payment balance and total amount
+            calculated_total = invoice.calculate_payment_balance()
+            invoice.payment_balance = calculated_total
+            invoice.total_amount = calculated_total
+            invoice.save()
+
+            # Create student invoices
+            # Group lessons by student
+            from collections import defaultdict
+            lessons_by_student = defaultdict(list)
+            for lesson in created_lessons:
+                lessons_by_student[lesson.student].append(lesson)
+
+            student_invoices_created = []
+            for student, student_lessons in lessons_by_student.items():
+                # Calculate total for this student using student_rate (not teacher_rate)
+                student_total = sum(lesson.student_cost() for lesson in student_lessons)
+
+                # Create student invoice
+                student_invoice = Invoice.objects.create(
+                    invoice_type='student_billing',
+                    student=student,
+                    school=request.user.school,  # Auto-assign teacher's school
+                    status='pending',  # Waiting for student payment
+                    due_date=timezone.now() + timezone.timedelta(days=14),  # 14 days payment term
+                    created_by=request.user,
+                    payment_balance=student_total,
+                    total_amount=student_total
+                )
+
+                # Add lessons to student invoice
+                student_invoice.lessons.set(student_lessons)
+                student_invoices_created.append(student_invoice)
+
+            # Return the created invoice with lesson details
+            serializer = InvoiceSerializer(invoice)
+            return Response({
+                'message': 'Lessons submitted and invoice created successfully',
+                'invoice': serializer.data,
+                'lessons_created': len(created_lessons),
+                'student_invoices_created': len(student_invoices_created)
+            }, status=status.HTTP_201_CREATED)
 
     except Exception as e:
         import traceback
@@ -528,6 +531,9 @@ def teacher_monthly_batches(request):
         # Get all expected lessons from active recurring schedules
         scheduled_lessons = batch.get_scheduled_lessons_data()
 
+        # Track which students have already been assigned a trial in this loop
+        trial_assigned_students: set = set()
+
         # For each expected lesson, check if it already exists in the batch
         for lesson_data in scheduled_lessons:
             # Check if this lesson already exists (same student, date, time)
@@ -540,16 +546,28 @@ def teacher_monthly_batches(request):
 
             # Only create if it doesn't already exist (preserves manual edits)
             if not existing_lesson:
+                item_status = lesson_data['status']
+                student = lesson_data['student']
+
+                # Auto-default trial: only the very first lesson for a student with no
+                # existing Lesson records. One trial per student per batch creation.
+                if student.id not in trial_assigned_students:
+                    prior_lesson_count = Lesson.objects.filter(student=student).count()
+                    prior_batch_item_count = BatchLessonItem.objects.filter(student=student).count()
+                    if prior_lesson_count == 0 and prior_batch_item_count == 0:
+                        item_status = 'trial'
+                        trial_assigned_students.add(student.id)
+
                 BatchLessonItem.objects.create(
                     batch=batch,
-                    student=lesson_data['student'],
+                    student=student,
                     scheduled_date=lesson_data['scheduled_date'],
                     start_time=lesson_data['start_time'],
                     duration=lesson_data['duration'],
                     lesson_type=lesson_data['lesson_type'],
                     teacher_rate=lesson_data['teacher_rate'],
                     student_rate=lesson_data['student_rate'],
-                    status=lesson_data['status'],
+                    status=item_status,
                     recurring_schedule=lesson_data['recurring_schedule'],
                     is_one_off=False
                 )
@@ -645,6 +663,18 @@ def batch_add_lesson(request, batch_id):
             data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
             data['student_rate'] = global_settings.inperson_student_rate
 
+    # Auto-default trial: only if student has no Lesson records AND no BatchLessonItems
+    student_id = data.get('student_id') or data.get('student')
+    if student_id:
+        try:
+            student_obj = User.objects.get(id=student_id)
+            prior_lesson_count = Lesson.objects.filter(student=student_obj).count()
+            prior_batch_item_count = BatchLessonItem.objects.filter(student=student_obj).count()
+            if prior_lesson_count == 0 and prior_batch_item_count == 0:
+                data['status'] = 'trial'
+        except Exception:
+            pass
+
     serializer = BatchLessonItemSerializer(data=data)
     if serializer.is_valid():
         serializer.save(batch=batch)
@@ -677,6 +707,8 @@ def batch_lesson_item(request, batch_id, item_id):
 
     if request.method == 'PUT':
         allowed_fields = ['status', 'cancelled_by_type', 'cancellation_reason', 'teacher_notes']
+        if item.is_one_off:
+            allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)

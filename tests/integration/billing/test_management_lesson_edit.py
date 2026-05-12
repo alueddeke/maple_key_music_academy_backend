@@ -22,6 +22,7 @@ from django.contrib.auth import get_user_model
 from billing.models import (
     MonthlyInvoiceBatch,
     BatchLessonItem,
+    Lesson,
 )
 
 User = get_user_model()
@@ -175,6 +176,17 @@ class TestManagementLessonEditFields:
         item.refresh_from_db()
         assert item.status == "cancelled"
 
+    def test_can_edit_status_trial(self, management_client, submitted_batch):
+        item = lesson_item(submitted_batch)
+        response = management_client.patch(
+            edit_url(submitted_batch, item),
+            {"status": "trial"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        item.refresh_from_db()
+        assert item.status == "trial"
+
     def test_can_edit_teacher_notes(self, management_client, submitted_batch):
         item = lesson_item(submitted_batch)
         response = management_client.patch(
@@ -214,7 +226,7 @@ class TestManagementLessonEditFields:
             "start_time": "11:00:00",
             "duration": "0.75",
             "lesson_type": "online",
-            "status": "confirmed",
+            "status": "completed",
             "teacher_notes": "Multi-field update",
             "admin_notes": "Admin override",
         }
@@ -308,3 +320,123 @@ class TestManagementLessonEditRestrictions:
             format="json",
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestAutoTrialStatus:
+    """Verifies that first-time students (no prior Lesson records) get status='trial' automatically."""
+
+    @pytest.fixture
+    def draft_batch(self, teacher_user, school, db):
+        return MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user,
+            school=school,
+            month=5,
+            year=2026,
+            status="draft",
+        )
+
+    @pytest.fixture
+    def first_time_student(self, school, db):
+        """Student with zero prior Lesson records — will trigger trial auto-detection."""
+        return User.objects.create_user(
+            email="firsttime@edittest.com",
+            password="pass",
+            user_type="student",
+            first_name="First",
+            last_name="Timer",
+            school=school,
+            is_approved=True,
+        )
+
+    @pytest.fixture
+    def teacher_client(self, api_client, teacher_user):
+        api_client.force_authenticate(user=teacher_user)
+        return api_client
+
+    def test_batch_add_lesson_sets_trial_for_first_time_student(
+        self, teacher_client, draft_batch, first_time_student
+    ):
+        """batch_add_lesson auto-sets status='trial' when student has no prior Lesson records."""
+        url = reverse("batch_add_lesson", kwargs={"batch_id": draft_batch.pk})
+        response = teacher_client.post(
+            url,
+            {
+                "student": first_time_student.pk,
+                "scheduled_date": "2026-05-15",
+                "start_time": "14:00:00",
+                "duration": "1.0",
+                "lesson_type": "in_person",
+            },
+            format="json",
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data["status"] == "trial"
+
+
+@pytest.mark.django_db
+class TestManagementApproveTrialBatch:
+    """Verifies that trial-only batches are approved correctly — no StudentInvoice created."""
+
+    @pytest.fixture
+    def trial_student(self, school, db):
+        from billing.models import BillableContact
+        student = User.objects.create_user(
+            email="trialstudent@approvetest.com",
+            password="pass",
+            user_type="student",
+            first_name="Trial",
+            last_name="ApproveStudent",
+            school=school,
+            is_approved=True,
+        )
+        BillableContact.objects.create(
+            school=school,
+            student=student,
+            is_primary=True,
+            first_name="Trial",
+            last_name="Parent",
+            email="trialparent@approvetest.com",
+            phone="555-1234",
+            street_address="1 Trial St",
+            city="Toronto",
+            province="ON",
+            postal_code="M1A 1A1",
+        )
+        return student
+
+    @pytest.fixture
+    def trial_batch(self, teacher_user, trial_student, school, school_settings, db):
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user,
+            school=school,
+            month=5,
+            year=2026,
+            status="submitted",
+        )
+        BatchLessonItem.objects.create(
+            batch=batch,
+            student=trial_student,
+            scheduled_date=date(2026, 5, 10),
+            start_time=time(15, 0),
+            duration=Decimal("1.0"),
+            lesson_type="in_person",
+            teacher_rate=Decimal("80.00"),
+            student_rate=Decimal("0.00"),
+            status="trial",
+        )
+        return batch
+
+    def test_approve_trial_batch_creates_lesson_not_invoice(
+        self, management_client, trial_batch, trial_student
+    ):
+        from billing.models import Lesson, StudentInvoice
+        url = reverse("management_approve_batch", kwargs={"batch_id": trial_batch.pk})
+        response = management_client.post(url, format="json")
+        assert response.status_code == status.HTTP_200_OK
+        trial_lessons = Lesson.objects.filter(student=trial_student, is_trial=True)
+        assert trial_lessons.count() == 1
+        assert trial_lessons.first().student_rate == Decimal("0.00")
+        assert StudentInvoice.objects.filter(batch=trial_batch).count() == 0
+        trial_batch.refresh_from_db()
+        assert trial_batch.status == "approved"

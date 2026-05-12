@@ -18,50 +18,20 @@ User = get_user_model()
 
 
 @pytest.fixture
-def api_client():
-    return APIClient()
-
-
-@pytest.fixture
-def management_user(db):
-    """Create a management user for testing"""
-    return User.objects.create_user(
-        email='management@test.com',
-        password='testpass123',
-        first_name='Manager',
-        last_name='Test',
-        user_type='management',
-        is_approved=True
-    )
-
-
-@pytest.fixture
-def teacher_user(db):
-    """Create a teacher user for testing"""
-    return User.objects.create_user(
-        email='teacher@test.com',
-        password='testpass123',
-        first_name='Teacher',
-        last_name='Test',
-        user_type='teacher',
-        is_approved=True,
-        hourly_rate=50.00
-    )
-
-
-@pytest.fixture
-def student_with_complete_contact(db):
+def student_with_complete_contact(school, db):
     """Create a student with complete billing contact"""
     student = User.objects.create_user(
-        email='student@test.com',
+        email='student_complete@test.com',
         password='testpass123',
         first_name='Student',
         last_name='Test',
         user_type='student',
+        school=school,
         is_approved=True
     )
     BillableContact.objects.create(
         student=student,
+        school=school,
         contact_type='parent',
         first_name='Parent',
         last_name='Test',
@@ -77,18 +47,20 @@ def student_with_complete_contact(db):
 
 
 @pytest.fixture
-def student_with_incomplete_contact(db):
+def student_with_incomplete_contact(school, db):
     """Create a student with incomplete billing contact (missing fields)"""
     student = User.objects.create_user(
-        email='incomplete@test.com',
+        email='student_incomplete@test.com',
         password='testpass123',
         first_name='Incomplete',
         last_name='Student',
         user_type='student',
+        school=school,
         is_approved=True
     )
     BillableContact.objects.create(
         student=student,
+        school=school,
         contact_type='parent',
         first_name='INCOMPLETE',
         last_name='INCOMPLETE',

@@ -19,6 +19,7 @@ sqlparse==0.5.3
 urllib3==2.5.0
 gunicorn
 resend
+python-json-logger==2.0.7
 
 # Testing dependencies
 pytest==8.3.4

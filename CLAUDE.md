@@ -48,3 +48,15 @@ docker compose exec api pytest tests/ -k "test_name"      # single test
 **When deleting a view function:** Also remove from `billing/views/__init__.py` re-exports and `urls.py` in the same commit — or you'll get an `ImportError`.
 
 **django-simple-history:** When removing model fields, verify the migration covers `HistoricalXXX` shadow tables in addition to the main table.
+
+---
+
+## CI Gate (Phase 8)
+
+The `production` branch requires the "test" status check to pass before merging.
+
+- **Job name:** `test` (in `.github/workflows/deploy.yml`)
+- **What it does:** Runs `pytest tests/` with a PostgreSQL service container
+- **Branch protection:** Configured manually in GitHub Settings → Branches → `production` rule
+
+If branch protection is not yet configured, see `maple_key_music_academy_docker/CLAUDE.md → Branch Protection Setup`.

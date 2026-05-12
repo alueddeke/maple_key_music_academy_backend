@@ -902,10 +902,11 @@ class BatchLessonItem(models.Model):
         return self.student_rate * self.duration
 
     def save(self, *args, **kwargs):
-        # Auto-set trial for a student's very first lesson ever recorded
+        # Auto-set trial only if student has zero Lesson records AND zero BatchLessonItems
         if self._state.adding:
-            prior_count = BatchLessonItem.objects.filter(student=self.student).count()
-            if prior_count == 0:
+            prior_lesson_count = Lesson.objects.filter(student=self.student).count()
+            prior_batch_count = BatchLessonItem.objects.filter(student=self.student).count()
+            if prior_lesson_count == 0 and prior_batch_count == 0:
                 self.status = 'trial'
         super().save(*args, **kwargs)
 
