@@ -326,6 +326,13 @@ class TestGoogleExchangeInvitationFastPath:
         assert 'access_token' not in response.data
         assert 'refresh_token' not in response.data
 
+        # Regression guard: invitation must NOT be consumed when the is_approved guard blocks login
+        token.refresh_from_db()
+        assert token.is_used is False, (
+            'Invitation must not be marked used when is_approved=False blocks login. '
+            'mark_as_used() must only be called after the approval guard passes.'
+        )
+
     def test_expired_invitation_token_returns_400(self, api_client, school, management_user):
         """
         Expired invitation token: the view must return 400 before creating any user or JWT.
