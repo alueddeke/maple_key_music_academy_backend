@@ -15,6 +15,28 @@ import datetime
 User = get_user_model()
 
 
+def _build_google_mocks(email: str, google_id: str = 'google_id_default'):
+    """Module-level helper: build mock objects for Google token + userinfo endpoints."""
+    mock_token = MagicMock()
+    mock_token.status_code = 200
+    mock_token.json.return_value = {'access_token': 'google_access_token_mock'}
+
+    parts = email.split('@')[0].split('.')
+    given = parts[0].capitalize()
+    family = parts[1].capitalize() if len(parts) > 1 else 'User'
+
+    mock_userinfo = MagicMock()
+    mock_userinfo.status_code = 200
+    mock_userinfo.json.return_value = {
+        'email': email,
+        'given_name': given,
+        'family_name': family,
+        'id': google_id,
+        'name': f'{given} {family}',
+    }
+    return mock_token, mock_userinfo
+
+
 @pytest.fixture
 def api_client():
     return APIClient()
@@ -27,25 +49,7 @@ class TestGoogleExchangeEndpoint:
     URL = 'google_exchange'  # URL name registered in custom_auth/urls.py (Plan 02 wires this)
 
     def _mock_google_responses(self, email: str, google_id: str = 'google_id_123'):
-        """Helper: build mock objects for Google token + userinfo endpoints."""
-        mock_token = MagicMock()
-        mock_token.status_code = 200
-        mock_token.json.return_value = {'access_token': 'google_access_token_xyz'}
-
-        parts = email.split('@')[0].split('.')
-        given = parts[0].capitalize()
-        family = parts[1].capitalize() if len(parts) > 1 else 'User'
-
-        mock_userinfo = MagicMock()
-        mock_userinfo.status_code = 200
-        mock_userinfo.json.return_value = {
-            'email': email,
-            'given_name': given,
-            'family_name': family,
-            'id': google_id,
-            'name': f'{given} {family}',
-        }
-        return mock_token, mock_userinfo
+        return _build_google_mocks(email, google_id)
 
     def test_valid_exchange_existing_user_returns_200_with_tokens(self, api_client, school):
         """
@@ -225,25 +229,7 @@ class TestGoogleExchangeInvitationFastPath:
     URL = 'google_exchange'
 
     def _mock_google_responses(self, email: str, google_id: str = 'inv_google_id_001'):
-        """Helper: build mock objects for Google token + userinfo endpoints."""
-        mock_token = MagicMock()
-        mock_token.status_code = 200
-        mock_token.json.return_value = {'access_token': 'google_access_token_inv'}
-
-        parts = email.split('@')[0].split('.')
-        given = parts[0].capitalize()
-        family = parts[1].capitalize() if len(parts) > 1 else 'User'
-
-        mock_userinfo = MagicMock()
-        mock_userinfo.status_code = 200
-        mock_userinfo.json.return_value = {
-            'email': email,
-            'given_name': given,
-            'family_name': family,
-            'id': google_id,
-            'name': f'{given} {family}',
-        }
-        return mock_token, mock_userinfo
+        return _build_google_mocks(email, google_id)
 
     def _make_invitation(self, email, approver, user_type='teacher', expired=False, used=False):
         """Helper: create an ApprovedEmail + InvitationToken for the given email."""
