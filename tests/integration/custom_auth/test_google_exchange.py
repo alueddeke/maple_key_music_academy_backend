@@ -399,3 +399,7 @@ class TestGoogleExchangeInvitationFastPath:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert 'access_token' not in response.data
         assert User.objects.filter(email=wrong_email).count() == 0
+        assert User.objects.filter(email=email).count() == 0, (
+            'No user should be created for the invitation email when the Google '
+            'account email does not match.'
+        )
