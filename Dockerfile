@@ -60,6 +60,9 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 # Copy application code
 COPY . .
 
+# Create log directory required by production logging config
+RUN mkdir -p /var/log/maple-key
+
 # Collect static files
 RUN python manage.py collectstatic --noinput || true
 
