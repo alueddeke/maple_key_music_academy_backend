@@ -235,19 +235,18 @@ class TestRateLockingMechanism:
         """
         The global_rate_settings endpoint accepts a PATCH and returns 200.
 
-        Note: GlobalRateSettings is only a fallback when no SchoolSettings row exists
-        for a school. Lesson.save() calls SchoolSettings.get_settings_for_school() first
-        (via get_or_create), so GlobalRateSettings changes do NOT affect lesson
-        auto-assignment when a school exists. This test verifies the API endpoint
-        accepts updates; school-level rate changes are tested via SchoolSettings.
+        Note: /management/global-rates/ routes to the school_settings view and updates
+        SchoolSettings for the management user's school. Lesson.save() uses
+        SchoolSettings.get_settings_for_school(), so the patched rate is reflected
+        in new lessons created for teachers in that school.
         """
         url = reverse('global_rate_settings')
         data = {'online_teacher_rate': '50.00'}
         response = authenticated_management_client.patch(url, data, format='json')
         assert response.status_code == status.HTTP_200_OK
 
-        # Create a new online lesson — SchoolSettings governs auto-rate assignment,
-        # not GlobalRateSettings, so the lesson picks up the SchoolSettings default.
+        # Create a new online lesson — SchoolSettings governs auto-rate assignment
+        # and was just updated to 50.00, so the lesson reflects that.
         lesson = Lesson.objects.create(
             teacher=teacher_user,
             student=student_user,
@@ -257,8 +256,8 @@ class TestRateLockingMechanism:
             status="completed"
         )
 
-        # Lesson.save() auto-assigns from SchoolSettings (default 45.00), not GlobalRateSettings.
-        assert lesson.teacher_rate == Decimal("45.00")
+        # Lesson.save() auto-assigns from SchoolSettings (updated to 50.00 by the PATCH above).
+        assert lesson.teacher_rate == Decimal("50.00")
         assert lesson.student_rate == Decimal("60.00")
 
     def test_new_inperson_lesson_uses_updated_teacher_rate(
