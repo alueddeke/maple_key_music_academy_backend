@@ -22,9 +22,9 @@ resend
 
 # Observability dependencies
 django-health-check==3.18.3
-sentry-sdk[django]==2.19.2
 django-prometheus==2.3.1
 psutil==6.1.1  # Required for health_check.contrib.psutil (CPU, memory, disk metrics)
+python-json-logger==2.0.7
 
 # Testing dependencies
 pytest==8.3.4

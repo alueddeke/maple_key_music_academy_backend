@@ -14,32 +14,6 @@ from pathlib import Path
 from decouple import config  # For reading environment variables from .env file
 from urllib.parse import urlparse
 import os
-import sentry_sdk
-from sentry_sdk.integrations.django import DjangoIntegration
-
-# =============================================================================
-# SENTRY ERROR TRACKING CONFIGURATION
-# =============================================================================
-# Sentry provides error tracking, performance monitoring, and alerting
-# Sign up for free at https://sentry.io - the free tier includes 5K errors/month
-# Set SENTRY_DSN environment variable to enable (get DSN from Sentry project settings)
-
-SENTRY_DSN = config('SENTRY_DSN', default='')
-
-if SENTRY_DSN:
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        integrations=[DjangoIntegration()],
-        # Capture 10% of transactions for performance monitoring (adjust as needed)
-        traces_sample_rate=config('SENTRY_TRACES_SAMPLE_RATE', default=0.1, cast=float),
-        # Send user info with errors (email, id) for debugging
-        send_default_pii=True,
-        # Environment tag for filtering in Sentry dashboard
-        environment=config('SENTRY_ENVIRONMENT', default='development'),
-        # Release version for tracking deployments
-        release=config('SENTRY_RELEASE', default='maple-key-backend@1.0.0'),
-    )
-
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -424,3 +398,48 @@ HEALTH_CHECK = {
 
 # Export Django model metrics (creates, updates, deletes per model)
 PROMETHEUS_EXPORT_MIGRATIONS = False  # Disable migration metrics to reduce noise
+
+# =============================================================================
+# STRUCTURED JSON LOGGING
+# =============================================================================
+# Outputs JSON lines to stdout — picked up by Promtail and shipped to Loki.
+# Each log line is a JSON object with consistent fields so Loki can filter by
+# level, logger name, status code, etc. without regex.
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'json': {
+            '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
+            'format': '%(asctime)s %(levelname)s %(name)s %(message)s %(pathname)s %(lineno)d',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'json',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'WARNING',  # Avoid double-logging successful requests (Prometheus already tracks these)
+            'propagate': False,
+        },
+        'django.security': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+    },
+}
