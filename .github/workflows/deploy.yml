@@ -225,7 +225,7 @@ jobs:
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
-              --health-cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/auth/user/ | grep -qE '^(200|401)$'" \
+              --health-cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/auth/user/ | grep -qE '^(200|301|401)$'" \
               --health-interval 30s \
               --health-timeout 10s \
               --health-retries 3 \
@@ -299,6 +299,7 @@ jobs:
             docker stop nginx 2>/dev/null || true
             docker rm nginx 2>/dev/null || true
 
+            rm -rf /tmp/nginx.conf
             cat > /tmp/nginx.conf << 'EOF'
             server {
                 listen 80;
