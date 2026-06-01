@@ -58,15 +58,18 @@ def generate_helcim_csv(student_invoices, school_settings):
         date_issued = invoice.generated_at.strftime('%m/%d/%Y %H:%M')
 
         for item in invoice.lesson_items.all():
+            # Compute charge once — avoids double-call if method signature ever changes
+            charge = item.calculate_student_charge()
+
             # Skip zero-charge lessons (trial and cancelled)
-            if item.calculate_student_charge() == Decimal('0.00'):
+            if charge == Decimal('0.00'):
                 continue
 
             # COMMENTS: lesson date formatted as 'Jan 15, 2026' (%-d strips leading zero on Linux)
             comments = item.scheduled_date.strftime('%b %-d, %Y')
 
             # AMOUNT: per-lesson charge formatted to 2 decimal places
-            amount = f'{item.calculate_student_charge():.2f}'
+            amount = f'{charge:.2f}'
 
             row = [
                 # Order identification
@@ -116,8 +119,7 @@ def generate_helcim_csv(student_invoices, school_settings):
 
     # Generate filename with batch info (if available)
     if student_invoices:
-        first_invoice = student_invoices[0] if hasattr(student_invoices, '__getitem__') else student_invoices.first()
-        batch = first_invoice.batch
+        batch = student_invoices[0].batch
         filename = f'helcim_invoices_{batch.batch_number}.csv'
     else:
         filename = f'helcim_invoices_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
