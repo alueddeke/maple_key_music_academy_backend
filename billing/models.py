@@ -1099,6 +1099,7 @@ class CreditTransaction(models.Model):
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
         help_text="Always positive. Direction determined by type field.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1109,6 +1110,12 @@ class CreditTransaction(models.Model):
         ordering = ['-created_at']
         verbose_name = 'Credit Transaction'
         verbose_name_plural = 'Credit Transactions'
+        constraints = [
+            models.CheckConstraint(
+                check=Q(amount__gt=0),
+                name='credit_transaction_amount_positive',
+            )
+        ]
 
     def __str__(self):
         return f"{self.get_type_display()} ${self.amount} — {self.account.student.get_full_name()}"
