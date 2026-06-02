@@ -468,7 +468,7 @@ def teacher_assigned_students(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@teacher_or_management_required
 def teacher_monthly_batches(request):
     """
     This function handles two main jobs:
@@ -584,7 +584,7 @@ def teacher_monthly_batches(request):
 
 
 @api_view(['GET', 'PUT', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@teacher_or_management_required
 def batch_detail(request, batch_id):
     """
     GET: Retrieve batch with all lesson items
@@ -630,7 +630,7 @@ def batch_detail(request, batch_id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def batch_add_lesson(request, batch_id):
     """Add a one-off lesson to a draft batch"""
     try:
@@ -693,7 +693,7 @@ def batch_add_lesson(request, batch_id):
 
 
 @api_view(['PUT', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def batch_lesson_item(request, batch_id, item_id):
     """
     PUT: Update a lesson item's status/notes (teacher marks completed/cancelled)
@@ -738,7 +738,7 @@ def batch_lesson_item(request, batch_id, item_id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def batch_submit(request, batch_id):
     """Submit a draft batch for management review"""
     try:
@@ -775,7 +775,7 @@ def batch_submit(request, batch_id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@teacher_or_management_required
 def download_paystub(request, batch_id):
     """
     Download paystub PDF for approved batch.
