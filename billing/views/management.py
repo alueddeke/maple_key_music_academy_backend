@@ -1240,7 +1240,7 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     ]
 
     if 'status' in request.data:
-        allowed_statuses = ['trial', 'completed', 'cancelled']
+        allowed_statuses = ['trial', 'completed', 'cancelled', 'forfeited', 'waived']
         if request.data['status'] not in allowed_statuses:
             return Response(
                 {'error': f"Invalid status. Allowed values: {', '.join(allowed_statuses)}"},
