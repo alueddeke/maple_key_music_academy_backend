@@ -654,14 +654,24 @@ def batch_add_lesson(request, batch_id):
     # Auto-populate rates based on lesson type if not provided
     if 'teacher_rate' not in data or 'student_rate' not in data:
         lesson_type = data.get('lesson_type', 'in_person')
-        global_settings = GlobalRateSettings.get_settings()
-
-        if lesson_type == 'online':
-            data['teacher_rate'] = global_settings.online_teacher_rate
-            data['student_rate'] = global_settings.online_student_rate
-        else:  # in_person
-            data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
-            data['student_rate'] = global_settings.inperson_student_rate
+        try:
+            from billing.models import SchoolSettings
+            school_settings = SchoolSettings.get_settings_for_school(request.user.school)
+            if lesson_type == 'online':
+                data['teacher_rate'] = school_settings.online_teacher_rate
+                data['student_rate'] = school_settings.online_student_rate
+            else:  # in_person
+                data['teacher_rate'] = request.user.hourly_rate or school_settings.inperson_student_rate
+                data['student_rate'] = school_settings.inperson_student_rate
+        except Exception:
+            # Fallback to legacy GlobalRateSettings for backward compatibility
+            global_settings = GlobalRateSettings.get_settings()
+            if lesson_type == 'online':
+                data['teacher_rate'] = global_settings.online_teacher_rate
+                data['student_rate'] = global_settings.online_student_rate
+            else:  # in_person
+                data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
+                data['student_rate'] = global_settings.inperson_student_rate
 
     # Auto-default trial: only if student has no Lesson records AND no BatchLessonItems
     student_id = data.get('student_id') or data.get('student')
