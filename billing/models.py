@@ -1,5 +1,7 @@
+from decimal import Decimal
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models, transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from simple_history.models import HistoricalRecords
@@ -255,6 +257,8 @@ class Lesson(models.Model):
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
         ('trial', 'Trial'),
+        ('forfeited', 'Forfeited'),
+        ('waived', 'Waived'),
     ]
 
     LESSON_TYPES = [
@@ -285,16 +289,6 @@ class Lesson(models.Model):
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
 
     # Cancellation tracking
-    cancelled_by_type = models.CharField(
-        max_length=20,
-        choices=[
-            ('teacher', 'Teacher Cancelled'),
-            ('student', 'Student Cancelled'),
-        ],
-        blank=True,
-        null=True,
-        help_text="Who cancelled the lesson (affects billing)"
-    )
     cancellation_reason = models.TextField(
         blank=True,
         help_text="Optional reason for cancellation"
@@ -813,7 +807,6 @@ class MonthlyInvoiceBatch(models.Model):
                     'student_rate': schedule.student_rate,
                     # Default status (teacher can change via UI)
                     'status': 'completed',
-                    'cancelled_by_type': None,
                     'cancellation_reason': '',})
         return lessons_data
 
@@ -839,7 +832,6 @@ class BatchLessonItem(models.Model):
 
     # status (teacher marks this)
     status = models.CharField(max_length=20, choices=Lesson.LESSON_STATUS, default='completed')
-    cancelled_by_type = models.CharField(max_length=20, choices=[('teacher', 'Teacher'), ('student', 'Student')], blank=True, null=True)
     cancellation_reason = models.TextField(blank=True)
 
     # Notes
@@ -895,8 +887,9 @@ class BatchLessonItem(models.Model):
         """Calculate what student is billed for this lesson"""
         from decimal import Decimal
 
-        # Cancelled or trial: student not charged
-        if self.status in ('cancelled', 'trial'):
+        # Cancelled, trial, or waived: student not charged
+        # forfeited: student IS charged (credit consumed by Phase 20 reconciliation)
+        if self.status in ('cancelled', 'trial', 'waived'):
             return Decimal('0.00')
 
         return self.student_rate * self.duration
@@ -1031,6 +1024,94 @@ class StudentInvoice(models.Model):
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)
+
+
+class StudentCreditAccount(models.Model):
+    """
+    Per-student credit ledger for pre-billing payment system.
+    One account per student per school. Balance enforced >= 0 at DB level.
+    Phase 20 reads balance inside select_for_update() + transaction.atomic().
+    """
+    student = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='credit_accounts',
+        limit_choices_to={'user_type': 'student'},
+    )
+    school = models.ForeignKey(
+        School,
+        on_delete=models.PROTECT,
+        related_name='student_credit_accounts',
+        help_text="School this credit account belongs to",
+    )
+    balance = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Current credit balance in dollars. Always >= 0 (DB enforced).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        verbose_name = 'Student Credit Account'
+        verbose_name_plural = 'Student Credit Accounts'
+        unique_together = [['student', 'school']]
+        constraints = [
+            models.CheckConstraint(
+                check=Q(balance__gte=0),
+                name='credit_account_balance_non_negative',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} ({self.school.name}) - ${self.balance}"
+
+
+class CreditTransaction(models.Model):
+    """
+    Immutable ledger entry for student credit account movements.
+    Amount is ALWAYS positive; direction is implied by type:
+      pre_billing_payment → balance += amount
+      forfeited           → balance -= amount
+      waived_rollover     → balance += amount
+    Never use signed amounts (D-09: guards against sign-flip bugs).
+    """
+    TRANSACTION_TYPES = [
+        ('pre_billing_payment', 'Pre-Billing Payment'),
+        ('forfeited', 'Forfeited'),
+        ('waived_rollover', 'Waived Rollover'),
+    ]
+
+    account = models.ForeignKey(
+        StudentCreditAccount,
+        on_delete=models.PROTECT,
+        related_name='transactions',
+    )
+    school = models.ForeignKey(
+        School,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Denormalized for school-isolation queries — do not remove",
+    )
+    type = models.CharField(max_length=30, choices=TRANSACTION_TYPES)
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Always positive. Direction determined by type field.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Credit Transaction'
+        verbose_name_plural = 'Credit Transactions'
+
+    def __str__(self):
+        return f"{self.get_type_display()} ${self.amount} — {self.account.student.get_full_name()}"
 
 
 class ApprovedEmail(models.Model):
