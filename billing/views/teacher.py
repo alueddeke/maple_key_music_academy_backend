@@ -706,7 +706,7 @@ def batch_lesson_item(request, batch_id, item_id):
         )
 
     if request.method == 'PUT':
-        allowed_fields = ['status', 'cancelled_by_type', 'cancellation_reason', 'teacher_notes']
+        allowed_fields = ['status', 'cancellation_reason', 'teacher_notes']
         if item.is_one_off:
             allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}

@@ -138,7 +138,6 @@ class Command(BaseCommand):
                     teacher_payment=teacher_payment,
                     student_charge=student_charge,
                     status=status,
-                    cancelled_by_type='teacher' if status == 'cancelled' else None,
                     cancellation_reason='Student was sick' if status == 'cancelled' else None,
                     teacher_notes=f'Lesson {lesson_num + 1} - Worked on scales' if random.random() > 0.5 else None,
                     is_one_off=False,
