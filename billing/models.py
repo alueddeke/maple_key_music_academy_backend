@@ -1121,6 +1121,57 @@ class CreditTransaction(models.Model):
         return f"{self.get_type_display()} ${self.amount} — {self.account.student.get_full_name()}"
 
 
+class HelcimWebhookEvent(models.Model):
+    """
+    Records a single Helcim payment webhook receipt.
+
+    helcim_transaction_id is the idempotency key (unique constraint) — duplicate
+    POSTs from Helcim retry mechanism (24 h+) are safely no-ops via get_or_create.
+
+    school FK is null at receipt time (unauthenticated webhook, no user context).
+    Phase 20 sets school when the invoice is resolved (Pitfall 2 / RESEARCH.md).
+    invoice_id is a plain CharField — PreBillingInvoice does not exist until Phase 19 (D-16).
+    """
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='helcim_webhook_events',
+        help_text="Set by Phase 20 credit reconciliation. Null until invoice resolved.",
+    )
+    helcim_transaction_id = models.CharField(
+        max_length=100,
+        unique=True,
+        help_text="Idempotency key — unique per Helcim transaction. Duplicate POSTs are no-ops.",
+    )
+    raw_payload = models.JSONField(
+        help_text="Full webhook body stored for debugging and audit. PCI-safe: Helcim sends only id/type, no card data.",
+    )
+    invoice_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="invoiceNumber from secondary GET call in Plan 03. Blank until secondary GET completes.",
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Payment amount. Always use Decimal(str(value)) when converting from Helcim JSON.",
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-received_at']
+        verbose_name = 'Helcim Webhook Event'
+        verbose_name_plural = 'Helcim Webhook Events'
+
+    def __str__(self):
+        return f"HelcimWebhookEvent #{self.helcim_transaction_id} — {self.received_at}"
+
+
 class ApprovedEmail(models.Model):
     """Pre-approved email addresses that can register without management review"""
     email = models.EmailField(unique=True)
