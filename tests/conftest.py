@@ -3,6 +3,11 @@ Shared test fixtures and configuration for pytest.
 
 This file is automatically loaded by pytest and provides fixtures
 available to all test files.
+
+Note: Helcim env var defaults (HELM-02 Pitfall 1 fix) are set by
+helcim_test_env.py, loaded via pytest.ini addopts: -p helcim_test_env.
+That plugin fires before pytest-django calls django.setup(), ensuring
+BillingConfig.ready() does not raise ImproperlyConfigured during collection.
 """
 
 import pytest
