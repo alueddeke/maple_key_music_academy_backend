@@ -1272,7 +1272,6 @@ def management_approve_batch(request, batch_id):
     """
     from django.db import transaction
     from ..models import StudentInvoice, SchoolSettings
-    from ..services.helcim_csv_generator import generate_helcim_csv
     from collections import defaultdict
 
     try:
@@ -1377,11 +1376,13 @@ def management_approve_batch(request, batch_id):
             batch.reviewed_at = timezone.now()
             batch.save()
 
-            # Generate CSV (this returns HttpResponse)
-            csv_response = generate_helcim_csv(student_invoices, school_settings)
-
-            # Return CSV file directly
-            return csv_response
+            # Return JSON for Phase 20 credit reconciliation (HELM-05)
+            # CSV is served separately via GET /management/batches/{id}/csv/
+            return Response({
+                'status': 'approved',
+                'batch_id': batch.id,
+                'invoice_count': len(student_invoices),
+            })
 
     except Exception as e:
         # Transaction will auto-rollback on exception
@@ -1390,6 +1391,40 @@ def management_approve_batch(request, batch_id):
             {'error': f'Approval failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_batch_csv(request, batch_id):
+    """
+    Serve the Helcim CSV for an already-approved batch.
+
+    Returns:
+        200 HttpResponse with text/csv for approved batches.
+        400 if batch.status != 'approved' (D-21: premature download blocked).
+        404 if batch not found in user's school (T-18-D1: school isolation).
+    """
+    from ..models import StudentInvoice, SchoolSettings
+    from ..services.helcim_csv_generator import generate_helcim_csv
+
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'approved':
+        return Response(
+            {'error': 'Batch must be approved before downloading CSV'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    school_settings = SchoolSettings.get_settings_for_school(batch.school)
+    student_invoices = list(StudentInvoice.objects.filter(batch=batch))
+    return generate_helcim_csv(student_invoices, school_settings)
 
 
 @api_view(['POST'])
