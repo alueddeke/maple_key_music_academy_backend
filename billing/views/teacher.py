@@ -777,13 +777,17 @@ def download_paystub(request, batch_id):
         is_management = request.user.user_type == 'management'
 
         if is_management:
-            # Management can download any batch
-            batch = MonthlyInvoiceBatch.objects.get(id=batch_id)
+            # Management can download any batch within their school
+            batch = MonthlyInvoiceBatch.objects.get(
+                id=batch_id,
+                school=request.user.school,
+            )
         else:
             # Teachers can only download their own batches
             batch = MonthlyInvoiceBatch.objects.get(
                 id=batch_id,
-                teacher=request.user
+                teacher=request.user,
+                school=request.user.school,
             )
     except MonthlyInvoiceBatch.DoesNotExist:
         return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
