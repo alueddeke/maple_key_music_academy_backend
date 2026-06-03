@@ -148,14 +148,21 @@ class TestBatchSubmitApprovePaystubCreated:
         assert 'text/csv' in csv_response.get('Content-Type', '')
 
         # Step 6: Assert records created after approval
-        # trial item -> Lesson record created (is_trial=True)
-        assert Lesson.objects.filter(school=school).count() == 1
-        lesson = Lesson.objects.get(school=school)
-        assert lesson.is_trial is True
-        assert lesson.status == 'trial'
+        # trial item -> Lesson record created (is_trial=True, status='trial')
+        # completed item -> Lesson record created (is_trial=False, status='confirmed')
+        assert Lesson.objects.filter(school=school).count() == 2
+        trial_lesson = Lesson.objects.get(school=school, status='trial')
+        assert trial_lesson.is_trial is True
         # Rate locked from school settings at lesson creation; use teacher_user.hourly_rate
         # to stay valid if conftest changes the rate.
-        assert lesson.teacher_rate == teacher_user.hourly_rate
+        assert trial_lesson.teacher_rate == teacher_user.hourly_rate
+
+        confirmed_lesson = Lesson.objects.get(school=school, status='confirmed')
+        assert confirmed_lesson.is_trial is False
+        assert confirmed_lesson.student == student
+        # created_lesson FK on BatchLessonItem points to the confirmed Lesson
+        second_item.refresh_from_db()
+        assert second_item.created_lesson == confirmed_lesson
 
         # completed item -> StudentInvoice record created
         assert StudentInvoice.objects.filter(school=school).count() == 1

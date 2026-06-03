@@ -1336,12 +1336,37 @@ def management_approve_batch(request, batch_id):
                     teacher_notes=item.teacher_notes,
                 )
 
-            # Create StudentInvoice for each student
+            # Create StudentInvoice + Lesson.confirmed records for each student
             student_invoices = []
 
             for student, lesson_items in completed_items_by_student.items():
                 # Get primary billable contact
                 primary_contact = student.billable_contacts.get(is_primary=True)
+
+                # Create Lesson.confirmed for each completed item (used by pre-billing
+                # draft generation in Phase 19). Sets created_lesson FK on the item.
+                #
+                # Two-step create required: Lesson.save() auto-promotes to is_trial=True
+                # when the student has no completed lessons — we bypass this by setting
+                # _is_trial_explicitly_set before save() fires.
+                for item in lesson_items:
+                    lesson = Lesson(
+                        teacher=batch.teacher,
+                        student=item.student,
+                        school=batch.school,
+                        lesson_type=item.lesson_type,
+                        is_trial=False,
+                        scheduled_date=item.scheduled_date,
+                        duration=item.duration,
+                        teacher_rate=item.teacher_rate,
+                        student_rate=item.student_rate,
+                        status='confirmed',
+                        teacher_notes=item.teacher_notes,
+                    )
+                    lesson._is_trial_explicitly_set = True  # bypass auto-trial detection
+                    lesson.save()
+                    item.created_lesson = lesson
+                    item.save(update_fields=['created_lesson'])
 
                 # Create student invoice
                 student_invoice = StudentInvoice(
