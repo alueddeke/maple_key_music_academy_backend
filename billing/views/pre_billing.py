@@ -128,6 +128,17 @@ def _send_single_invoice(invoice, school):
 
     # Build line items — one per lesson, price = student_rate × duration
     lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+
+    # Guard: reject zero-lesson or zero-amount invoices before hitting Helcim
+    if not lessons:
+        raise HelcimAPIError(
+            'This invoice has no lesson dates. Add lessons before sending.'
+        )
+    if invoice.amount is None or invoice.amount == 0:
+        raise HelcimAPIError(
+            'This invoice has a $0.00 balance. Only invoices with an amount owing can be sent.'
+        )
+
     line_items = [
         {
             'description': (
@@ -365,7 +376,7 @@ def management_pre_billing_send(request, invoice_id):
     except HelcimAPIError as e:
         logger.error('Helcim error sending invoice %s: %s', invoice_id, e)
         return Response(
-            {'error': f'Helcim error: {e}'},
+            {'error': str(e)},
             status=status.HTTP_400_BAD_REQUEST,
         )
     except BillableContact.DoesNotExist:
