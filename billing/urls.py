@@ -111,4 +111,13 @@ urlpatterns = [
 
     # HELM-03: Helcim payment webhook — no 'helcim' in path per D-10 to prevent URL enumeration of payment processor
     path('payment-callback/', views.payment_callback, name='payment_callback'),
+
+    # Phase 19: Pre-Billing Invoice endpoints
+    # CRITICAL: send-all/ MUST appear before <int:invoice_id>/ routes — Django URL resolver
+    # would try to coerce "send-all" to int and raise ValueError otherwise.
+    path('management/pre-billing/generate/', views.management_pre_billing_generate, name='management_pre_billing_generate'),
+    path('management/pre-billing/send-all/', views.management_pre_billing_send_all, name='management_pre_billing_send_all'),
+    path('management/pre-billing/', views.management_pre_billing_list, name='management_pre_billing_list'),
+    path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
+    path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),
 ]

@@ -59,6 +59,10 @@ def student_with_contact(school, teacher_user, db):
         last_name="Contact",
         email="billing_contact@prebilling.test",
         phone="555-0200",
+        street_address="123 Test St",
+        city="Toronto",
+        province="ON",
+        postal_code="M5H 2N2",
     )
     return student, contact
 
@@ -290,6 +294,10 @@ def test_send_all_partial_failure(management_client, school, teacher_user, db):
             last_name="SendAll",
             email=f"contact_send_all_{i}@prebilling.test",
             phone="555-0300",
+            street_address="123 Test St",
+            city="Toronto",
+            province="ON",
+            postal_code="M5H 2N2",
             helcim_customer_id=f'cust_{i}',  # pre-set to skip customer creation
         )
         invoice = _make_draft_invoice(student, school)

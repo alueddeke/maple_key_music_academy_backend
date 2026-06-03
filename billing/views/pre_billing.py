@@ -1,0 +1,417 @@
+"""
+billing/views/pre_billing.py
+
+Pre-billing invoice endpoints for Phase 19.
+
+Endpoints:
+  POST /api/billing/management/pre-billing/generate/         → management_pre_billing_generate
+  GET  /api/billing/management/pre-billing/                   → management_pre_billing_list
+  GET  /api/billing/management/pre-billing/<invoice_id>/      → management_pre_billing_detail
+  POST /api/billing/management/pre-billing/<invoice_id>/send/ → management_pre_billing_send
+  POST /api/billing/management/pre-billing/send-all/          → management_pre_billing_send_all
+
+Architectural constraint (STATE.md hard rule, T-19-03-06):
+  All HelcimClient HTTP calls MUST be placed OUTSIDE any transaction.atomic() block.
+  Violation orphans Helcim invoices when DB rolls back.
+"""
+
+import logging
+import calendar
+from datetime import date
+from decimal import Decimal
+
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+
+from custom_auth.decorators import management_required
+from ..models import PreBillingInvoice, BillableContact, Lesson, StudentCreditAccount
+from ..services.helcim_client import HelcimClient, HelcimAPIError
+from ..services.email_service import PreBillingEmailService
+
+logger = logging.getLogger(__name__)
+User = get_user_model()
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _get_current_period():
+    """Return (period_start, period_end) date tuple for the current calendar month."""
+    today = date.today()
+    period_start = today.replace(day=1)
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    period_end = today.replace(day=last_day)
+    return period_start, period_end
+
+
+def _serialize_invoice(invoice):
+    """Return a dict representation of a PreBillingInvoice for API responses."""
+    lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    return {
+        'id': invoice.id,
+        'status': invoice.status,
+        'amount': str(invoice.amount),
+        'period_start': str(invoice.period_start),
+        'period_end': str(invoice.period_end),
+        'helcim_invoice_id': invoice.helcim_invoice_id,
+        'payment_token': invoice.payment_token,
+        'student': {
+            'id': invoice.student_id,
+            'name': invoice.student.get_full_name(),
+            'email': invoice.student.email,
+        },
+        'lessons': [
+            {
+                'id': l.id,
+                'scheduled_date': (
+                    l.scheduled_date.date().isoformat()
+                    if l.scheduled_date is not None
+                    else None
+                ),
+            }
+            for l in lessons
+        ],
+    }
+
+
+def _send_single_invoice(invoice, school):
+    """
+    Send a single draft PreBillingInvoice via Helcim and email.
+
+    All HelcimClient HTTP calls are OUTSIDE any transaction.atomic() block
+    per the hard architectural constraint (STATE.md / T-19-03-06).
+
+    Args:
+        invoice: PreBillingInvoice instance (status='draft')
+        school: School instance (for URL assembly + email sign-off)
+
+    Raises:
+        BillableContact.DoesNotExist: if no primary contact found
+        HelcimAPIError: if Helcim create_customer or create_invoice fails
+    """
+    # Re-assert school isolation (belt-and-suspenders; caller already enforces this)
+    assert invoice.school_id == school.id, (
+        f"School mismatch: invoice.school_id={invoice.school_id} != school.id={school.id}"
+    )
+
+    # Lookup primary billing contact — raises DoesNotExist if missing
+    contact = BillableContact.objects.select_related('student').get(
+        student=invoice.student,
+        is_primary=True,
+    )
+
+    # Lazy customer creation — OUTSIDE transaction (Helcim HTTP call must not be wrapped)
+    if not contact.helcim_customer_id:
+        customer_response = HelcimClient().create_customer(
+            contact_name=contact.student.get_full_name()
+        )
+        customer_id = str(customer_response['id'])
+        # Minimal atomic block only for the DB write
+        with transaction.atomic():
+            BillableContact.objects.filter(pk=contact.pk).update(
+                helcim_customer_id=customer_id
+            )
+        contact.helcim_customer_id = customer_id
+
+    # Build line items — one per lesson, price = student_rate × duration
+    lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    line_items = [
+        {
+            'description': (
+                f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
+                if l.scheduled_date is not None
+                else 'Lesson'
+            ),
+            'quantity': 1,
+            'price': float(
+                Decimal(str(l.student_rate)) * Decimal(str(l.duration))
+            ),
+        }
+        for l in lessons
+    ]
+
+    # Create Helcim invoice — OUTSIDE transaction
+    helcim_response = HelcimClient().create_invoice(
+        currency='CAD',
+        line_items=line_items,
+        customer_id=contact.helcim_customer_id,
+    )
+
+    # Build payment URL from subdomain + token
+    payment_url = (
+        f"https://{settings.HELCIM_SUBDOMAIN}.myhelcim.com/order/?token="
+        f"{helcim_response['token']}"
+    )
+
+    # Minimal atomic block ONLY for the DB write
+    with transaction.atomic():
+        invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        invoice.payment_token = helcim_response['token']
+        invoice.status = 'sent'
+        invoice.save()
+
+    # Email OUTSIDE atomic + after DB commit
+    lesson_dates = [
+        l.scheduled_date.date().strftime('%Y-%m-%d')
+        if l.scheduled_date is not None
+        else 'Unknown'
+        for l in lessons
+    ]
+    period_label = invoice.period_start.strftime('%B %Y')
+    email_result, email_message = PreBillingEmailService.send_payment_request(
+        contact.email,
+        contact.student.get_full_name(),
+        school.name,
+        period_label,
+        invoice.amount,
+        lesson_dates,
+        payment_url,
+    )
+    if not email_result:
+        logger.warning(
+            'Pre-billing email failed for invoice %s: %s',
+            invoice.id,
+            email_message,
+        )
+
+
+# ---------------------------------------------------------------------------
+# View functions
+# ---------------------------------------------------------------------------
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_generate(request):
+    """
+    POST /api/billing/management/pre-billing/generate/
+
+    Generate draft PreBillingInvoice rows for all active students in
+    request.user.school that have a primary BillableContact.
+
+    Returns 409 if drafts already exist for the current period.
+    """
+    school = request.user.school
+    period_start, period_end = _get_current_period()
+
+    # 409 idempotency guard — school-scoped (T-19-03-04, Pitfall 5)
+    if PreBillingInvoice.objects.filter(
+        school=school,
+        period_start=period_start,
+    ).exists():
+        return Response(
+            {
+                'error': 'Drafts already created for this period.',
+                'period': period_start.strftime('%Y-%m'),
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    generated = 0
+    skipped_no_contact = 0
+
+    active_students = User.objects.filter(
+        user_type='student',
+        is_active=True,
+        school=school,
+    )
+
+    for student in active_students:
+        # Skip students without a primary billing contact
+        try:
+            BillableContact.objects.get(student=student, is_primary=True)
+        except BillableContact.DoesNotExist:
+            skipped_no_contact += 1
+            continue
+
+        # Compute confirmed lessons in the current period
+        lessons = Lesson.objects.filter(
+            student=student,
+            school=school,
+            status='confirmed',
+            scheduled_date__date__range=(period_start, period_end),
+        )
+
+        # Gross amount: sum of student_rate × duration for each lesson
+        # Formula matches Lesson.student_cost() pattern (models.py:334-341)
+        gross = sum(
+            (Decimal(str(l.student_rate)) * Decimal(str(l.duration)) for l in lessons),
+            Decimal('0.00'),
+        )
+
+        # Read credit balance OUTSIDE atomic per Pitfall 6
+        try:
+            credit = StudentCreditAccount.objects.get(
+                student=student,
+                school=school,
+            ).balance
+        except StudentCreditAccount.DoesNotExist:
+            credit = Decimal('0.00')
+
+        amount = max(Decimal('0.00'), gross - credit)
+
+        # Minimal atomic block for PreBillingInvoice creation + M2M set
+        with transaction.atomic():
+            invoice = PreBillingInvoice.objects.create(
+                school=school,
+                student=student,
+                status='draft',
+                amount=amount,
+                period_start=period_start,
+                period_end=period_end,
+            )
+            invoice.lessons.set(lessons)
+
+        generated += 1
+
+    return Response(
+        {
+            'generated': generated,
+            'skipped_no_contact': skipped_no_contact,
+            'period_start': str(period_start),
+            'period_end': str(period_end),
+        }
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_list(request):
+    """
+    GET /api/billing/management/pre-billing/
+
+    Return all PreBillingInvoice rows scoped to request.user.school.
+    """
+    qs = (
+        PreBillingInvoice.objects
+        .filter(school=request.user.school)
+        .select_related('student')
+        .prefetch_related('lessons')
+        .order_by('-created_at')
+    )
+    return Response([_serialize_invoice(i) for i in qs])
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_detail(request, invoice_id):
+    """
+    GET /api/billing/management/pre-billing/<invoice_id>/
+
+    Return a single PreBillingInvoice scoped to request.user.school.
+    Cross-school lookup returns 404 (T-19-03-02).
+    """
+    try:
+        invoice = PreBillingInvoice.objects.get(
+            id=invoice_id,
+            school=request.user.school,
+        )
+    except PreBillingInvoice.DoesNotExist:
+        return Response(
+            {'error': 'Invoice not found'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return Response(_serialize_invoice(invoice))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_send(request, invoice_id):
+    """
+    POST /api/billing/management/pre-billing/<invoice_id>/send/
+
+    Lazy-create a Helcim customer (if missing), create a Helcim invoice
+    with one lineItem per lesson date, persist helcim_invoice_id + payment_token,
+    set status=sent, and send a Resend email.
+
+    All Helcim HTTP calls are OUTSIDE transaction.atomic() (T-19-03-06).
+    """
+    try:
+        invoice = PreBillingInvoice.objects.get(
+            id=invoice_id,
+            school=request.user.school,
+        )
+    except PreBillingInvoice.DoesNotExist:
+        return Response(
+            {'error': 'Invoice not found'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if invoice.status != 'draft':
+        return Response(
+            {'error': 'Only draft invoices can be sent'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        _send_single_invoice(invoice, request.user.school)
+    except HelcimAPIError as e:
+        logger.error('Helcim error sending invoice %s: %s', invoice_id, e)
+        return Response(
+            {'error': f'Helcim error: {e}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except BillableContact.DoesNotExist:
+        return Response(
+            {'error': 'No primary billing contact for this student'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return Response(
+        {
+            'id': invoice.id,
+            'status': invoice.status,
+            'helcim_invoice_id': invoice.helcim_invoice_id,
+        }
+    )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_send_all(request):
+    """
+    POST /api/billing/management/pre-billing/send-all/
+
+    Process all draft invoices for request.user.school sequentially.
+    Per-student failures are caught and accumulated in response.failed[].
+    One failure does not abort the batch (T-19-03-09).
+    """
+    drafts = (
+        PreBillingInvoice.objects
+        .filter(school=request.user.school, status='draft')
+        .select_related('student')
+    )
+
+    sent = 0
+    failed = []
+
+    for draft in drafts:
+        try:
+            _send_single_invoice(draft, request.user.school)
+            sent += 1
+        except (HelcimAPIError, BillableContact.DoesNotExist, Exception) as e:
+            logger.error(
+                'send-all failed for invoice %s (student %s): %s',
+                draft.id,
+                draft.student_id,
+                e,
+            )
+            failed.append(
+                {
+                    'student_id': draft.student_id,
+                    'student_name': draft.student.get_full_name(),
+                    'error': str(e),
+                }
+            )
+
+    return Response({'sent': sent, 'failed': failed})
