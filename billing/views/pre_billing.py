@@ -53,6 +53,9 @@ def _get_current_period():
 def _serialize_invoice(invoice):
     """Return a dict representation of a PreBillingInvoice for API responses."""
     lessons = list(invoice.lessons.select_related('teacher').order_by('scheduled_date'))
+    contact = BillableContact.objects.filter(
+        student=invoice.student, is_primary=True
+    ).only('email').first()
     return {
         'id': invoice.id,
         'status': invoice.status,
@@ -65,6 +68,7 @@ def _serialize_invoice(invoice):
             'id': invoice.student_id,
             'full_name': invoice.student.get_full_name(),
             'email': invoice.student.email,
+            'contact_email': contact.email if contact else invoice.student.email,
         },
         'lessons': [
             {
