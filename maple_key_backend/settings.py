@@ -320,6 +320,7 @@ TEST_EMAIL_RECIPIENT = config('TEST_EMAIL_RECIPIENT', default='antonilueddeke@gm
 HELCIM_API_TOKEN = config('HELCIM_API_TOKEN', default=None)
 HELCIM_TERMINAL_ID = config('HELCIM_TERMINAL_ID', default=None)
 HELCIM_WEBHOOK_SECRET = config('HELCIM_WEBHOOK_SECRET', default=None)
+HELCIM_SUBDOMAIN = config('HELCIM_SUBDOMAIN', default=None)
 
 # Structured logging — JSON format for production, console for local dev
 # File handler built conditionally: RotatingFileHandler requires /var/log/maple-key/

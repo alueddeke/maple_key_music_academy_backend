@@ -28,3 +28,7 @@ class BillingConfig(AppConfig):
             raise ImproperlyConfigured(
                 "HELCIM_WEBHOOK_SECRET environment variable is required but not set."
             )
+        if not os.environ.get('HELCIM_SUBDOMAIN'):
+            raise ImproperlyConfigured(
+                "HELCIM_SUBDOMAIN environment variable is required but not set."
+            )

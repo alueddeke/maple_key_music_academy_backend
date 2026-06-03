@@ -66,12 +66,27 @@ class TestBillingConfigReady:
                 config.ready()
         assert 'HELCIM_WEBHOOK_SECRET' in str(exc_info.value)
 
-    def test_ready_passes_when_all_present(self):
-        """ready() must not raise when all three env vars are set."""
+    def test_ready_raises_when_subdomain_missing(self):
+        """Missing HELCIM_SUBDOMAIN must raise ImproperlyConfigured (Phase 19 validation)."""
         env = {
             'HELCIM_API_TOKEN': 'test-token',
             'HELCIM_TERMINAL_ID': 'test-terminal',
             'HELCIM_WEBHOOK_SECRET': 'dGVzdC1zZWNyZXQ=',
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop('HELCIM_SUBDOMAIN', None)
+            config = get_config()
+            with pytest.raises(ImproperlyConfigured) as exc_info:
+                config.ready()
+        assert 'HELCIM_SUBDOMAIN' in str(exc_info.value)
+
+    def test_ready_passes_when_all_present(self):
+        """ready() must not raise when all four env vars are set."""
+        env = {
+            'HELCIM_API_TOKEN': 'test-token',
+            'HELCIM_TERMINAL_ID': 'test-terminal',
+            'HELCIM_WEBHOOK_SECRET': 'dGVzdC1zZWNyZXQ=',
+            'HELCIM_SUBDOMAIN': 'testschool',
         }
         with mock.patch.dict(os.environ, env, clear=False):
             config = get_config()
