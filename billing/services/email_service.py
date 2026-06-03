@@ -104,3 +104,65 @@ Maple Key Music Academy
         except Exception as e:
             logger.error(f"Failed to send invoice {invoice.id}: {str(e)}")
             return False, f"Failed to send email: {str(e)}"
+
+
+class PreBillingEmailService:
+    """
+    Email service for parent payment-request emails.
+
+    Sends a plain-text payment invitation to a BillableContact when a
+    PreBillingInvoice is sent (Plan 03 / BILL-07).
+
+    Does NOT modify InvoiceEmailService — that class handles teacher/management
+    invoice PDFs and is unrelated to the pre-billing flow.
+    """
+
+    @staticmethod
+    def send_payment_request(
+        contact_email: str,
+        contact_name: str,
+        school_name: str,
+        period_label: str,
+        amount,
+        lesson_dates: list,
+        payment_url: str,
+    ) -> tuple:
+        """
+        Send a payment-request email to a billing contact.
+
+        Args:
+            contact_email: recipient email address (from BillableContact.email)
+            contact_name: recipient full name (e.g. "Jane Smith")
+            school_name: school display name (e.g. "Maple Key Music Academy")
+            period_label: human-readable billing period (e.g. "June 2026")
+            amount: Decimal invoice amount
+            lesson_dates: list of date objects or strings for the lesson schedule
+            payment_url: full Helcim hosted-payment URL for the parent to pay
+
+        Returns:
+            tuple[bool, str] — (True, 'Email sent successfully') on success,
+            (False, 'Failed to send email: {error}') on failure.
+        """
+        try:
+            subject = f"Invoice for {period_label} — {school_name}"
+            body = (
+                f"Dear {contact_name},\n\n"
+                f"Please find your invoice for {period_label} below.\n\n"
+                f"Amount Due: ${amount:.2f}\n\n"
+                f"Lesson Dates:\n"
+                + "\n".join(f"  - {d}" for d in lesson_dates)
+                + f"\n\nPay online: {payment_url}\n\n"
+                f"Thank you,\n{school_name}"
+            )
+            email = EmailMessage(
+                subject=subject,
+                body=body,
+                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@maplekey.com'),
+                to=[contact_email],
+            )
+            email.send()
+            logger.info('Pre-billing email sent to %s for %s', contact_email, period_label)
+            return True, 'Email sent successfully'
+        except Exception as e:
+            logger.error('Failed to send pre-billing email to %s: %s', contact_email, str(e))
+            return False, f'Failed to send email: {str(e)}'

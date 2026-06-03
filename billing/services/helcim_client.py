@@ -101,6 +101,51 @@ class HelcimClient:
 
         return response.json()
 
+    def create_customer(self, contact_name, billing_address=None):
+        """
+        POST /v2/customers/
+
+        Args:
+            contact_name: billing contact full name (str)
+            billing_address: optional dict with Helcim billing address fields
+
+        Returns:
+            dict — caller reads response['id'] (integer Helcim customer ID).
+            Per Helcim devdocs the primary key field on a customer resource is 'id'.
+
+        Raises:
+            HelcimAPIError: on non-2xx response or timeout
+        """
+        payload = {'contactName': contact_name}
+        if billing_address is not None:
+            payload['billingAddress'] = billing_address
+
+        try:
+            response = requests.post(
+                f'{HELCIM_API_BASE}/customers/',
+                json=payload,
+                headers=self._headers(),
+                timeout=HELCIM_TIMEOUT,
+            )
+        except requests.Timeout:
+            logger.error('Helcim %s timeout after %ds', 'create_customer', HELCIM_TIMEOUT)
+            raise HelcimAPIError('Helcim create_customer timeout', status_code=None)
+
+        if not response.ok:
+            logger.error(
+                'Helcim %s failed: status=%s body=%s',
+                'create_customer',
+                response.status_code,
+                response.text,
+            )
+            raise HelcimAPIError(
+                f'Helcim create_customer failed: {response.status_code}',
+                status_code=response.status_code,
+                raw_response=response.text,
+            )
+
+        return response.json()
+
     def cancel_invoice(self, invoice_id):
         """
         PUT /v2/invoices/{invoiceId}
