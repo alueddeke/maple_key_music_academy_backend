@@ -63,7 +63,7 @@ def _serialize_invoice(invoice):
         'payment_token': invoice.payment_token,
         'student': {
             'id': invoice.student_id,
-            'name': invoice.student.get_full_name(),
+            'full_name': invoice.student.get_full_name(),
             'email': invoice.student.email,
         },
         'lessons': [
