@@ -52,7 +52,7 @@ def _get_current_period():
 
 def _serialize_invoice(invoice):
     """Return a dict representation of a PreBillingInvoice for API responses."""
-    lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    lessons = list(invoice.lessons.select_related('teacher').order_by('scheduled_date'))
     return {
         'id': invoice.id,
         'status': invoice.status,
@@ -74,6 +74,13 @@ def _serialize_invoice(invoice):
                     if l.scheduled_date is not None
                     else None
                 ),
+                'duration': str(l.duration),
+                'student_rate': str(l.student_rate),
+                'charge': str(
+                    (Decimal(str(l.student_rate)) * Decimal(str(l.duration)))
+                    .quantize(Decimal('0.01'))
+                ),
+                'teacher_name': l.teacher.get_full_name() if l.teacher else '',
             }
             for l in lessons
         ],
