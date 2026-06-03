@@ -41,6 +41,10 @@ def _make_student_with_contact(school):
         last_name="BillingContact",
         email=f"contact_{id(school)}@prebilling.test",
         phone="555-0100",
+        street_address="123 Test St",
+        city="Toronto",
+        province="ON",
+        postal_code="M5H 2N2",
     )
     return student, contact
 

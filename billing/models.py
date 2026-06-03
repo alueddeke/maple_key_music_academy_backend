@@ -225,6 +225,14 @@ class BillableContact(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Helcim integration — set on first invoice send; never changed (PCI-safe: no card data)
+    helcim_customer_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="Helcim customer ID — set on first invoice send, never changed. PCI-safe: no card data.",
+    )
+
     # Audit logging
     history = HistoricalRecords()
 
@@ -1389,3 +1397,75 @@ class InvoiceRecipientEmail(models.Model):
 
     def __str__(self):
         return self.email
+
+
+class PreBillingInvoice(models.Model):
+    """
+    Pre-billing invoice sent to a parent/guardian before Helcim charges.
+
+    Tracks the full lifecycle: draft → sent → adjusted → paid.
+    Locks the amount at draft generation (D-11). Status transitions are
+    audited via HistoricalRecords. No card data stored — only helcim_invoice_id
+    and payment_token (the Helcim hosted-payment URL token, not a PAN).
+
+    Phase 19: generate + send flow.
+    Phase 20: paid transition via webhook reconciliation.
+    """
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('sent', 'Sent'),
+        ('adjusted', 'Adjusted'),
+        ('paid', 'Paid'),
+    ]
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='pre_billing_invoices',
+    )
+    student = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='pre_billing_invoices',
+        limit_choices_to={'user_type': 'student'},
+    )
+    lessons = models.ManyToManyField(
+        'Lesson',
+        related_name='pre_billing_invoices',
+        blank=True,
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='draft',
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Invoice amount locked at draft generation. Floor at 0 enforced in view layer (D-05).",
+    )
+    period_start = models.DateField()
+    period_end = models.DateField()
+    helcim_invoice_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Helcim invoice ID — populated after send (BILL-07). PCI-safe: no card data.",
+    )
+    payment_token = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Raw Helcim hosted-payment token (not the full URL). URL built as: https://{HELCIM_SUBDOMAIN}.myhelcim.com/order/?token={payment_token}",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Pre-Billing Invoice'
+        verbose_name_plural = 'Pre-Billing Invoices'
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.period_start:%B %Y} ({self.get_status_display()})"
