@@ -192,35 +192,35 @@ def management_pre_billing_generate(request):
     """
     POST /api/billing/management/pre-billing/generate/
 
-    Generate draft PreBillingInvoice rows for all active students in
-    request.user.school that have a primary BillableContact.
+    Incrementally generate draft PreBillingInvoice rows for all active students
+    in request.user.school that have a primary BillableContact AND do not already
+    have a PreBillingInvoice for the current period (any status).
 
-    Returns 409 if drafts already exist for the current period.
+    Idempotent and safe to call multiple times — supports wave-based batch
+    approval where teachers submit at different times during the month.
+    Students with an existing invoice (draft/sent/adjusted) are skipped so
+    previously sent invoices are never duplicated.
     """
     school = request.user.school
     period_start, period_end = _get_current_period()
 
-    # 409 idempotency guard — school-scoped (T-19-03-04, Pitfall 5)
-    if PreBillingInvoice.objects.filter(
-        school=school,
-        period_start=period_start,
-    ).exists():
-        return Response(
-            {
-                'error': 'Drafts already created for this period.',
-                'period': period_start.strftime('%Y-%m'),
-            },
-            status=status.HTTP_409_CONFLICT,
-        )
+    # Collect student IDs that already have an invoice this period (any status)
+    existing_student_ids = set(
+        PreBillingInvoice.objects.filter(
+            school=school,
+            period_start=period_start,
+        ).values_list('student_id', flat=True)
+    )
 
     generated = 0
+    skipped_existing = len(existing_student_ids)
     skipped_no_contact = 0
 
     active_students = User.objects.filter(
         user_type='student',
         is_active=True,
         school=school,
-    )
+    ).exclude(id__in=existing_student_ids)
 
     for student in active_students:
         # Skip students without a primary billing contact
@@ -273,6 +273,7 @@ def management_pre_billing_generate(request):
     return Response(
         {
             'generated': generated,
+            'skipped_existing': skipped_existing,
             'skipped_no_contact': skipped_no_contact,
             'period_start': str(period_start),
             'period_end': str(period_end),

@@ -146,14 +146,14 @@ def _helcim_cancel_invoice_fail():
 @pytest.mark.django_db
 def test_generate_drafts(management_client, school, teacher_user, student_with_contact):
     """
-    POST generate endpoint returns 200 with 'generated' and 'skipped_no_contact' counts.
+    POST generate endpoint returns 200 with generated/skipped_existing/skipped_no_contact.
     BILL-03: draft generation creates PreBillingInvoice per student with BillableContact.
     """
     student, contact = student_with_contact
     _make_confirmed_lesson(student, teacher_user, school)
 
     # Student without contact — must be skipped
-    student_no_contact = User.objects.create_user(
+    User.objects.create_user(
         email="no_contact@prebilling.test",
         password="pass",
         user_type="student",
@@ -169,24 +169,26 @@ def test_generate_drafts(management_client, school, teacher_user, student_with_c
     assert response.status_code == 200
     assert response.data['generated'] >= 1
     assert response.data['skipped_no_contact'] >= 1
+    assert 'skipped_existing' in response.data
     assert PreBillingInvoice.objects.filter(school=school).count() >= 1
 
 
 @pytest.mark.django_db
-def test_generate_drafts_409(management_client, school, teacher_user, student_with_contact):
+def test_generate_drafts_incremental(management_client, school, teacher_user, student_with_contact):
     """
-    POST generate returns 409 when drafts already exist for the current period.
-    BILL-03: idempotency guard — no duplicate drafts.
+    POST generate is idempotent and incremental — students with an existing invoice
+    for the current period are skipped; new students get a fresh draft.
+    BILL-03: no duplicate drafts; skipped_existing count reflects pre-existing invoices.
     """
     student, contact = student_with_contact
 
-    # Pre-create a draft invoice for the current month
     today = date.today()
     period_start = today.replace(day=1)
     import calendar
     last_day = calendar.monthrange(today.year, today.month)[1]
     period_end = today.replace(day=last_day)
 
+    # Pre-create a draft for the existing student
     PreBillingInvoice.objects.create(
         student=student,
         school=school,
@@ -199,8 +201,10 @@ def test_generate_drafts_409(management_client, school, teacher_user, student_wi
     url = reverse('management_pre_billing_generate')
     response = management_client.post(url, format='json')
 
-    assert response.status_code == 409
-    assert 'period' in response.data
+    assert response.status_code == 200
+    assert response.data['skipped_existing'] >= 1
+    # Student already had a draft — no new invoice created for them
+    assert PreBillingInvoice.objects.filter(school=school, student=student).count() == 1
 
 
 # ---------------------------------------------------------------------------
