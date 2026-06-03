@@ -146,15 +146,25 @@ class HelcimClient:
 
         return response.json()
 
-    def cancel_invoice(self, invoice_id):
+    def cancel_invoice(self, invoice_id, currency='CAD', line_items=None):
         """
         PUT /v2/invoices/{invoiceId}
 
         Sets invoice status to CANCELLED.
         Per RESEARCH.md: PUT (not PATCH) is the verified HTTP method.
 
+        The Helcim OpenAPI schema for PUT /v2/invoices/{invoiceId} lists `currency`
+        and `lineItems` as required fields (Pitfall 7 / Assumption A1 in 19-RESEARCH.md).
+        This method accepts them defensively: if Helcim requires them even for
+        cancellation, pass the original invoice's currency and line items.
+        If the sandbox later confirms that `{'status': 'CANCELLED'}` alone works,
+        the extra fields are harmless and can be dropped.
+
         Args:
             invoice_id: Helcim invoice ID string
+            currency:   ISO 4217 currency code, default 'CAD'
+            line_items: list of dicts with keys 'description', 'quantity', 'price';
+                        if None, only status is sent (may be rejected by Helcim)
 
         Returns:
             dict with updated invoice fields
@@ -162,10 +172,14 @@ class HelcimClient:
         Raises:
             HelcimAPIError: on non-2xx response or timeout
         """
+        payload = {'status': 'CANCELLED', 'currency': currency}
+        if line_items is not None:
+            payload['lineItems'] = line_items
+
         try:
             response = requests.put(
                 f'{HELCIM_API_BASE}/invoices/{invoice_id}',
-                json={'status': 'CANCELLED'},
+                json=payload,
                 headers=self._headers(),
                 timeout=HELCIM_TIMEOUT,
             )

@@ -120,4 +120,5 @@ urlpatterns = [
     path('management/pre-billing/', views.management_pre_billing_list, name='management_pre_billing_list'),
     path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
     path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),
+    path('management/pre-billing/<int:invoice_id>/remove-lesson/', views.management_pre_billing_remove_lesson, name='management_pre_billing_remove_lesson'),
 ]

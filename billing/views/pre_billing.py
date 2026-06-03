@@ -415,3 +415,217 @@ def management_pre_billing_send_all(request):
             )
 
     return Response({'sent': sent, 'failed': failed})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_remove_lesson(request, invoice_id):
+    """
+    POST /api/billing/management/pre-billing/<invoice_id>/remove-lesson/
+
+    Remove a lesson from a sent/adjusted invoice via void+recreate:
+
+    1. Validate invoice (school-scoped, status guard, lesson membership)
+    2. OUTSIDE transaction: cancel old Helcim invoice (cancel_invoice)
+       — on HelcimAPIError: return 400 inline, no DB change (BILL-09, D-16)
+    3. Guard against last-lesson scenario AFTER successful cancel
+    4. OUTSIDE transaction: create replacement Helcim invoice
+    5. Minimal transaction.atomic for all DB writes
+    6. OUTSIDE atomic: send replacement email
+
+    All Helcim HTTP calls are OUTSIDE any transaction.atomic() block
+    per the hard architectural constraint (STATE.md / T-19-04-06).
+    """
+    school = request.user.school
+
+    # Step 1a: School-scoped invoice lookup
+    try:
+        invoice = (
+            PreBillingInvoice.objects
+            .select_related('student')
+            .prefetch_related('lessons')
+            .get(id=invoice_id, school=school)
+        )
+    except PreBillingInvoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Step 1b: Status guard — only sent/adjusted invoices support removal
+    if invoice.status not in ('sent', 'adjusted'):
+        return Response(
+            {'error': 'Only sent or adjusted invoices support lesson removal'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Step 1c: Validate lesson_id from request body
+    lesson_id = request.data.get('lesson_id')
+    if lesson_id is None:
+        return Response({'error': 'lesson_id required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        lesson_id = int(lesson_id)
+    except (ValueError, TypeError):
+        return Response({'error': 'lesson_id must be integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Step 1d: Look up lesson within the invoice's M2M set (T-19-04-02)
+    try:
+        lesson = invoice.lessons.get(id=lesson_id)
+    except Lesson.DoesNotExist:
+        return Response(
+            {'error': 'Lesson not part of this invoice'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Step 2: Compute remaining lessons (post-removal — used for line items + amount)
+    remaining = list(invoice.lessons.exclude(id=lesson_id).order_by('scheduled_date'))
+
+    # Step 3: Save old Helcim invoice ID before any state change
+    old_helcim_invoice_id = invoice.helcim_invoice_id
+
+    # Step 4: Build original line items from current invoice lessons (pre-removal)
+    # Passed to cancel_invoice defensively per Pitfall 7 / A1 in 19-RESEARCH.md
+    original_lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    original_line_items = [
+        {
+            'description': (
+                f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
+                if l.scheduled_date is not None
+                else 'Lesson'
+            ),
+            'quantity': 1,
+            'price': float(Decimal(str(l.student_rate)) * Decimal(str(l.duration))),
+        }
+        for l in original_lessons
+    ]
+
+    # Step 5: OUTSIDE transaction — cancel old Helcim invoice (T-19-04-06)
+    # Cancel fires BEFORE the last-lesson guard so that a void failure on a
+    # single-lesson invoice (test_void_failure_inline_error) surfaces the
+    # "Cannot void" inline error rather than "Cannot remove last lesson" —
+    # no DB change has occurred at this point (D-16).
+    try:
+        HelcimClient().cancel_invoice(
+            old_helcim_invoice_id,
+            currency='CAD',
+            line_items=original_line_items,
+        )
+    except HelcimAPIError as e:
+        logger.error(
+            'cancel_invoice failed for invoice %s (helcim_id=%s): %s',
+            invoice.id,
+            old_helcim_invoice_id,
+            e,
+        )
+        return Response(
+            {'error': 'Cannot void — invoice may already be settled. Contact Helcim support.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Step 6: Last-lesson guard — check remaining count post-cancel
+    # If this fires, the old Helcim invoice is already void but no DB write
+    # has occurred; admin must manually handle the orphaned void in Helcim
+    # (T-19-04-05 accepted risk — cancel+create both failed).
+    if len(remaining) == 0:
+        return Response(
+            {'error': 'Cannot remove last lesson date. Cancel the invoice instead.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Step 7: Build replacement line items from remaining lessons (post-removal)
+    line_items = [
+        {
+            'description': (
+                f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
+                if l.scheduled_date is not None
+                else 'Lesson'
+            ),
+            'quantity': 1,
+            'price': float(Decimal(str(l.student_rate)) * Decimal(str(l.duration))),
+        }
+        for l in remaining
+    ]
+
+    # Step 8: Look up billing contact — customer must exist (set during original send)
+    try:
+        contact = BillableContact.objects.select_related('student').get(
+            student=invoice.student,
+            is_primary=True,
+        )
+    except BillableContact.DoesNotExist:
+        return Response(
+            {'error': 'No primary billing contact for this student'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not contact.helcim_customer_id:
+        return Response(
+            {'error': 'Contact missing Helcim customer ID — cannot recreate invoice'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Step 9: OUTSIDE transaction — create replacement Helcim invoice (T-19-04-06)
+    try:
+        helcim_response = HelcimClient().create_invoice(
+            currency='CAD',
+            line_items=line_items,
+            customer_id=contact.helcim_customer_id,
+        )
+    except HelcimAPIError as e:
+        # Inconsistent state: old invoice voided in Helcim, DB still reflects old ID.
+        # Surface clearly so admin can manually recreate (T-19-04-05 accepted risk).
+        logger.error(
+            'create_invoice (replacement) failed for invoice %s after cancel: %s',
+            invoice.id,
+            e,
+        )
+        return Response(
+            {'error': f'Replacement invoice creation failed: {e}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Step 10: Recompute amount from remaining lessons (D-11: no credit re-application at adjust)
+    gross = sum(
+        (Decimal(str(l.student_rate)) * Decimal(str(l.duration)) for l in remaining),
+        Decimal('0.00'),
+    )
+    amount = max(Decimal('0.00'), gross)
+
+    # Step 11: Build payment URL from subdomain + new token
+    payment_url = (
+        f"https://{settings.HELCIM_SUBDOMAIN}.myhelcim.com/order/?token="
+        f"{helcim_response['token']}"
+    )
+
+    # Step 12: Minimal transaction.atomic for ALL DB writes (T-19-04-06)
+    with transaction.atomic():
+        invoice.lessons.remove(lesson)
+        invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        invoice.payment_token = helcim_response['token']
+        invoice.status = 'adjusted'
+        invoice.amount = amount
+        invoice.save()
+
+    # Step 13: OUTSIDE atomic — send replacement email (D-17)
+    lesson_dates = [
+        l.scheduled_date.date().strftime('%Y-%m-%d')
+        if l.scheduled_date is not None
+        else 'Unknown'
+        for l in remaining
+    ]
+    period_label = invoice.period_start.strftime('%B %Y')
+    email_result, email_message = PreBillingEmailService.send_payment_request(
+        contact.email,
+        contact.student.get_full_name(),
+        school.name,
+        period_label,
+        invoice.amount,
+        lesson_dates,
+        payment_url,
+    )
+    if not email_result:
+        logger.warning(
+            'Replacement pre-billing email failed for invoice %s: %s',
+            invoice.id,
+            email_message,
+        )
+
+    return Response(_serialize_invoice(invoice))
