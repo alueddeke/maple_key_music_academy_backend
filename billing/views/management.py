@@ -1457,6 +1457,80 @@ def management_approve_batch(request, batch_id):
                     existing_invoice.amount = existing_invoice.calculate_amount()
                     existing_invoice.save(update_fields=['amount'])
 
+            # Phase 20 (D-09): per-student credit deduction/rollover with select_for_update (REC-02)
+            all_students = (
+                set(completed_items_by_student)
+                | set(forfeited_items_by_student)
+                | set(waived_items_by_student)
+            )
+
+            for student in all_students:
+                try:
+                    account = StudentCreditAccount.objects.select_for_update().get(
+                        student=student, school=batch.school
+                    )
+                except StudentCreditAccount.DoesNotExist:
+                    # Lazy creation (Claude's Discretion): account missing → create with balance=0
+                    account = StudentCreditAccount.objects.create(
+                        student=student, school=batch.school, balance=Decimal('0.00')
+                    )
+
+                # Confirmed: balance -= amount, NO CreditTransaction (D-01)
+                for item in completed_items_by_student.get(student, []):
+                    lesson_amount = item.student_rate * item.duration
+                    account.balance = max(Decimal('0.00'), account.balance - lesson_amount)
+
+                # Forfeited: balance -= amount, CreditTransaction(type='forfeited') written
+                for item in forfeited_items_by_student.get(student, []):
+                    lesson_amount = item.student_rate * item.duration
+                    if lesson_amount > Decimal('0.00'):
+                        account.balance = max(Decimal('0.00'), account.balance - lesson_amount)
+                        CreditTransaction.objects.create(
+                            account=account, school=batch.school,
+                            type='forfeited', amount=lesson_amount,
+                        )
+
+                # Waived: balance += lesson_rate (rollover), CreditTransaction(type='waived_rollover') written
+                for item in waived_items_by_student.get(student, []):
+                    lesson_rate = item.student_rate * item.duration
+                    if lesson_rate > Decimal('0.00'):
+                        account.balance += lesson_rate
+                        CreditTransaction.objects.create(
+                            account=account, school=batch.school,
+                            type='waived_rollover', amount=lesson_rate,
+                        )
+
+                account.save()
+
+            # Phase 20 (D-10, D-11): populate StudentInvoice credit fields via PreBillingInvoice lookup
+            period_start = _date(batch.year, batch.month, 1)
+            period_end = _date(
+                batch.year, batch.month,
+                calendar.monthrange(batch.year, batch.month)[1]
+            )
+
+            for student_invoice in student_invoices:
+                try:
+                    pre_invoice = PreBillingInvoice.objects.get(
+                        student=student_invoice.student,
+                        school=batch.school,
+                        period_start=period_start,
+                        period_end=period_end,
+                    )
+                    credit_applied = max(
+                        Decimal('0.00'),
+                        student_invoice.amount - pre_invoice.amount
+                    )
+                    amount_after_credit = pre_invoice.amount
+                except PreBillingInvoice.DoesNotExist:
+                    # D-11 fallback: no PreBillingInvoice → no credit applied
+                    credit_applied = Decimal('0.00')
+                    amount_after_credit = student_invoice.amount
+
+                student_invoice.credit_applied = credit_applied
+                student_invoice.amount_after_credit = amount_after_credit
+                student_invoice.save(update_fields=['credit_applied', 'amount_after_credit'])
+
             # Mark batch as approved
             batch.status = 'approved'
             batch.reviewed_by = request.user
