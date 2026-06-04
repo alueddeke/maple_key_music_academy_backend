@@ -1470,9 +1470,19 @@ def management_approve_batch(request, batch_id):
                         student=student, school=batch.school
                     )
                 except StudentCreditAccount.DoesNotExist:
-                    # Lazy creation (Claude's Discretion): account missing → create with balance=0
-                    account = StudentCreditAccount.objects.create(
-                        student=student, school=batch.school, balance=Decimal('0.00')
+                    # get_or_create is race-safe under the unique_together constraint.
+                    # Two concurrent batch approvals both reaching DoesNotExist would
+                    # cause the second .create() to raise IntegrityError; get_or_create
+                    # handles that atomically. The created account starts at balance=0
+                    # so subsequent balance arithmetic is correct.
+                    account, _ = StudentCreditAccount.objects.get_or_create(
+                        student=student,
+                        school=batch.school,
+                        defaults={'balance': Decimal('0.00')},
+                    )
+                    # Re-acquire the row lock now that the row is guaranteed to exist.
+                    account = StudentCreditAccount.objects.select_for_update().get(
+                        student=student, school=batch.school
                     )
 
                 # Confirmed: balance -= amount, NO CreditTransaction (D-01)
