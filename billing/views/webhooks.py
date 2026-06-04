@@ -143,26 +143,43 @@ def payment_callback(request):
     if event.invoice_id and event.amount > Decimal('0.00'):
         try:
             with transaction.atomic():
-                invoice = PreBillingInvoice.objects.get(
-                    helcim_invoice_id=event.invoice_id,
+                # Use filter().order_by('-id').first() instead of .get() to guard against
+                # MultipleObjectsReturned — helcim_invoice_id has no unique constraint on
+                # the model, so a duplicate ID would crash the webhook with 500 and cause
+                # Helcim to retry indefinitely. None is handled identically to DoesNotExist.
+                invoice = (
+                    PreBillingInvoice.objects
+                    .filter(helcim_invoice_id=event.invoice_id)
+                    .order_by('-id')
+                    .first()
                 )
-                account = StudentCreditAccount.objects.select_for_update().get(
-                    student=invoice.student,
-                    school=invoice.school,
-                )
-                CreditTransaction.objects.create(
-                    account=account,
-                    school=invoice.school,
-                    type='pre_billing_payment',
-                    amount=event.amount,
-                )
-                account.balance += event.amount
-                account.save()
-                event.school = invoice.school
-                event.save(update_fields=['school'])
-                invoice.status = 'paid'
-                invoice.save(update_fields=['status', 'updated_at'])
-        except (PreBillingInvoice.DoesNotExist, StudentCreditAccount.DoesNotExist) as exc:
+                if invoice is None:
+                    logger.warning(
+                        'Phase 20: credit not applied for webhook event %s — '
+                        'no PreBillingInvoice found for invoice_id=%s',
+                        event.helcim_transaction_id,
+                        event.invoice_id,
+                    )
+                    # Return without raising so the outer try/except stays clean;
+                    # transaction.atomic() exits normally with no writes.
+                else:
+                    account = StudentCreditAccount.objects.select_for_update().get(
+                        student=invoice.student,
+                        school=invoice.school,
+                    )
+                    CreditTransaction.objects.create(
+                        account=account,
+                        school=invoice.school,
+                        type='pre_billing_payment',
+                        amount=event.amount,
+                    )
+                    account.balance += event.amount
+                    account.save()
+                    event.school = invoice.school
+                    event.save(update_fields=['school'])
+                    invoice.status = 'paid'
+                    invoice.save(update_fields=['status', 'updated_at'])
+        except StudentCreditAccount.DoesNotExist as exc:
             logger.warning(
                 'Phase 20: credit not applied for webhook event %s — %s',
                 event.helcim_transaction_id,
