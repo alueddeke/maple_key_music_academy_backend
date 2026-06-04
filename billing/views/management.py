@@ -1271,8 +1271,10 @@ def management_approve_batch(request, batch_id):
     If any step fails, entire transaction is rolled back.
     """
     from django.db import transaction
-    from ..models import StudentInvoice, SchoolSettings
+    from ..models import StudentInvoice, SchoolSettings, StudentCreditAccount, CreditTransaction, PreBillingInvoice
     from collections import defaultdict
+    import calendar
+    from datetime import date as _date
 
     try:
         batch = MonthlyInvoiceBatch.objects.get(
@@ -1316,8 +1318,11 @@ def management_approve_batch(request, batch_id):
             for item in batch.lesson_items.filter(status='trial'):
                 trial_items.append(item)
 
-            if not completed_items_by_student and not trial_items:
-                raise ValueError('No completed or trial lessons in batch')
+            # Phase 20: forfeited/waived items are also valid batch content
+            forfeited_items_count = batch.lesson_items.filter(status='forfeited').count()
+            waived_items_count = batch.lesson_items.filter(status='waived').count()
+            if not completed_items_by_student and not trial_items and not forfeited_items_count and not waived_items_count:
+                raise ValueError('No completed, trial, forfeited, or waived lessons in batch')
 
             # Create Lesson records for trial items (teacher paid, student not invoiced)
             for item in trial_items:
@@ -1394,6 +1399,63 @@ def management_approve_batch(request, batch_id):
                 student_invoice.save()
 
                 student_invoices.append(student_invoice)
+
+            # Phase 20 (D-07): create Lesson records for forfeited/waived items
+            # Reuses confirmed-lesson pattern: Lesson(), _is_trial_explicitly_set, .save()
+            forfeited_items_by_student = defaultdict(list)
+            for item in batch.lesson_items.filter(status='forfeited'):
+                lesson = Lesson(
+                    teacher=batch.teacher,
+                    student=item.student,
+                    school=batch.school,
+                    lesson_type=item.lesson_type,
+                    is_trial=False,
+                    scheduled_date=item.scheduled_date,
+                    duration=item.duration,
+                    teacher_rate=item.teacher_rate,
+                    student_rate=item.student_rate,
+                    status='forfeited',
+                    teacher_notes=item.teacher_notes,
+                )
+                lesson._is_trial_explicitly_set = True
+                lesson.save()
+                item.created_lesson = lesson
+                item.save(update_fields=['created_lesson'])
+                forfeited_items_by_student[item.student].append(item)
+
+            waived_items_by_student = defaultdict(list)
+            for item in batch.lesson_items.filter(status='waived'):
+                lesson = Lesson(
+                    teacher=batch.teacher,
+                    student=item.student,
+                    school=batch.school,
+                    lesson_type=item.lesson_type,
+                    is_trial=False,
+                    scheduled_date=item.scheduled_date,
+                    duration=item.duration,
+                    teacher_rate=item.teacher_rate,
+                    student_rate=item.student_rate,
+                    status='waived',
+                    teacher_notes=item.teacher_notes,
+                )
+                lesson._is_trial_explicitly_set = True
+                lesson.save()
+                item.created_lesson = lesson
+                item.save(update_fields=['created_lesson'])
+                waived_items_by_student[item.student].append(item)
+
+            # Phase 20 (D-08): forfeited added to StudentInvoice M2M; waived excluded
+            # CRITICAL: StudentInvoice.lesson_items M2M target is BatchLessonItem (NOT Lesson).
+            # Pass BatchLessonItem instances via *f_items, NOT item.created_lesson.
+            for student, f_items in forfeited_items_by_student.items():
+                existing_invoice = next(
+                    (inv for inv in student_invoices if inv.student == student), None
+                )
+                if existing_invoice:
+                    existing_invoice.lesson_items.add(*f_items)
+                    # Recalculate amount to include forfeited charges (Pitfall 5 guard)
+                    existing_invoice.amount = existing_invoice.calculate_amount()
+                    existing_invoice.save(update_fields=['amount'])
 
             # Mark batch as approved
             batch.status = 'approved'
