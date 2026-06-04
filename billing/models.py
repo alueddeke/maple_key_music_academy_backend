@@ -577,6 +577,10 @@ class Invoice(models.Model):
                                       limit_choices_to={'user_type': 'management'})
     last_edited_at = models.DateTimeField(null=True, blank=True)
 
+    # Phase 21 payroll tracking (D-08)
+    date_paid = models.DateField(null=True, blank=True)
+    reference_number = models.CharField(max_length=100, null=True, blank=True)
+
     # Audit logging
     history = HistoricalRecords()
 
@@ -1484,3 +1488,29 @@ class PreBillingInvoice(models.Model):
 
     def __str__(self):
         return f"{self.student.get_full_name()} — {self.period_start:%B %Y} ({self.get_status_display()})"
+
+
+class SchoolMonthlyExpenses(models.Model):
+    """Monthly operating expenses for a school, used in billing dashboard summary cards (Phase 21 D-10)."""
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='monthly_expenses'
+    )
+    period_start = models.DateField()
+    period_end = models.DateField()
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['school', 'period_start', 'period_end']
+
+    def __str__(self):
+        return f"{self.school} expenses {self.period_start} – {self.period_end}: ${self.amount}"
