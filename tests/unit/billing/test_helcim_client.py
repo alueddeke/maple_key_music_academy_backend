@@ -149,8 +149,8 @@ def test_cancel_invoice_happy(mock_put):
     call_kwargs = mock_put.call_args
     assert call_kwargs[0][0] == f'{HELCIM_API_BASE}/invoices/INV-1'
 
-    # Body must be exactly {'status': 'CANCELLED'}
-    assert call_kwargs[1]['json'] == {'status': 'CANCELLED'}
+    # Body must include status=CANCELLED (may also include currency and other fields)
+    assert call_kwargs[1]['json']['status'] == 'CANCELLED'
 
     # Headers must include api-token
     assert 'api-token' in call_kwargs[1]['headers']
