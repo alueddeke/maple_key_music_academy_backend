@@ -253,14 +253,14 @@ class TestCalculationMethodSemantics:
         )
         assert item.calculate_teacher_payment() == Decimal('45.00')
 
-    def test_calculate_teacher_payment_waived_is_nonzero(self, school, teacher_user, student_user):
-        """D-02 happy: waived lesson → teacher is paid (teacher_rate × duration)."""
+    def test_calculate_teacher_payment_waived_is_zero(self, school, teacher_user, student_user):
+        """D-06 (Phase 20): waived lesson → teacher NOT paid ($0.00). Replaces prior nonzero assertion."""
         batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-TW1')
         item = _make_batch_lesson_item(
             batch, student_user, status='waived',
             teacher_rate=Decimal('45.00'), duration=Decimal('1.0'),
         )
-        assert item.calculate_teacher_payment() == Decimal('45.00')
+        assert item.calculate_teacher_payment() == Decimal('0.00')
 
     def test_calculate_student_charge_cancelled_is_zero(self, school, teacher_user, student_user):
         """Regression (D-02): cancelled lesson → student charge = 0."""

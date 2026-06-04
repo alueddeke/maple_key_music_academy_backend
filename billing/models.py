@@ -882,10 +882,11 @@ class BatchLessonItem(models.Model):
         return f"{self.batch.batch_number} | {self.scheduled_date} | {self.student.get_full_name()}"
 
     def calculate_teacher_payment(self):
-        """Calculate what teacher gets paid for this lesson"""
+        """Calculate what teacher gets paid for this lesson.
+        Returns $0.00 for cancelled and waived lessons (D-06 Phase 20)."""
         from decimal import Decimal
 
-        if self.status == 'cancelled':
+        if self.status in ('cancelled', 'waived'):
             return Decimal('0.00')
 
         # Trial lessons: teacher is paid at their normal rate (student is not charged)
@@ -947,6 +948,20 @@ class StudentInvoice(models.Model):
 
     # Total amount to charge student (sum of all completed lesson charges)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    # Phase 20 (D-12): credit reconciliation fields
+    credit_applied = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Rollover credit applied to reduce this invoice. StudentInvoice.amount (gross) minus PreBillingInvoice.amount.",
+    )
+    amount_after_credit = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Amount actually charged to student = PreBillingInvoice.amount for this period. Falls back to StudentInvoice.amount if no PreBillingInvoice exists.",
+    )
 
     # Lesson items included in this invoice (completed lessons only)
     lesson_items = models.ManyToManyField(
