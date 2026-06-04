@@ -1456,6 +1456,30 @@ def management_approve_batch(request, batch_id):
                     # Recalculate amount to include forfeited charges (Pitfall 5 guard)
                     existing_invoice.amount = existing_invoice.calculate_amount()
                     existing_invoice.save(update_fields=['amount'])
+                else:
+                    # Forfeited-only student: no completed-lesson invoice was created above.
+                    # Create a StudentInvoice now so the subsequent credit deduction (D-09)
+                    # has an invoice record — a deduction without an invoice is a financial
+                    # inconsistency in the audit ledger.
+                    primary_contact = student.billable_contacts.get(is_primary=True)
+                    forfeited_invoice = StudentInvoice(
+                        batch=batch,
+                        student=student,
+                        school=batch.school,
+                        amount=Decimal('0.00'),
+                        billing_contact_name=f"{primary_contact.first_name} {primary_contact.last_name}",
+                        billing_email=primary_contact.email,
+                        billing_phone=primary_contact.phone,
+                        billing_street_address=primary_contact.street_address,
+                        billing_city=primary_contact.city,
+                        billing_province=primary_contact.province,
+                        billing_postal_code=primary_contact.postal_code,
+                    )
+                    forfeited_invoice.save()
+                    forfeited_invoice.lesson_items.add(*f_items)
+                    forfeited_invoice.amount = forfeited_invoice.calculate_amount()
+                    forfeited_invoice.save()
+                    student_invoices.append(forfeited_invoice)
 
             # Phase 20 (D-09): per-student credit deduction/rollover with select_for_update (REC-02)
             all_students = (
