@@ -12,12 +12,15 @@ Security constraints enforced:
   - Money amounts stored via Decimal(str(value)), never via float casting (CONVENTIONS.md).
   - School FK never defaulted to first() — stays None until Phase 20 (multi-school constraint).
   - Signature value is never logged (T-18-C5).
+  - Phase 20 (D-03): inline credit application after event.save() — wrapped in
+    transaction.atomic() with select_for_update() on StudentCreditAccount.
 """
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.views.decorators.csrf import csrf_exempt
+from django.db import transaction
 import hmac
 import hashlib
 import base64
@@ -25,7 +28,7 @@ import json
 import logging
 from decimal import Decimal
 from django.conf import settings
-from ..models import HelcimWebhookEvent
+from ..models import HelcimWebhookEvent, PreBillingInvoice, StudentCreditAccount, CreditTransaction
 from ..services.helcim_client import HelcimClient, HelcimAPIError
 
 logger = logging.getLogger(__name__)
@@ -133,5 +136,37 @@ def payment_callback(request):
     event.invoice_id = invoice_number
     event.amount = amount
     event.save()
+
+    # Phase 20 (D-03, D-04, D-05): inline credit application — DB-only, safe inside atomic.
+    # Guard: skip if invoice_id is blank or amount is 0.00 (Pitfall 1 — CreditTransaction
+    # has a DB CHECK amount__gt=0 that would raise IntegrityError on zero-amount write).
+    if event.invoice_id and event.amount > Decimal('0.00'):
+        try:
+            with transaction.atomic():
+                invoice = PreBillingInvoice.objects.get(
+                    helcim_invoice_id=event.invoice_id,
+                )
+                account = StudentCreditAccount.objects.select_for_update().get(
+                    student=invoice.student,
+                    school=invoice.school,
+                )
+                CreditTransaction.objects.create(
+                    account=account,
+                    school=invoice.school,
+                    type='pre_billing_payment',
+                    amount=event.amount,
+                )
+                account.balance += event.amount
+                account.save()
+                event.school = invoice.school
+                event.save(update_fields=['school'])
+                invoice.status = 'paid'
+                invoice.save(update_fields=['status', 'updated_at'])
+        except (PreBillingInvoice.DoesNotExist, StudentCreditAccount.DoesNotExist) as exc:
+            logger.warning(
+                'Phase 20: credit not applied for webhook event %s — %s',
+                event.helcim_transaction_id,
+                exc,
+            )
 
     return Response({'status': 'ok'}, status=200)
