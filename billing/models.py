@@ -1509,6 +1509,8 @@ class SchoolMonthlyExpenses(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         unique_together = ['school', 'period_start', 'period_end']
 
