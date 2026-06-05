@@ -624,7 +624,7 @@ class Invoice(models.Model):
 
             last_invoice = Invoice.objects.filter(
                 invoice_number__startswith=prefix
-            ).order_by('-invoice_number').first()
+            ).order_by('-id').first()  # order by id (monotonic) to avoid lexicographic sort on CharField (WR-03)
 
             if last_invoice and last_invoice.invoice_number:
                 try:
@@ -1016,7 +1016,7 @@ class StudentInvoice(models.Model):
 
                 last_invoice = StudentInvoice.objects.filter(
                     invoice_number__startswith=prefix
-                ).order_by('-invoice_number').first()
+                ).order_by('-id').first()  # order by id (monotonic) to avoid lexicographic sort on CharField (WR-03)
 
                 if last_invoice:
                     try:
