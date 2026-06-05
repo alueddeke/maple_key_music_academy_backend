@@ -1893,8 +1893,19 @@ def management_patch_invoice(request, pk):
     fields_to_save = []
     for field in allowed_fields:
         if field in request.data:
-            # Empty string → None for nullable fields (Pitfall #5)
-            setattr(invoice, field, request.data[field] or None)
+            if field == 'status':
+                # Validate status against known choices (CR-02)
+                valid_statuses = {k for k, _ in Invoice.STATUS_CHOICES}
+                if request.data[field] not in valid_statuses:
+                    return Response(
+                        {'error': f"Invalid status: {request.data[field]!r}. Valid values: {sorted(valid_statuses)}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                # Do NOT apply `or None` coercion — status is a non-null CharField (WR-01)
+                setattr(invoice, field, request.data[field])
+            else:
+                # Empty string → None for nullable fields: date_paid, reference_number (Pitfall #5)
+                setattr(invoice, field, request.data[field] or None)
             fields_to_save.append(field)
 
     if fields_to_save:
