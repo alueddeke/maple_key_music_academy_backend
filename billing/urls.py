@@ -121,4 +121,12 @@ urlpatterns = [
     path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
     path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),
     path('management/pre-billing/<int:invoice_id>/remove-lesson/', views.management_pre_billing_remove_lesson, name='management_pre_billing_remove_lesson'),
+
+    # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
+    # NOTE: management/invoices/<int:pk>/ (PATCH) is separate from the existing
+    # management/invoices/<int:pk>/update/ (PUT) — different method + different URL path.
+    path('management/dashboard/batches/', views.management_dashboard_batches, name='management_dashboard_batches'),
+    path('management/dashboard/<int:batch_id>/', views.management_dashboard_data, name='management_dashboard_data'),
+    path('management/invoices/<int:pk>/', views.management_patch_invoice, name='management_patch_invoice'),
+    path('management/expenses/<int:batch_id>/', views.management_upsert_expenses, name='management_upsert_expenses'),
 ]

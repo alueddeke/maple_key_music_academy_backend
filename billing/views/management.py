@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule
+from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
@@ -17,6 +17,9 @@ from custom_auth.decorators import (
     teacher_or_management_required, owns_resource_or_management
 )
 import logging
+import calendar
+from datetime import date
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -1659,3 +1662,295 @@ def management_reject_batch(request, batch_id):
 
     serializer = MonthlyInvoiceBatchSerializer(batch)
     return Response(serializer.data)
+
+
+# ============================================================================
+# PHASE 21: BILLING DASHBOARD ENDPOINTS (DASH-01 through DASH-04)
+# ============================================================================
+
+def compute_dashboard_summary(batch, school):
+    """
+    Compute the three summary card values for a given batch's (year, month) period.
+
+    Aggregates across ALL approved batches for the same school + year + month
+    (Pitfall #2: one batch per teacher, not one per period).
+
+    Returns dict with string representations of Decimal values:
+      income_pre_expenses  – sum(StudentInvoice.amount) for the period
+      expenses_amount      – SchoolMonthlyExpenses.amount (0.00 if no record)
+      expenses_notes       – SchoolMonthlyExpenses.notes ('' if no record)
+      income_after_expenses – income_pre_expenses - expenses_amount
+      income_after_payroll  – income_after_expenses - total_teacher_pay
+    """
+    period_start = date(batch.year, batch.month, 1)
+    period_end = date(batch.year, batch.month, calendar.monthrange(batch.year, batch.month)[1])
+
+    # All approved batches for this school + period (one per teacher)
+    period_batches = MonthlyInvoiceBatch.objects.filter(
+        status='approved',
+        school=school,
+        year=batch.year,
+        month=batch.month,
+    ).select_related('invoice', 'teacher')
+
+    # Student income: sum of StudentInvoice.amount across all period batches
+    student_invoices = StudentInvoice.objects.filter(
+        batch__in=period_batches,
+        school=school,
+    )
+    income_pre_expenses = sum(
+        (inv.amount for inv in student_invoices), Decimal('0.00')
+    )
+
+    # Monthly expenses: school-scoped record for this period
+    try:
+        expenses_record = SchoolMonthlyExpenses.objects.get(
+            school=school,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        expenses_amount = expenses_record.amount
+        expenses_notes = expenses_record.notes
+    except SchoolMonthlyExpenses.DoesNotExist:
+        expenses_amount = Decimal('0.00')
+        expenses_notes = ''
+
+    # Teacher payroll: sum of Invoice.total_amount for batches with a linked invoice
+    total_teacher_pay = sum(
+        (pb.invoice.total_amount or Decimal('0.00') for pb in period_batches if pb.invoice),
+        Decimal('0.00'),
+    )
+
+    income_after_expenses = income_pre_expenses - expenses_amount
+    income_after_payroll = income_after_expenses - total_teacher_pay
+
+    return {
+        'income_pre_expenses': str(income_pre_expenses),
+        'expenses_amount': str(expenses_amount),
+        'expenses_notes': expenses_notes,
+        'income_after_expenses': str(income_after_expenses),
+        'income_after_payroll': str(income_after_payroll),
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_dashboard_batches(request):
+    """
+    List unique approved billing periods for the period selector, newest-first.
+
+    Returns one entry per (year, month) — deduplicated across multiple teachers
+    (Pitfall #2). Each entry: {batch_id, period_start, period_end, label}.
+
+    DASH-01/02/03/04 period selector (D-07).
+    School isolation: filter by request.user.school (T-21-05).
+    """
+    batches = MonthlyInvoiceBatch.objects.filter(
+        status='approved',
+        school=request.user.school,
+    ).order_by('-year', '-month')
+
+    seen = set()
+    result = []
+    for batch in batches:
+        key = (batch.year, batch.month)
+        if key in seen:
+            continue
+        seen.add(key)
+        period_start = date(batch.year, batch.month, 1)
+        period_end = date(
+            batch.year, batch.month,
+            calendar.monthrange(batch.year, batch.month)[1]
+        )
+        result.append({
+            'batch_id': batch.id,
+            'period_start': period_start.isoformat(),
+            'period_end': period_end.isoformat(),
+            'label': period_start.strftime('%B %Y'),
+        })
+
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_dashboard_data(request, batch_id):
+    """
+    Full dashboard data for a billing period: summary cards + student billing + teacher payroll.
+
+    Looks up batch by (id, status='approved', school=request.user.school).
+    Aggregates ALL approved batches for the same (school, year, month).
+
+    Returns 404 if batch not found, wrong school, or not approved.
+
+    School isolation: T-21-05 — queryset always scoped to request.user.school.
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            status='approved',
+            school=request.user.school,
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    period_start = date(batch.year, batch.month, 1)
+    period_end = date(
+        batch.year, batch.month,
+        calendar.monthrange(batch.year, batch.month)[1]
+    )
+
+    # All approved batches for this school + period (one per teacher — Pitfall #2)
+    period_batches = MonthlyInvoiceBatch.objects.filter(
+        status='approved',
+        school=request.user.school,
+        year=batch.year,
+        month=batch.month,
+    ).select_related('invoice', 'teacher')
+
+    # Summary cards
+    summary = compute_dashboard_summary(batch, request.user.school)
+
+    # Teacher payroll rows (iterate period_batches — Pitfall #3: Invoice has no batch_id FK)
+    teacher_payroll = []
+    for pb in period_batches:
+        if pb.invoice:
+            inv = pb.invoice
+            teacher_payroll.append({
+                'invoice_id': inv.id,
+                'teacher_email': pb.teacher.email,
+                'gross': str(inv.total_amount),
+                'teacher_pay': str(inv.total_amount),  # A1: gross == teacher_pay in Phase 21
+                'paid_status': inv.status,
+                'date_paid': inv.date_paid.isoformat() if inv.date_paid else None,
+                'reference_number': inv.reference_number,
+            })
+
+    # Student billing rows with PreBillingInvoice status lookup
+    student_invoices = StudentInvoice.objects.filter(
+        batch__in=period_batches,
+        school=request.user.school,
+    ).select_related('student')
+
+    student_billing = []
+    for si in student_invoices:
+        pre_billing_status = None
+        try:
+            pre_inv = PreBillingInvoice.objects.get(
+                student=si.student,
+                school=request.user.school,
+                period_start=period_start,
+                period_end=period_end,
+            )
+            pre_billing_status = pre_inv.status
+        except PreBillingInvoice.DoesNotExist:
+            pass
+        student_billing.append({
+            'invoice_id': si.id,
+            'student_name': si.student.get_full_name(),
+            'period_start': period_start.isoformat(),
+            'period_end': period_end.isoformat(),
+            'amount': str(si.amount),
+            'credit_applied': str(si.credit_applied),
+            'amount_after_credit': str(si.amount_after_credit),
+            'pre_billing_status': pre_billing_status,
+        })
+
+    return Response({
+        'summary': summary,
+        'student_billing': student_billing,
+        'teacher_payroll': teacher_payroll,
+        'period': {
+            'batch_id': batch.id,
+            'period_start': period_start.isoformat(),
+            'period_end': period_end.isoformat(),
+            'label': period_start.strftime('%B %Y'),
+        },
+    })
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_patch_invoice(request, pk):
+    """
+    PATCH date_paid, reference_number, and/or status on an invoice.
+
+    Allowlist: only {'date_paid', 'reference_number', 'status'} are writable.
+    Non-allowlisted fields in request.data are silently ignored (T-21-07).
+    Empty string for nullable fields coerced to None (T-21-08, Pitfall #5).
+
+    Returns 404 if invoice not found in user's school (T-21-10: no 403 to avoid existence disclosure).
+    """
+    try:
+        invoice = Invoice.objects.get(pk=pk, school=request.user.school)
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    allowed_fields = {'date_paid', 'reference_number', 'status'}
+    fields_to_save = []
+    for field in allowed_fields:
+        if field in request.data:
+            # Empty string → None for nullable fields (Pitfall #5)
+            setattr(invoice, field, request.data[field] or None)
+            fields_to_save.append(field)
+
+    if fields_to_save:
+        # Use update_fields to bypass Invoice.save() total_amount recalculation
+        # (Invoice.save() recalculates total_amount from lessons when pk exists)
+        Invoice.objects.filter(pk=invoice.pk).update(
+            **{field: getattr(invoice, field) for field in fields_to_save}
+        )
+    return Response({'status': 'updated'})
+
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_upsert_expenses(request, batch_id):
+    """
+    Upsert SchoolMonthlyExpenses for the period derived from the given approved batch.
+
+    Validates: amount must be numeric and >= 0 (T-21-09).
+    Returns 404 if batch not found / wrong school / not approved.
+    Uses update_or_create on (school, period_start, period_end) unique_together.
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            status='approved',
+            school=request.user.school,
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    period_start = date(batch.year, batch.month, 1)
+    period_end = date(
+        batch.year, batch.month,
+        calendar.monthrange(batch.year, batch.month)[1]
+    )
+
+    amount_raw = request.data.get('amount', '0.00')
+    try:
+        amount = Decimal(str(amount_raw))
+    except Exception:
+        return Response({'error': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if amount < Decimal('0.00'):
+        return Response(
+            {'error': 'Amount must be >= 0'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    obj, _ = SchoolMonthlyExpenses.objects.update_or_create(
+        school=request.user.school,
+        period_start=period_start,
+        period_end=period_end,
+        defaults={
+            'amount': amount,
+            'notes': request.data.get('notes', ''),
+        },
+    )
+    return Response({'amount': str(obj.amount), 'notes': obj.notes})
