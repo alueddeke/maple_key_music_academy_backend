@@ -219,7 +219,7 @@ def approve_registration_request(request, pk):
     from ..invitation_utils import generate_invitation_token, send_invitation_email
 
     try:
-        reg_request = UserRegistrationRequest.objects.get(pk=pk)
+        reg_request = UserRegistrationRequest.objects.get(pk=pk, school=request.user.school)
 
         if reg_request.status != 'pending':
             return Response({
@@ -272,7 +272,7 @@ def reject_registration_request(request, pk):
     from ..models import UserRegistrationRequest
 
     try:
-        reg_request = UserRegistrationRequest.objects.get(pk=pk)
+        reg_request = UserRegistrationRequest.objects.get(pk=pk, school=request.user.school)
 
         if reg_request.status != 'pending':
             return Response({
