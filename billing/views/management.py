@@ -538,7 +538,7 @@ def list_invoice_recipients(request):
     from ..models import InvoiceRecipientEmail
     from ..serializers import InvoiceRecipientEmailSerializer
 
-    recipients = InvoiceRecipientEmail.objects.all()
+    recipients = InvoiceRecipientEmail.objects.filter(school=request.user.school)
     serializer = InvoiceRecipientEmailSerializer(recipients, many=True)
     return Response(serializer.data)
 
@@ -553,16 +553,16 @@ def add_invoice_recipient(request):
     serializer = InvoiceRecipientEmailSerializer(data=request.data)
 
     if serializer.is_valid():
-        # Check if email already exists
+        # Check if email already exists for this school
         email = serializer.validated_data['email']
-        if InvoiceRecipientEmail.objects.filter(email=email).exists():
+        if InvoiceRecipientEmail.objects.filter(email=email, school=request.user.school).exists():
             return Response(
                 {'error': 'This email is already in the recipient list'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Set created_by to current user
-        serializer.save(created_by=request.user)
+        # Set created_by to current user and scope to school
+        serializer.save(created_by=request.user, school=request.user.school)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -575,7 +575,7 @@ def delete_invoice_recipient(request, pk):
     from ..models import InvoiceRecipientEmail
 
     try:
-        recipient = InvoiceRecipientEmail.objects.get(pk=pk)
+        recipient = InvoiceRecipientEmail.objects.get(pk=pk, school=request.user.school)
         recipient.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
     except InvoiceRecipientEmail.DoesNotExist:
