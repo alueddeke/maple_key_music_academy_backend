@@ -1855,6 +1855,7 @@ def management_dashboard_data(request, batch_id):
             'amount': str(si.amount),
             'credit_applied': str(si.credit_applied),
             'amount_after_credit': str(si.amount_after_credit),
+            'lesson_credits': si.lesson_items.count(),
             'pre_billing_status': pre_billing_status,
         })
 
