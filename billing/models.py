@@ -1516,3 +1516,29 @@ class SchoolMonthlyExpenses(models.Model):
 
     def __str__(self):
         return f"{self.school} expenses {self.period_start} – {self.period_end}: ${self.amount}"
+
+
+class SchoolExpenseItem(models.Model):
+    """Individual expense line item for a billing period (Phase 21)."""
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='expense_items'
+    )
+    period_start = models.DateField()
+    period_end = models.DateField()
+    title = models.CharField(max_length=200)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    notes = models.TextField(blank=True, default='')
+    is_recurring = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.title}: ${self.amount} ({self.period_start})"

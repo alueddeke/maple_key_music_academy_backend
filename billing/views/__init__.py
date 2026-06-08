@@ -53,6 +53,8 @@ from .management import (
     management_dashboard_data,
     management_patch_invoice,
     management_upsert_expenses,
+    management_expense_items,
+    management_expense_item_delete,
 )
 
 from .teacher import (

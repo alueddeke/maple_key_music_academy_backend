@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice
+from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
@@ -1702,18 +1702,15 @@ def compute_dashboard_summary(batch, school):
         (inv.amount for inv in student_invoices), Decimal('0.00')
     )
 
-    # Monthly expenses: school-scoped record for this period
-    try:
-        expenses_record = SchoolMonthlyExpenses.objects.get(
-            school=school,
-            period_start=period_start,
-            period_end=period_end,
-        )
-        expenses_amount = expenses_record.amount
-        expenses_notes = expenses_record.notes
-    except SchoolMonthlyExpenses.DoesNotExist:
-        expenses_amount = Decimal('0.00')
-        expenses_notes = ''
+    # Monthly expenses: sum of expense line items for this period
+    expense_items = SchoolExpenseItem.objects.filter(
+        school=school,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    expenses_amount = sum(
+        (item.amount for item in expense_items), Decimal('0.00')
+    )
 
     # Teacher payroll: sum of Invoice.total_amount for batches with a linked invoice
     total_teacher_pay = sum(
@@ -1727,7 +1724,6 @@ def compute_dashboard_summary(batch, school):
     return {
         'income_pre_expenses': str(income_pre_expenses),
         'expenses_amount': str(expenses_amount),
-        'expenses_notes': expenses_notes,
         'income_after_expenses': str(income_after_expenses),
         'income_after_payroll': str(income_after_payroll),
     }
@@ -1820,6 +1816,7 @@ def management_dashboard_data(request, batch_id):
             inv = pb.invoice
             teacher_payroll.append({
                 'invoice_id': inv.id,
+                'teacher_name': pb.teacher.get_full_name() or pb.teacher.email,
                 'teacher_email': pb.teacher.email,
                 'gross': str(inv.total_amount),
                 'teacher_pay': str(inv.total_amount),  # A1: gross == teacher_pay in Phase 21
@@ -1966,3 +1963,112 @@ def management_upsert_expenses(request, batch_id):
         },
     )
     return Response({'amount': str(obj.amount), 'notes': obj.notes})
+
+
+def _get_batch_period(batch_id, school):
+    """Return (batch, period_start, period_end) or raise 404-style exception."""
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            status='approved',
+            school=school,
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return None, None, None
+    period_start = date(batch.year, batch.month, 1)
+    period_end = date(batch.year, batch.month, calendar.monthrange(batch.year, batch.month)[1])
+    return batch, period_start, period_end
+
+
+def _serialize_expense_item(item):
+    return {
+        'id': item.id,
+        'title': item.title,
+        'amount': str(item.amount),
+        'notes': item.notes,
+        'is_recurring': item.is_recurring,
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_expense_items(request, batch_id):
+    """
+    GET  – list expense items for the period; seeds recurring items from the
+           most-recent previous period if this period has none yet.
+    POST – create a new expense item for the period.
+    """
+    school = request.user.school
+    batch, period_start, period_end = _get_batch_period(batch_id, school)
+    if batch is None:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        items = SchoolExpenseItem.objects.filter(
+            school=school, period_start=period_start, period_end=period_end
+        )
+        if not items.exists():
+            # Seed recurring items from most recent prior period
+            prev_items = SchoolExpenseItem.objects.filter(
+                school=school,
+                period_end__lt=period_start,
+                is_recurring=True,
+            ).order_by('-period_end')
+            if prev_items.exists():
+                most_recent_end = prev_items.first().period_end
+                to_seed = prev_items.filter(period_end=most_recent_end)
+                SchoolExpenseItem.objects.bulk_create([
+                    SchoolExpenseItem(
+                        school=school,
+                        period_start=period_start,
+                        period_end=period_end,
+                        title=item.title,
+                        amount=item.amount,
+                        notes=item.notes,
+                        is_recurring=True,
+                    )
+                    for item in to_seed
+                ])
+                items = SchoolExpenseItem.objects.filter(
+                    school=school, period_start=period_start, period_end=period_end
+                )
+        return Response([_serialize_expense_item(i) for i in items])
+
+    # POST
+    title = request.data.get('title', '').strip()
+    if not title:
+        return Response({'error': 'Title is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    amount_raw = request.data.get('amount', '0.00')
+    try:
+        amount = Decimal(str(amount_raw))
+    except Exception:
+        return Response({'error': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if amount < Decimal('0.00'):
+        return Response({'error': 'Amount must be >= 0'}, status=status.HTTP_400_BAD_REQUEST)
+
+    item = SchoolExpenseItem.objects.create(
+        school=school,
+        period_start=period_start,
+        period_end=period_end,
+        title=title,
+        amount=amount,
+        notes=request.data.get('notes', ''),
+        is_recurring=bool(request.data.get('is_recurring', False)),
+    )
+    return Response(_serialize_expense_item(item), status=status.HTTP_201_CREATED)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_expense_item_delete(request, item_id):
+    """Delete a single expense line item owned by the caller's school."""
+    try:
+        item = SchoolExpenseItem.objects.get(id=item_id, school=request.user.school)
+    except SchoolExpenseItem.DoesNotExist:
+        return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    item.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)

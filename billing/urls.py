@@ -129,4 +129,6 @@ urlpatterns = [
     path('management/dashboard/<int:batch_id>/', views.management_dashboard_data, name='management_dashboard_data'),
     path('management/invoices/<int:pk>/', views.management_patch_invoice, name='management_patch_invoice'),
     path('management/expenses/<int:batch_id>/', views.management_upsert_expenses, name='management_upsert_expenses'),
+    path('management/expense-items/<int:batch_id>/', views.management_expense_items, name='management_expense_items'),
+    path('management/expense-items/delete/<int:item_id>/', views.management_expense_item_delete, name='management_expense_item_delete'),
 ]
