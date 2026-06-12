@@ -337,7 +337,7 @@ def test_teacher_payroll_data(management_client, school, teacher_user):
     )
 
     row = data['teacher_payroll'][0]
-    required_fields = ['invoice_id', 'teacher_email', 'gross', 'teacher_pay',
+    required_fields = ['invoice_id', 'teacher_name', 'teacher_email', 'gross', 'teacher_pay',
                        'paid_status', 'date_paid', 'reference_number']
     for field in required_fields:
         assert field in row, f"Field '{field}' missing from teacher_payroll row: {row}"

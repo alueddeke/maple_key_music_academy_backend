@@ -1243,7 +1243,7 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     ]
 
     if 'status' in request.data:
-        allowed_statuses = ['trial', 'completed', 'cancelled', 'forfeited', 'waived']
+        allowed_statuses = ['trial', 'completed', 'confirmed', 'cancelled', 'forfeited', 'waived']
         if request.data['status'] not in allowed_statuses:
             return Response(
                 {'error': f"Invalid status. Allowed values: {', '.join(allowed_statuses)}"},
@@ -1311,11 +1311,13 @@ def management_approve_batch(request, batch_id):
         with transaction.atomic():
             from decimal import Decimal
 
-            # Group completed AND trial items by student (cancelled items skipped entirely)
+            # Group billable items by student (cancelled items skipped entirely).
+            # 'confirmed' and 'completed' are both billable in the pre-billing model —
+            # confirmed = scheduled/upcoming, completed = already happened; billing outcome identical.
             completed_items_by_student = defaultdict(list)
             trial_items = []
 
-            for item in batch.lesson_items.filter(status='completed'):
+            for item in batch.lesson_items.filter(status__in=['completed', 'confirmed']):
                 completed_items_by_student[item.student].append(item)
 
             for item in batch.lesson_items.filter(status='trial'):
@@ -1325,7 +1327,7 @@ def management_approve_batch(request, batch_id):
             forfeited_items_count = batch.lesson_items.filter(status='forfeited').count()
             waived_items_count = batch.lesson_items.filter(status='waived').count()
             if not completed_items_by_student and not trial_items and not forfeited_items_count and not waived_items_count:
-                raise ValueError('No completed, trial, forfeited, or waived lessons in batch')
+                raise ValueError('No billable lessons in batch')
 
             # Create Lesson records for trial items (teacher paid, student not invoiced)
             for item in trial_items:
@@ -1677,8 +1679,7 @@ def compute_dashboard_summary(batch, school):
 
     Returns dict with string representations of Decimal values:
       income_pre_expenses  – sum(StudentInvoice.amount) for the period
-      expenses_amount      – SchoolMonthlyExpenses.amount (0.00 if no record)
-      expenses_notes       – SchoolMonthlyExpenses.notes ('' if no record)
+      expenses_amount      – sum(SchoolExpenseItem.amount) for the period (0.00 if none)
       income_after_expenses – income_pre_expenses - expenses_amount
       income_after_payroll  – income_after_expenses - total_teacher_pay
     """

@@ -800,6 +800,8 @@ class MonthlyInvoiceBatch(models.Model):
             student__is_active=True  # Only include schedules for active students
         )
 
+        from datetime import date as _date
+        today = _date.today()
         lessons_data = []
 
         for schedule in schedules:
@@ -807,7 +809,10 @@ class MonthlyInvoiceBatch(models.Model):
             dates = schedule.generate_lessons_for_month(self.year, self.month)
 
             for lesson_date in dates:
-                lessons_data.append({                    
+                # Future-dated lessons default to 'confirmed'; past/today default to 'completed'.
+                # Both are treated as billable at approval — the distinction is for teacher UX only.
+                default_status = 'confirmed' if lesson_date > today else 'completed'
+                lessons_data.append({
                     'recurring_schedule': schedule,
                     'scheduled_date': lesson_date,
                     'start_time': schedule.start_time,
@@ -817,8 +822,7 @@ class MonthlyInvoiceBatch(models.Model):
                     'lesson_type': schedule.lesson_type,
                     'teacher_rate': schedule.teacher_rate,
                     'student_rate': schedule.student_rate,
-                    # Default status (teacher can change via UI)
-                    'status': 'completed',
+                    'status': default_status,
                     'cancellation_reason': '',})
         return lessons_data
 

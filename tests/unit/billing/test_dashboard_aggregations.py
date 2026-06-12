@@ -9,7 +9,7 @@ Uses @pytest.mark.django_db for DB access but no APIClient overhead.
 
 Coverage (Phase 16 Principles):
   - income_pre_expenses = sum of StudentInvoice.amount for the period
-  - expenses_amount from SchoolMonthlyExpenses (0.00 if no record)
+  - expenses_amount from SchoolExpenseItem sum (0.00 if no records)
   - income_after_expenses = income_pre_expenses - expenses_amount
   - total_teacher_pay = sum of Invoice.total_amount for teacher_payment invoices in period
   - income_after_payroll = income_after_expenses - total_teacher_pay
@@ -26,7 +26,7 @@ from billing.models import (
     MonthlyInvoiceBatch,
     StudentInvoice,
     Invoice,
-    SchoolMonthlyExpenses,
+    SchoolExpenseItem,
 )
 
 User = get_user_model()
@@ -194,10 +194,11 @@ def test_summary_aggregation_with_expenses(school, teacher_user, db):
     _make_student_invoice(batch, student2, school, amount=Decimal("200.00"))
     _make_student_invoice(batch, student3, school, amount=Decimal("300.00"))
 
-    SchoolMonthlyExpenses.objects.create(
+    SchoolExpenseItem.objects.create(
         school=school,
         period_start=date(2026, 6, 1),
         period_end=date(2026, 6, 30),
+        title='Test expense',
         amount=Decimal('100.00'),
         notes='test expenses',
     )
@@ -263,10 +264,11 @@ def test_summary_aggregation_negative_after_payroll(school, teacher_user, db):
 
     _make_student_invoice(batch, student1, school, amount=Decimal("100.00"))
 
-    SchoolMonthlyExpenses.objects.create(
+    SchoolExpenseItem.objects.create(
         school=school,
         period_start=date(2026, 6, 1),
         period_end=date(2026, 6, 30),
+        title='Test expense',
         amount=Decimal('50.00'),
         notes='heavy month',
     )

@@ -650,8 +650,8 @@ class Command(BaseCommand):
         for month, year in [(5, 2026), (6, 2026)]:
             self._seed_approved_period(school, teachers, all_records, month, year, mgmt)
 
-        # Seed July as submitted (waiting approval)
-        self._seed_submitted_period(school, teachers, all_records, 7, 2026)
+        # Seed July as draft — teachers submit as Step 1 of E2E flow
+        self._seed_draft_period(school, teachers, all_records, 7, 2026)
 
         self._print_summary(all_records)
 
@@ -716,6 +716,32 @@ class Command(BaseCommand):
             f'Net: ${total_student_revenue - expense_total - total_teacher_pay:,.2f}'
         )
 
+    def _seed_draft_period(self, school, teachers, all_records, month, year):
+        """Seed draft batches for a future month. Lessons default to 'confirmed' (not yet happened)."""
+        import calendar as _cal
+        self.stdout.write(self.style.WARNING(f'\nSeeding {_cal.month_name[month]} {year} (draft — ready for teacher submission)…'))
+
+        for teacher in teachers:
+            teacher_records = [(s, cfgs) for (t, s, cfgs) in all_records if t.id == teacher.id]
+
+            batch = MonthlyInvoiceBatch.objects.create(
+                teacher=teacher,
+                school=school,
+                month=month,
+                year=year,
+                status='draft',
+            )
+
+            day_offset = 1
+            for student, lesson_cfgs in teacher_records:
+                _build_lesson_items(batch, teacher, student, lesson_cfgs, month, year, day_offset)
+                day_offset += len(lesson_cfgs) * 3
+
+            # Future month: lessons are planned/confirmed, not yet completed
+            batch.lesson_items.update(status='confirmed')
+
+            self.stdout.write(f'  ✓ {teacher.get_full_name()} — batch {batch.batch_number} (draft, confirmed lessons)')
+
     def _seed_submitted_period(self, school, teachers, all_records, month, year):
         import calendar as _cal
         self.stdout.write(self.style.WARNING(f'\nSeeding {_cal.month_name[month]} {year} (submitted — awaiting approval)…'))
@@ -749,7 +775,7 @@ class Command(BaseCommand):
         self.stdout.write('\n── DRY RUN ─────────────────────────────────────────')
         self.stdout.write(f'Teachers : {len(TEACHERS)}')
         self.stdout.write(f'Students : {total_students}')
-        self.stdout.write(f'Periods  : May 2026 (approved), June 2026 (approved), July 2026 (submitted)')
+        self.stdout.write(f'Periods  : May 2026 (approved), June 2026 (approved), July 2026 (draft)')
         self.stdout.write(f'Recurring expenses/month: ${recurring_total}')
         for t_idx, t in enumerate(TEACHERS):
             students = STUDENTS_BY_TEACHER_IDX[t_idx]
@@ -761,7 +787,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('━' * 64))
         self.stdout.write(self.style.SUCCESS('  REALISTIC TEST DATA READY'))
         self.stdout.write(self.style.SUCCESS('━' * 64))
-        self.stdout.write(f'  Periods : May 2026 ✓ paid | June 2026 ✓ mixed | July 2026 ⏳ submitted')
+        self.stdout.write(f'  Periods : May 2026 ✓ paid | June 2026 ✓ mixed | July 2026 📋 draft')
         self.stdout.write(f'  Teachers: {", ".join(t["email"] for t in TEACHERS)}')
         self.stdout.write(f'  Password: {PASSWORD}')
         self.stdout.write(f'  Students: {len(all_records)} total (22)')
