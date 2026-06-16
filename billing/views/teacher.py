@@ -15,6 +15,7 @@ from custom_auth.decorators import (
 )
 import logging
 import uuid
+from datetime import date
 from django.db import transaction
 from django.core.exceptions import FieldDoesNotExist
 
@@ -735,6 +736,72 @@ def batch_lesson_item(request, batch_id, item_id):
             )
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# Phase 22: Month-End Adjustments — teacher marks exceptions on approved batches
+@api_view(['PATCH'])
+@teacher_required
+def teacher_batch_adjustment_item(request, batch_id, item_id):
+    """
+    PATCH: Allow teacher to mark lesson exceptions (waived/forfeited/cancelled)
+    on an already-approved batch that has not yet had an Invoice generated.
+
+    Guards:
+      - Batch must be 'approved' (400 if not)
+      - Batch must not be locked (batch.invoice_id is not None → 400)
+      - Future lessons (scheduled_date > today) may not be marked completed/forfeited (D-03 → 400)
+      - Status must be in the allowed allowlist (400 if invalid)
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            teacher=request.user,
+            school=request.user.school,
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'approved':
+        return Response(
+            {'error': 'Adjustments only allowed on approved batches'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    # Use integer FK accessor — avoids unnecessary ORM query (T-22-02)
+    if batch.invoice_id is not None:
+        return Response(
+            {'error': 'Batch is locked — teacher Invoice has been generated'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        item = batch.lesson_items.get(id=item_id)
+    except BatchLessonItem.DoesNotExist:
+        return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    new_status = request.data.get('status')
+    today = date.today()
+
+    # D-03: future lessons may not be marked completed or forfeited
+    if item.scheduled_date > today:
+        if new_status in ('completed', 'forfeited'):
+            return Response(
+                {'error': f'Cannot mark future lesson as {new_status}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    allowed_statuses = ['confirmed', 'completed', 'cancelled', 'trial', 'waived', 'forfeited']
+    if new_status and new_status not in allowed_statuses:
+        return Response(
+            {'error': f'Invalid status. Allowed: {allowed_statuses}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    update_data = {k: v for k, v in request.data.items() if k in ['status', 'cancellation_reason', 'teacher_notes']}
+    serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['POST'])

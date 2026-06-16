@@ -69,6 +69,8 @@ from .teacher import (
     batch_lesson_item,
     batch_submit,
     download_paystub,
+    # Phase 22: Month-End Adjustments
+    teacher_batch_adjustment_item,
 )
 
 from .lessons import (
