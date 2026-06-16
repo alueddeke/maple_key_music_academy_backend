@@ -374,14 +374,20 @@ class TestBatchApprovalWaived:
         student_invoice = StudentInvoice.objects.get(batch=batch, student=student_user)
         assert not student_invoice.lesson_items.filter(status='waived').exists()
 
-    def test_waived_increments_balance_and_writes_rollover_credit_transaction(
+    def test_waived_does_not_write_rollover_at_approval_time(
         self, school, teacher_user, student_user, management_user, school_settings
     ):
         """
-        Waived lesson: balance += lesson_rate (rollover), CreditTransaction(type='waived_rollover')
-        written (D-09).
+        Phase 22 (D-05): waived_rollover CreditTransaction is NO LONGER written at
+        management_approve_batch time. Credit rollover is deferred to
+        management_generate_teacher_invoice (ADJ-06).
 
-        RED until Plan 04 adds waived rollover credit logic to management_approve_batch.
+        After batch approval:
+        - CreditTransaction.objects.filter(type='waived_rollover').count() == 0
+        - Account balance reflects NO waived increment; confirmed deduction floors at 0
+
+        RED until Plan 02 removes the waived credit block from management_approve_batch
+        (billing/views/management.py lines 1532-1540).
         """
         _setup_billable_contact(student_user, school)
         account = StudentCreditAccount.objects.create(
@@ -402,14 +408,12 @@ class TestBatchApprovalWaived:
         response = _approve_batch(management_user, batch)
         assert response.status_code == 200
 
+        # Phase 22: waived_rollover is NO LONGER written at approval time (D-05)
+        # Credit is deferred to management_generate_teacher_invoice
+        assert CreditTransaction.objects.filter(type='waived_rollover').count() == 0
+        # Balance: start=0; confirmed deduction (-45) floors at 0; waived has no effect here
         account.refresh_from_db()
-        # Waived credit: +45.00; Confirmed deduction: -45.00; net = 0
-        # But we only assert on the waived rollover here — confirmed deduction tested separately
-        # Total balance = 0 (start) + 45 (waived rollover) - 45 (confirmed deduction) = 0
-        # Assert the CreditTransaction exists
-        assert CreditTransaction.objects.filter(
-            type='waived_rollover', amount=Decimal('45.00'),
-        ).count() == 1
+        assert account.balance == Decimal('0.00')
 
     def test_waived_teacher_payment_is_zero_via_calculate_teacher_payment(
         self, school, teacher_user, student_user
