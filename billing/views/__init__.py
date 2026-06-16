@@ -55,6 +55,9 @@ from .management import (
     management_upsert_expenses,
     management_expense_items,
     management_expense_item_delete,
+    # Phase 22: Month-End Adjustments
+    management_month_end_queue,
+    management_generate_teacher_invoice,
 )
 
 from .teacher import (

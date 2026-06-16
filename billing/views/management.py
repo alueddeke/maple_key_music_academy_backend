@@ -1161,6 +1161,120 @@ def management_approved_batches(request):
     return Response(serializer.data)
 
 
+# Phase 22: Month-End Adjustments
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_month_end_queue(request):
+    """
+    ADJ-09: Approved batches without a teacher Invoice yet — the month-end work queue.
+    Returns batches where status='approved' AND invoice FK is NULL, school-scoped.
+    """
+    batches = MonthlyInvoiceBatch.objects.filter(
+        status='approved',
+        invoice__isnull=True,
+        school=request.user.school,
+    ).order_by('-reviewed_at')
+
+    serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_generate_teacher_invoice(request, batch_id):
+    """
+    ADJ-05/06: Generate teacher Invoice from completed + forfeited lessons on an approved batch.
+
+    Atomically:
+      1. Creates Invoice(invoice_type='teacher_payment') with total_amount = Σ teacher_rate * duration
+         for all completed + forfeited BatchLessonItems.
+      2. Links batch.invoice = invoice (signals batch lock for teacher adjustments, ADJ-07).
+      3. Writes CreditTransaction(waived_rollover) per waived item (D-05 — deferred from approval).
+
+    Returns 400 if batch not approved or Invoice already generated.
+    Returns 404 if batch not in management's school (T-22-03 school isolation).
+    """
+    from django.db import transaction as db_transaction
+    from ..models import CreditTransaction, StudentCreditAccount
+
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            school=request.user.school,
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'approved':
+        return Response(
+            {'error': 'Batch must be approved before generating teacher Invoice'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if batch.invoice_id is not None:
+        return Response(
+            {'error': 'Teacher Invoice already generated for this batch'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with db_transaction.atomic():
+        # Billable for teacher: completed + forfeited lessons
+        billable_items = list(
+            batch.lesson_items.filter(status__in=['completed', 'forfeited'])
+        )
+        total_amount = sum(
+            item.teacher_rate * item.duration for item in billable_items
+        ) or Decimal('0.00')
+
+        # Create Invoice with total_amount set at creation — do NOT call invoice.save()
+        # afterward (Pitfall 7: Invoice.save() recalculates from M2M lessons which is empty).
+        invoice = Invoice.objects.create(
+            invoice_type='teacher_payment',
+            teacher=batch.teacher,
+            school=batch.school,
+            status='pending',
+            created_by=request.user,
+            payment_balance=total_amount,
+            total_amount=total_amount,
+        )
+
+        # Link batch to invoice — signals batch lock for teacher adjustment endpoint (ADJ-07)
+        batch.invoice = invoice
+        batch.save(update_fields=['invoice'])
+
+        # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval)
+        waived_items = list(batch.lesson_items.filter(status='waived'))
+        for item in waived_items:
+            lesson_rate = item.student_rate * item.duration
+            if lesson_rate > Decimal('0.00'):
+                # get_or_create then re-acquire with select_for_update (REC-02 pattern)
+                StudentCreditAccount.objects.get_or_create(
+                    student=item.student,
+                    school=batch.school,
+                    defaults={'balance': Decimal('0.00')},
+                )
+                account = StudentCreditAccount.objects.select_for_update().get(
+                    student=item.student, school=batch.school
+                )
+                account.balance += lesson_rate
+                account.save()
+                CreditTransaction.objects.create(
+                    account=account,
+                    school=batch.school,
+                    type='waived_rollover',
+                    amount=lesson_rate,
+                )
+
+    return Response({
+        'status': 'invoice_generated',
+        'invoice_id': invoice.id,
+        'invoice_number': invoice.invoice_number,
+        'total_amount': str(invoice.total_amount),
+        'waived_credits_written': len(waived_items),
+    })
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 @management_required
