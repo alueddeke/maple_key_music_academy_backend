@@ -98,16 +98,22 @@ urlpatterns = [
     path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
     path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
     path('teacher/batches/<int:batch_id>/paystub/', views.download_paystub, name='download_paystub'),
+    path('teacher/batches/<int:batch_id>/adjustment/<int:item_id>/', views.teacher_batch_adjustment_item, name='teacher_batch_adjustment_item'),
 
     # Management Batch Approval (Phase 7)
     path('management/batches/pending/', views.management_pending_batches, name='management_pending_batches'),
     path('management/batches/approved/', views.management_approved_batches, name='management_approved_batches'),
     path('management/batches/rejected/', views.management_rejected_batches, name='management_rejected_batches'),
+    # Phase 22: Month-End Adjustments
+    # NOTE: month-end-queue/ MUST appear before <int:batch_id>/ — Django URL resolver
+    # would try to coerce "month-end-queue" to int and raise ValueError otherwise (Pitfall 5).
+    path('management/batches/month-end-queue/', views.management_month_end_queue, name='management_month_end_queue'),
     path('management/batches/<int:batch_id>/', views.management_batch_detail, name='management_batch_detail'),
     path('management/batches/<int:batch_id>/lessons/<int:item_id>/', views.management_edit_lesson_notes, name='management_edit_lesson_notes'),
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
     path('management/batches/<int:batch_id>/csv/', views.management_batch_csv, name='management_batch_csv'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
+    path('management/batches/<int:batch_id>/generate-teacher-invoice/', views.management_generate_teacher_invoice, name='management_generate_teacher_invoice'),
 
     # HELM-03: Helcim payment webhook — no 'helcim' in path per D-10 to prevent URL enumeration of payment processor
     path('payment-callback/', views.payment_callback, name='payment_callback'),
