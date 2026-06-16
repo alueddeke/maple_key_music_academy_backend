@@ -1487,10 +1487,11 @@ def management_approve_batch(request, batch_id):
                     student_invoices.append(forfeited_invoice)
 
             # Phase 20 (D-09): per-student credit deduction/rollover with select_for_update (REC-02)
+            # Phase 22 (D-05): waived_items_by_student excluded — no credit written at approval time;
+            # waived rollover is deferred to management_generate_teacher_invoice (ADJ-06).
             all_students = (
                 set(completed_items_by_student)
                 | set(forfeited_items_by_student)
-                | set(waived_items_by_student)
             )
 
             for student in all_students:
@@ -1527,16 +1528,6 @@ def management_approve_batch(request, batch_id):
                         CreditTransaction.objects.create(
                             account=account, school=batch.school,
                             type='forfeited', amount=lesson_amount,
-                        )
-
-                # Waived: balance += lesson_rate (rollover), CreditTransaction(type='waived_rollover') written
-                for item in waived_items_by_student.get(student, []):
-                    lesson_rate = item.student_rate * item.duration
-                    if lesson_rate > Decimal('0.00'):
-                        account.balance += lesson_rate
-                        CreditTransaction.objects.create(
-                            account=account, school=batch.school,
-                            type='waived_rollover', amount=lesson_rate,
                         )
 
                 account.save()
