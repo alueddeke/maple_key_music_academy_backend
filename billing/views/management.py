@@ -2030,6 +2030,45 @@ def management_dashboard_data(request, batch_id):
     })
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_teacher_invoices(request, teacher_id):
+    """
+    List a teacher's generated payment invoices for the teacher hub Invoices tab.
+
+    Newest-first, scoped to request.user.school. Each row carries batch_id so the
+    frontend can open the frozen billed record (the locked source batch) as the
+    dispute record of what was billed.
+    """
+    invoices = Invoice.objects.filter(
+        invoice_type='teacher_payment',
+        teacher_id=teacher_id,
+        school=request.user.school,
+    ).order_by('-created_at')
+
+    # Map invoice_id -> source batch (period label + record link). batch.invoice is the FK.
+    batch_by_invoice = {
+        b.invoice_id: b
+        for b in MonthlyInvoiceBatch.objects.filter(invoice__in=invoices)
+    }
+
+    result = []
+    for inv in invoices:
+        b = batch_by_invoice.get(inv.id)
+        result.append({
+            'invoice_id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'status': inv.status,
+            'total_amount': str(inv.total_amount),
+            'date_paid': inv.date_paid.isoformat() if inv.date_paid else None,
+            'reference_number': inv.reference_number,
+            'batch_id': b.id if b else None,
+            'period_label': date(b.year, b.month, 1).strftime('%B %Y') if b else None,
+        })
+    return Response(result)
+
+
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
 @management_required

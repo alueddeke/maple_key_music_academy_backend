@@ -51,6 +51,7 @@ from .management import (
     # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
     management_dashboard_batches,
     management_dashboard_data,
+    management_teacher_invoices,
     management_patch_invoice,
     management_upsert_expenses,
     management_expense_items,

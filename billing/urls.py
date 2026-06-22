@@ -83,6 +83,7 @@ urlpatterns = [
     path('management/students/<int:student_id>/assign-teachers/', views.assign_teachers_to_student, name='assign_teachers_to_student'),
     path('management/students/<int:student_id>/unassign-teacher/<int:teacher_id>/', views.unassign_teacher_from_student, name='unassign_teacher_from_student'),
     path('management/teachers/<int:teacher_id>/students/', views.teacher_students, name='teacher_students'),
+    path('management/teachers/<int:teacher_id>/invoices/', views.management_teacher_invoices, name='management_teacher_invoices'),
 
     # Teacher management endpoints (update/delete only, no create)
     path('management/teachers/<int:pk>/update/', views.management_update_teacher, name='management_update_teacher'),
