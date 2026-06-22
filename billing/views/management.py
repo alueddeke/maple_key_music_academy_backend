@@ -1185,17 +1185,34 @@ def management_month_end_queue(request):
 @management_required
 def management_generate_teacher_invoice(request, batch_id):
     """
-    ADJ-05/06: Generate teacher Invoice from completed + forfeited lessons on an approved batch.
+    ADJ-05/06: Generate the teacher payment Invoice for an approved batch.
+
+    Teacher pay covers every lesson the teacher actually delivered — see
+    BatchLessonItem.calculate_teacher_payment() for the canonical per-lesson rule:
+      - completed / confirmed: paid (past lessons display as "Completed" but keep DB
+        status 'confirmed'; a normal submitted batch is entirely 'confirmed').
+      - trial: paid at the teacher's normal rate. Trials are a business expense to
+        win new clients — the teacher is paid, the student is charged $0.
+      - forfeited: paid. Student no-show — the student is still charged, the teacher
+        is still paid.
+      - waived / cancelled: $0.
 
     Atomically:
-      1. Creates Invoice(invoice_type='teacher_payment') with total_amount = Σ teacher_rate * duration
-         for all completed + forfeited BatchLessonItems.
+      1. Creates Invoice(invoice_type='teacher_payment') with total_amount =
+         Σ calculate_teacher_payment() over all BatchLessonItems.
       2. Links batch.invoice = invoice (signals batch lock for teacher adjustments, ADJ-07).
-      3. Writes CreditTransaction(waived_rollover) per waived item (D-05 — deferred from approval).
+      3. Writes CreditTransaction(waived_rollover) per waived item (D-05 — deferred from
+         approval): refunds the approval-time charge as next-month student credit.
+      4. Writes CreditTransaction(forfeited) per forfeited item as the audit record for the
+         no-show charge. The student's balance was already decremented at approval (the
+         lesson counted as a 'confirmed' charge then), so balance is NOT touched here —
+         this only records WHY the charge stands. Dedup-guarded so a lesson forfeited
+         before approval (already carrying a 'forfeited' row) is not double-recorded.
 
     Returns 400 if batch not approved or Invoice already generated.
     Returns 404 if batch not in management's school (T-22-03 school isolation).
     """
+    from collections import Counter
     from django.db import transaction as db_transaction
     from ..models import CreditTransaction, StudentCreditAccount
 
@@ -1219,13 +1236,16 @@ def management_generate_teacher_invoice(request, batch_id):
         )
 
     with db_transaction.atomic():
-        # Billable for teacher: completed + forfeited lessons
-        billable_items = list(
-            batch.lesson_items.filter(status__in=['completed', 'forfeited'])
-        )
+        # Teacher pay = Σ calculate_teacher_payment() over every item, so the invoice
+        # total can never drift from the canonical per-lesson rule (pays completed,
+        # confirmed, trial, forfeited; $0 for waived and cancelled). Summing the model
+        # method instead of a hardcoded status filter is what fixes the historical
+        # bug where an all-'confirmed' batch generated a $0 teacher invoice.
+        all_items = list(batch.lesson_items.all())
         total_amount = sum(
-            item.teacher_rate * item.duration for item in billable_items
-        ) or Decimal('0.00')
+            (item.calculate_teacher_payment() for item in all_items),
+            Decimal('0.00'),
+        )
 
         # Create Invoice with total_amount set at creation — do NOT call invoice.save()
         # afterward (Pitfall 7: Invoice.save() recalculates from M2M lessons which is empty).
@@ -1266,12 +1286,47 @@ def management_generate_teacher_invoice(request, batch_id):
                     amount=lesson_rate,
                 )
 
+        # Forfeited audit rows (ADJ/REC-04). The student was already charged at
+        # approval (the lesson counted as a 'confirmed' decrement then), so we do NOT
+        # touch balance here — we only write the CreditTransaction(type='forfeited')
+        # that records the no-show. Grouped by (student, charge) and dedup-guarded
+        # against any 'forfeited' row already written at approval, so a lesson that
+        # was forfeited before approval is never double-recorded.
+        forfeited_charges = Counter()
+        for item in batch.lesson_items.filter(status='forfeited'):
+            charge = item.student_rate * item.duration
+            if charge > Decimal('0.00'):
+                forfeited_charges[(item.student_id, charge)] += 1
+
+        forfeited_credits_written = 0
+        for (student_id, charge), needed in forfeited_charges.items():
+            StudentCreditAccount.objects.get_or_create(
+                student_id=student_id,
+                school=batch.school,
+                defaults={'balance': Decimal('0.00')},
+            )
+            account = StudentCreditAccount.objects.select_for_update().get(
+                student_id=student_id, school=batch.school
+            )
+            existing = CreditTransaction.objects.filter(
+                account=account, type='forfeited', amount=charge
+            ).count()
+            for _ in range(max(0, needed - existing)):
+                CreditTransaction.objects.create(
+                    account=account,
+                    school=batch.school,
+                    type='forfeited',
+                    amount=charge,
+                )
+                forfeited_credits_written += 1
+
     return Response({
         'status': 'invoice_generated',
         'invoice_id': invoice.id,
         'invoice_number': invoice.invoice_number,
         'total_amount': str(invoice.total_amount),
         'waived_credits_written': len(waived_items),
+        'forfeited_credits_written': forfeited_credits_written,
     })
 
 

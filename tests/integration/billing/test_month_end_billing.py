@@ -289,6 +289,111 @@ class TestGenerateTeacherInvoiceEndpoint:
         # Response includes waived_credits_written count
         assert response.data['waived_credits_written'] == 2
 
+    def test_generate_pays_teacher_for_confirmed_lessons(
+        self, management_client, teacher_user, student_user, school, school_settings, management_user
+    ):
+        """
+        Regression (Bug 1): a normal submitted batch carries DB status 'confirmed'
+        (past lessons only DISPLAY as "Completed"). Generation must pay the teacher
+        for confirmed lessons — historically it filtered completed+forfeited only,
+        producing a $0 teacher invoice for an entirely-confirmed batch.
+        """
+        batch = _make_approved_batch(teacher_user, school)
+        # 3 confirmed @ 45.00 x 1.0 = 135.00
+        for d in (1, 8, 15):
+            _make_item(batch, student_user, scheduled_date=date(2026, 6, d),
+                       status='confirmed', teacher_rate=Decimal('45.00'), duration=Decimal('1.0'))
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        assert Decimal(response.data['total_amount']) == Decimal('135.00')
+
+    def test_generate_pays_teacher_for_trial_lessons(
+        self, management_client, teacher_user, student_user, school, school_settings, management_user
+    ):
+        """
+        Regression (Bug 7): trial lessons pay the teacher (a business expense to win
+        new clients) while the student is charged $0. Generation must include trial
+        pay in the teacher invoice total.
+        """
+        batch = _make_approved_batch(teacher_user, school)
+        # 1 completed @ 45.00 + 1 trial @ 45.00 (trial pays teacher, student $0)
+        _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed',
+                   teacher_rate=Decimal('45.00'), duration=Decimal('1.0'))
+        trial = _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='trial',
+                           teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'),
+                           duration=Decimal('1.0'))
+
+        # trial: teacher paid, student not charged
+        assert trial.calculate_teacher_payment() == Decimal('45.00')
+        assert trial.calculate_student_charge() == Decimal('0.00')
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        # 45 completed + 45 trial = 90.00
+        assert Decimal(response.data['total_amount']) == Decimal('90.00')
+
+    def test_generate_writes_forfeited_audit_transaction_without_double_charging(
+        self, management_client, teacher_user, student_user, school, school_settings, management_user
+    ):
+        """
+        Regression (Bug 2): a lesson forfeited AFTER approval was already charged to
+        the student at approval (as a 'confirmed' decrement). Generation must record
+        the no-show with a CreditTransaction(type='forfeited') for the audit trail,
+        but must NOT decrement the balance again (no double charge).
+        """
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('500.00')
+        )
+        batch = _make_approved_batch(teacher_user, school)
+        # 1 completed (billable) + 1 forfeited @ student_rate 60 x 1.0 = 60.00 audit row
+        _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed',
+                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='forfeited',
+                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        # one forfeited audit row written
+        assert response.data['forfeited_credits_written'] == 1
+        forfeited_txns = CreditTransaction.objects.filter(type='forfeited', account=account)
+        assert forfeited_txns.count() == 1
+        assert forfeited_txns.first().amount == Decimal('60.00')
+        # balance unchanged — the charge happened at approval, not again here
+        account.refresh_from_db()
+        assert account.balance == Decimal('500.00')
+
+    def test_generate_is_dedup_safe_for_forfeited_audit_rows(
+        self, management_client, teacher_user, student_user, school, school_settings, management_user
+    ):
+        """
+        A lesson forfeited BEFORE approval already carries a 'forfeited' row written
+        at approval. Generation must not write a second one for the same charge.
+        """
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('100.00')
+        )
+        batch = _make_approved_batch(teacher_user, school)
+        _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='forfeited',
+                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # Simulate the approval-time forfeited row already existing
+        CreditTransaction.objects.create(
+            account=account, school=school, type='forfeited', amount=Decimal('60.00')
+        )
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['forfeited_credits_written'] == 0
+        assert CreditTransaction.objects.filter(type='forfeited', account=account).count() == 1
+
 
 # ---------------------------------------------------------------------------
 # Class 3 -- Month-end queue endpoint (ADJ-09)
