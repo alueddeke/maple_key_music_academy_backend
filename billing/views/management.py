@@ -1977,6 +1977,8 @@ def management_dashboard_data(request, batch_id):
             inv = pb.invoice
             teacher_payroll.append({
                 'invoice_id': inv.id,
+                'batch_id': pb.id,
+                'teacher_id': pb.teacher_id,
                 'teacher_name': pb.teacher.get_full_name() or pb.teacher.email,
                 'teacher_email': pb.teacher.email,
                 'gross': str(inv.total_amount),
