@@ -207,6 +207,31 @@ def test_generate_drafts_incremental(management_client, school, teacher_user, st
     assert PreBillingInvoice.objects.filter(school=school, student=student).count() == 1
 
 
+@pytest.mark.django_db
+def test_duplicate_prebilling_invoice_blocked_by_constraint(school, student_with_contact):
+    """
+    Bug 8 / duplicate protection: the DB constraint
+    unique_prebilling_per_student_period prevents two invoices for the same
+    student+school+period, even if a concurrent generate slips past the app-level
+    existence check.
+    """
+    from django.db import IntegrityError, transaction
+    student, _ = student_with_contact
+    period_start = date(2026, 1, 1)
+    period_end = date(2026, 1, 31)
+
+    PreBillingInvoice.objects.create(
+        student=student, school=school, status='draft', amount=Decimal('100.00'),
+        period_start=period_start, period_end=period_end,
+    )
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            PreBillingInvoice.objects.create(
+                student=student, school=school, status='draft', amount=Decimal('100.00'),
+                period_start=period_start, period_end=period_end,
+            )
+
+
 # ---------------------------------------------------------------------------
 # Tests — send invoice (BILL-05, BILL-07)
 # ---------------------------------------------------------------------------

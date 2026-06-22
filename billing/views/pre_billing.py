@@ -278,16 +278,25 @@ def management_pre_billing_generate(request):
 
         amount = max(Decimal('0.00'), gross - credit)
 
-        # Minimal atomic block for PreBillingInvoice creation + M2M set
+        # Minimal atomic block for PreBillingInvoice creation + M2M set.
+        # get_or_create on (student, school, period_start) is race-safe under the
+        # unique_prebilling_per_student_period constraint: a concurrent generate that
+        # already created this student's invoice returns created=False and we skip,
+        # so a double-click or parallel call can never produce duplicate invoices.
         with transaction.atomic():
-            invoice = PreBillingInvoice.objects.create(
-                school=school,
+            invoice, created = PreBillingInvoice.objects.get_or_create(
                 student=student,
-                status='draft',
-                amount=amount,
+                school=school,
                 period_start=period_start,
-                period_end=period_end,
+                defaults={
+                    'status': 'draft',
+                    'amount': amount,
+                    'period_end': period_end,
+                },
             )
+            if not created:
+                skipped_existing += 1
+                continue
             invoice.lessons.set(lessons)
 
         generated += 1

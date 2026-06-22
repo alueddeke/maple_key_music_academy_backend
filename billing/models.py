@@ -1489,6 +1489,14 @@ class PreBillingInvoice(models.Model):
         ordering = ['-created_at']
         verbose_name = 'Pre-Billing Invoice'
         verbose_name_plural = 'Pre-Billing Invoices'
+        constraints = [
+            # One pre-billing invoice per student per period — DB-level guard against
+            # duplicate invoices from a double-clicked or concurrent generate call.
+            models.UniqueConstraint(
+                fields=['student', 'school', 'period_start'],
+                name='unique_prebilling_per_student_period',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.student.get_full_name()} — {self.period_start:%B %Y} ({self.get_status_display()})"
