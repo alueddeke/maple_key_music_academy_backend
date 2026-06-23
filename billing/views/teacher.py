@@ -96,6 +96,24 @@ def teacher_invoice_stats(request):
         status='paid'
     ).count()
 
+    # Approved batches still awaiting a teacher invoice = the open "mark exceptions"
+    # window (teacher can adjust lesson statuses before management finalizes payroll).
+    adjustments_open_qs = MonthlyInvoiceBatch.objects.filter(
+        teacher=teacher,
+        school=teacher.school,
+        status='approved',
+        invoice__isnull=True,
+    ).order_by('-year', '-month')
+    adjustments_open = [
+        {
+            'id': b.id,
+            'month': b.month,
+            'year': b.year,
+            'batch_number': b.batch_number,
+        }
+        for b in adjustments_open_qs
+    ]
+
     # Get most recent rejected invoices
     recent_rejected = Invoice.objects.filter(
         invoice_type='teacher_payment',
@@ -121,6 +139,8 @@ def teacher_invoice_stats(request):
         'approved_count': approved_count,
         'paid_count': paid_count,
         'recent_rejected': rejected_invoices,
+        'adjustments_open_count': adjustments_open_qs.count(),
+        'adjustments_open': adjustments_open,
     })
 
 @api_view(['POST'])
