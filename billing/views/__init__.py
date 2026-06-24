@@ -48,6 +48,7 @@ from .management import (
     management_approve_batch,
     management_batch_csv,
     management_reject_batch,
+    management_delete_rejected_batch,
     # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
     management_dashboard_batches,
     management_dashboard_data,

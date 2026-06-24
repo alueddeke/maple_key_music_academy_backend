@@ -114,6 +114,7 @@ urlpatterns = [
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
     path('management/batches/<int:batch_id>/csv/', views.management_batch_csv, name='management_batch_csv'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
+    path('management/batches/<int:batch_id>/delete/', views.management_delete_rejected_batch, name='management_delete_rejected_batch'),
     path('management/batches/<int:batch_id>/generate-teacher-invoice/', views.management_generate_teacher_invoice, name='management_generate_teacher_invoice'),
 
     # HELM-03: Helcim payment webhook — no 'helcim' in path per D-10 to prevent URL enumeration of payment processor

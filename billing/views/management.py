@@ -1826,6 +1826,35 @@ def management_reject_batch(request, batch_id):
     return Response(serializer.data)
 
 
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_delete_rejected_batch(request, batch_id):
+    """
+    Hard-delete an abandoned rejected batch.
+
+    Only batches that were rejected (status='draft' with a rejection_reason) and
+    were never invoiced may be deleted — these hold no financial records (no
+    StudentInvoice / teacher Invoice / credits). Cascade removes the draft
+    BatchLessonItems; django-simple-history retains the audit trail. Approved or
+    invoiced batches can never be deleted through this endpoint.
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(id=batch_id, school=request.user.school)
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    is_rejected = batch.status == 'draft' and bool(batch.rejection_reason)
+    if not is_rejected or batch.invoice_id is not None:
+        return Response(
+            {'error': 'Only rejected, never-invoiced batches can be deleted'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    batch.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 # ============================================================================
 # PHASE 21: BILLING DASHBOARD ENDPOINTS (DASH-01 through DASH-04)
 # ============================================================================
