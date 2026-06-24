@@ -41,13 +41,60 @@ User = get_user_model()
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _get_current_period():
-    """Return (period_start, period_end) date tuple for the current calendar month."""
-    today = date.today()
-    period_start = today.replace(day=1)
-    last_day = calendar.monthrange(today.year, today.month)[1]
-    period_end = today.replace(day=last_day)
+def _next_month(today):
+    """Return (year, month) of the calendar month AFTER ``today`` (Dec → Jan rollover)."""
+    if today.month == 12:
+        return today.year + 1, 1
+    return today.year, today.month + 1
+
+
+def _period_for(year, month):
+    """Return (period_start, period_end) for the first/last day of ``year``-``month``."""
+    period_start = date(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    period_end = date(year, month, last_day)
     return period_start, period_end
+
+
+def _resolve_period(request):
+    """
+    Derive (period_start, period_end) from request-supplied ``month`` and ``year``.
+
+    Source of params (B-2):
+      - POST generate endpoint → request.data (JSON body)
+      - GET list endpoint      → request.query_params
+
+    Default (D-03/D-07): when both are absent, bill-ahead the NEXT calendar month
+    relative to date.today() (handles December → January rollover).
+
+    Validation (T-24-01): month must be 1–12 and year a 4-digit int. On any invalid
+    or missing input the endpoint stays tolerant and falls back to next month rather
+    than raising — no crash, no arbitrary period.
+    """
+    # GET requests carry params in the query string; everything else (POST) in the body.
+    source = request.query_params if request.method == 'GET' else request.data
+
+    raw_month = source.get('month')
+    raw_year = source.get('year')
+
+    today = date.today()
+    default_year, default_month = _next_month(today)
+
+    # Both absent → default to next month.
+    if raw_month is None and raw_year is None:
+        return _period_for(default_year, default_month)
+
+    try:
+        month = int(raw_month)
+        year = int(raw_year)
+    except (TypeError, ValueError):
+        return _period_for(default_year, default_month)
+
+    # Validate ranges: month 1–12, year a 4-digit value.
+    if not (1 <= month <= 12) or not (1000 <= year <= 9999):
+        return _period_for(default_year, default_month)
+
+    return _period_for(year, month)
 
 
 def _serialize_invoice(invoice):
@@ -224,7 +271,7 @@ def management_pre_billing_generate(request):
     previously sent invoices are never duplicated.
     """
     school = request.user.school
-    period_start, period_end = _get_current_period()
+    period_start, period_end = _resolve_period(request)
 
     # Collect student IDs that already have an invoice this period (any status)
     existing_student_ids = set(
