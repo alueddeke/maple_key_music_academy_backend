@@ -29,7 +29,13 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from custom_auth.decorators import management_required
-from ..models import PreBillingInvoice, BillableContact, Lesson, StudentCreditAccount
+from ..models import (
+    PreBillingInvoice,
+    BillableContact,
+    Lesson,
+    StudentCreditAccount,
+    RecurringLessonsSchedule,
+)
 from ..services.helcim_client import HelcimClient, HelcimAPIError
 from ..services.email_service import PreBillingEmailService
 
@@ -273,25 +279,41 @@ def management_pre_billing_generate(request):
     school = request.user.school
     period_start, period_end = _resolve_period(request)
 
-    # Collect student IDs that already have an invoice this period (any status)
-    existing_student_ids = set(
-        PreBillingInvoice.objects.filter(
-            school=school,
-            period_start=period_start,
-        ).values_list('student_id', flat=True)
-    )
+    # Sourcing precedence (D-08): FUTURE periods project from RecurringLessonsSchedule
+    # (Lesson rows only exist after batch approval); CURRENT/PAST periods source from
+    # actual confirmed Lesson rows (existing behavior preserved).
+    today = date.today()
+    is_future = (period_start.year, period_start.month) > (today.year, today.month)
 
     generated = 0
-    skipped_existing = len(existing_student_ids)
+    skipped_existing = 0
     skipped_no_contact = 0
+    skipped_no_schedule = 0  # D-09: students with zero projected/actual lessons
+
+    # Map existing invoices for this period so drafts can be refreshed in place (D-10)
+    # while sent/adjusted invoices are left untouched.
+    existing_by_student = {
+        inv.student_id: inv
+        for inv in PreBillingInvoice.objects.filter(
+            school=school,
+            period_start=period_start,
+        )
+    }
 
     active_students = User.objects.filter(
         user_type='student',
         is_active=True,
         school=school,
-    ).exclude(id__in=existing_student_ids)
+    )
 
     for student in active_students:
+        existing = existing_by_student.get(student.id)
+
+        # D-10: sent/adjusted invoices are frozen — never touched on re-run.
+        if existing is not None and existing.status in ('sent', 'adjusted'):
+            skipped_existing += 1
+            continue
+
         # Skip students without a primary billing contact
         try:
             BillableContact.objects.get(student=student, is_primary=True)
@@ -299,20 +321,52 @@ def management_pre_billing_generate(request):
             skipped_no_contact += 1
             continue
 
-        # Compute confirmed lessons in the current period
-        lessons = Lesson.objects.filter(
-            student=student,
-            school=school,
-            status='confirmed',
-            scheduled_date__date__range=(period_start, period_end),
-        )
+        if is_future:
+            # FUTURE: project lessons from each active recurring schedule (D-04/D-08).
+            # No Lesson rows are created; the M2M stays empty and amount is computed
+            # from the projected dates. Mirrors get_scheduled_lessons_data pattern.
+            schedules = RecurringLessonsSchedule.objects.filter(
+                student=student,
+                school=school,
+                is_active=True,
+            )
+            projected_count = 0
+            gross = Decimal('0.00')
+            for sched in schedules:
+                dates = sched.generate_lessons_for_month(
+                    period_start.year, period_start.month
+                )
+                projected_count += len(dates)
+                gross += (
+                    Decimal(str(sched.student_rate))
+                    * Decimal(str(sched.duration))
+                    * len(dates)
+                )
+            has_lessons = projected_count > 0
+            lessons = None  # no real Lesson rows for future periods
+        else:
+            # CURRENT/PAST: source from actual confirmed Lesson rows (unchanged).
+            lessons = Lesson.objects.filter(
+                student=student,
+                school=school,
+                status='confirmed',
+                scheduled_date__date__range=(period_start, period_end),
+            )
+            # Gross amount: sum of student_rate × duration for each lesson
+            # Formula matches Lesson.student_cost() pattern (models.py:334-341)
+            gross = sum(
+                (
+                    Decimal(str(l.student_rate)) * Decimal(str(l.duration))
+                    for l in lessons
+                ),
+                Decimal('0.00'),
+            )
+            has_lessons = lessons.exists()
 
-        # Gross amount: sum of student_rate × duration for each lesson
-        # Formula matches Lesson.student_cost() pattern (models.py:334-341)
-        gross = sum(
-            (Decimal(str(l.student_rate)) * Decimal(str(l.duration)) for l in lessons),
-            Decimal('0.00'),
-        )
+        # D-09: no lessons projected/actual → do NOT create a $0 draft. Skip and count.
+        if not has_lessons:
+            skipped_no_schedule += 1
+            continue
 
         # Read credit balance OUTSIDE atomic per Pitfall 6
         try:
@@ -325,11 +379,9 @@ def management_pre_billing_generate(request):
 
         amount = max(Decimal('0.00'), gross - credit)
 
-        # Minimal atomic block for PreBillingInvoice creation + M2M set.
+        # Minimal atomic block for PreBillingInvoice creation/refresh + M2M set.
         # get_or_create on (student, school, period_start) is race-safe under the
-        # unique_prebilling_per_student_period constraint: a concurrent generate that
-        # already created this student's invoice returns created=False and we skip,
-        # so a double-click or parallel call can never produce duplicate invoices.
+        # unique_prebilling_per_student_period constraint.
         with transaction.atomic():
             invoice, created = PreBillingInvoice.objects.get_or_create(
                 student=student,
@@ -341,18 +393,30 @@ def management_pre_billing_generate(request):
                     'period_end': period_end,
                 },
             )
-            if not created:
+            if created:
+                if lessons is not None:
+                    invoice.lessons.set(lessons)
+                generated += 1
+            elif invoice.status == 'draft':
+                # D-10: refresh existing DRAFT to current schedule amount + lessons.
+                invoice.amount = amount
+                invoice.period_end = period_end
+                invoice.save(update_fields=['amount', 'period_end'])
+                if lessons is not None:
+                    invoice.lessons.set(lessons)
+                else:
+                    invoice.lessons.clear()
+                generated += 1
+            else:
+                # Defensive: any non-draft slipped through (race) — leave untouched.
                 skipped_existing += 1
-                continue
-            invoice.lessons.set(lessons)
-
-        generated += 1
 
     return Response(
         {
             'generated': generated,
             'skipped_existing': skipped_existing,
             'skipped_no_contact': skipped_no_contact,
+            'skipped_no_schedule': skipped_no_schedule,
             'period_start': str(period_start),
             'period_end': str(period_end),
         }
