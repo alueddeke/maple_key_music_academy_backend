@@ -3,13 +3,30 @@ Shared test fixtures and configuration for pytest.
 
 This file is automatically loaded by pytest and provides fixtures
 available to all test files.
+
+Note: Helcim env var defaults (HELM-02 Pitfall 1 fix) are set by
+helcim_test_env.py, loaded via pytest.ini addopts: -p helcim_test_env.
+That plugin fires before pytest-django calls django.setup(), ensuring
+BillingConfig.ready() does not raise ImproperlyConfigured during collection.
+
+Phase 19 addition: HELCIM_SUBDOMAIN also set here via pytest_configure hook
+(conftest.py pytest_configure fires before django.setup(), same as the plugin).
 """
 
+import os
 import pytest
 from decimal import Decimal
 from django.contrib.auth import get_user_model
 from billing.models import School, SchoolSettings
 from rest_framework.test import APIClient
+
+
+def pytest_configure(config):
+    """Set Helcim env vars before Django boots (BillingConfig.ready() guard)."""
+    os.environ.setdefault('HELCIM_API_TOKEN', 'test-token')
+    os.environ.setdefault('HELCIM_TERMINAL_ID', 'test-terminal')
+    os.environ.setdefault('HELCIM_WEBHOOK_SECRET', 'dGVzdC1zZWNyZXQ=')
+    os.environ.setdefault('HELCIM_SUBDOMAIN', 'testschool')
 
 User = get_user_model()
 

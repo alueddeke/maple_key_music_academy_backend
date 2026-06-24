@@ -2,12 +2,14 @@
 Helcim CSV Generator Service
 
 Generates CSV files in Helcim's required format for student billing.
-Each row represents one student invoice.
+Each row represents one lesson item within a student invoice (one row per BatchLessonItem with charge > 0).
 """
 
 import csv
+from decimal import Decimal
 from io import StringIO
 from datetime import datetime
+from django.db.models import prefetch_related_objects
 from django.http import HttpResponse
 
 
@@ -20,8 +22,18 @@ def generate_helcim_csv(student_invoices, school_settings):
         school_settings: SchoolSettings object for payment terms
 
     Returns:
-        HttpResponse with CSV file for download
+        HttpResponse with CSV file for download. The response contains one row per
+        BatchLessonItem (with charge > 0) per invoice. All lesson rows for a given
+        StudentInvoice share the same ORDER_NUMBER. Lessons where
+        calculate_student_charge() returns Decimal('0.00') (trial + cancelled) are
+        excluded.
     """
+    # Prefetch lesson_items to avoid N+1 queries on invoice.lesson_items.all()
+    # Uses prefetch_related_objects() (not QuerySet.prefetch_related) because
+    # the caller passes a plain Python list, not a QuerySet.
+    if student_invoices:
+        prefetch_related_objects(student_invoices, 'lesson_items')
+
     # Create CSV in memory
     output = StringIO()
     writer = csv.writer(output)
@@ -40,52 +52,66 @@ def generate_helcim_csv(student_invoices, school_settings):
     ]
     writer.writerow(headers)
 
-    # Write data rows
+    # Write data rows — one row per BatchLessonItem (charge > 0) per invoice
     for invoice in student_invoices:
-        # Format date: MM/DD/YYYY HH:MM
+        # Format date once per invoice (shared across all lesson rows)
         date_issued = invoice.generated_at.strftime('%m/%d/%Y %H:%M')
 
-        row = [
-            # Order identification
-            invoice.invoice_number,  # ORDER_NUMBER
-            date_issued,  # DATE_ISSUED
-            '',  # DATE_PAID (blank - not paid yet)
-            'CAD',  # CURRENCY
-            'DUE',  # STATUS
-            school_settings.payment_terms,  # PAYMENT_TERMS
+        for item in invoice.lesson_items.all():
+            # Compute charge once — avoids double-call if method signature ever changes
+            charge = item.calculate_student_charge()
 
-            # Customer
-            invoice.student.id,  # CUSTOMER_CODE
-            f'{invoice.amount:.2f}',  # AMOUNT
+            # Skip zero-charge lessons (trial and cancelled)
+            if charge == Decimal('0.00'):
+                continue
 
-            # Discounts/Shipping/Tax
-            '0.00',  # AMOUNT_DISCOUNT
-            '0.00',  # AMOUNT_SHIPPING
-            '0.00',  # AMOUNT_TAX (tax included in amount)
+            # COMMENTS: lesson date formatted as 'Jan 15, 2026' (%-d strips leading zero on Linux)
+            comments = item.scheduled_date.strftime('%b %-d, %Y')
 
-            # Additional details
-            '',  # COMMENTS (optional)
-            '',  # DISCOUNT_DETAILS
-            '',  # TAX_DETAILS (blank since tax included)
-            '',  # PURCHASE_ORDER_NUMBER
+            # AMOUNT: per-lesson charge formatted to 2 decimal places
+            amount = f'{charge:.2f}'
 
-            # Billing address
-            invoice.billing_contact_name,  # BILLING_CONTACT_NAME
-            '',  # BILLING_BUSINESS_NAME (blank for individual students)
-            invoice.billing_street_address,  # BILLING_STREET1
-            '',  # BILLING_STREET2 (not used)
-            invoice.billing_city,  # BILLING_CITY
-            invoice.billing_province,  # BILLING_PROVINCE
-            'Canada',  # BILLING_COUNTRY
-            invoice.billing_postal_code,  # BILLING_POSTALCODE
-            invoice.billing_phone,  # BILLING_PHONE
-            '',  # BILLING_FAX (not used)
-            invoice.billing_email,  # BILLING_EMAIL
+            row = [
+                # Order identification
+                invoice.invoice_number,  # ORDER_NUMBER — shared across all lessons for this invoice
+                date_issued,  # DATE_ISSUED
+                '',  # DATE_PAID (blank - not paid yet)
+                'CAD',  # CURRENCY
+                'DUE',  # STATUS
+                school_settings.payment_terms,  # PAYMENT_TERMS
 
-            # Shipping address (all blank for digital services)
-            '', '', '', '', '', '', '', '', '', '', ''
-        ]
-        writer.writerow(row)
+                # Customer
+                invoice.student.id,  # CUSTOMER_CODE
+                amount,  # AMOUNT — per-lesson charge
+
+                # Discounts/Shipping/Tax
+                '0.00',  # AMOUNT_DISCOUNT
+                '0.00',  # AMOUNT_SHIPPING
+                '0.00',  # AMOUNT_TAX (tax included in amount)
+
+                # Additional details
+                comments,  # COMMENTS — lesson date (e.g. 'Jan 15, 2026')
+                '',  # DISCOUNT_DETAILS
+                '',  # TAX_DETAILS (blank since tax included)
+                '',  # PURCHASE_ORDER_NUMBER
+
+                # Billing address — copied from StudentInvoice to every lesson row
+                invoice.billing_contact_name,  # BILLING_CONTACT_NAME
+                '',  # BILLING_BUSINESS_NAME (blank for individual students)
+                invoice.billing_street_address,  # BILLING_STREET1
+                '',  # BILLING_STREET2 (not used)
+                invoice.billing_city,  # BILLING_CITY
+                invoice.billing_province,  # BILLING_PROVINCE
+                'Canada',  # BILLING_COUNTRY
+                invoice.billing_postal_code,  # BILLING_POSTALCODE
+                invoice.billing_phone,  # BILLING_PHONE
+                '',  # BILLING_FAX (not used)
+                invoice.billing_email,  # BILLING_EMAIL
+
+                # Shipping address (all blank for digital services)
+                '', '', '', '', '', '', '', '', '', '', ''
+            ]
+            writer.writerow(row)
 
     # Create HTTP response
     output.seek(0)
@@ -93,8 +119,7 @@ def generate_helcim_csv(student_invoices, school_settings):
 
     # Generate filename with batch info (if available)
     if student_invoices:
-        first_invoice = student_invoices[0] if hasattr(student_invoices, '__getitem__') else student_invoices.first()
-        batch = first_invoice.batch
+        batch = student_invoices[0].batch
         filename = f'helcim_invoices_{batch.batch_number}.csv'
     else:
         filename = f'helcim_invoices_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'

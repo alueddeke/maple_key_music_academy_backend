@@ -83,6 +83,7 @@ urlpatterns = [
     path('management/students/<int:student_id>/assign-teachers/', views.assign_teachers_to_student, name='assign_teachers_to_student'),
     path('management/students/<int:student_id>/unassign-teacher/<int:teacher_id>/', views.unassign_teacher_from_student, name='unassign_teacher_from_student'),
     path('management/teachers/<int:teacher_id>/students/', views.teacher_students, name='teacher_students'),
+    path('management/teachers/<int:teacher_id>/invoices/', views.management_teacher_invoices, name='management_teacher_invoices'),
 
     # Teacher management endpoints (update/delete only, no create)
     path('management/teachers/<int:pk>/update/', views.management_update_teacher, name='management_update_teacher'),
@@ -98,13 +99,44 @@ urlpatterns = [
     path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
     path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
     path('teacher/batches/<int:batch_id>/paystub/', views.download_paystub, name='download_paystub'),
+    path('teacher/batches/<int:batch_id>/adjustment/<int:item_id>/', views.teacher_batch_adjustment_item, name='teacher_batch_adjustment_item'),
 
     # Management Batch Approval (Phase 7)
     path('management/batches/pending/', views.management_pending_batches, name='management_pending_batches'),
     path('management/batches/approved/', views.management_approved_batches, name='management_approved_batches'),
     path('management/batches/rejected/', views.management_rejected_batches, name='management_rejected_batches'),
+    # Phase 22: Month-End Adjustments
+    # NOTE: month-end-queue/ MUST appear before <int:batch_id>/ — Django URL resolver
+    # would try to coerce "month-end-queue" to int and raise ValueError otherwise (Pitfall 5).
+    path('management/batches/month-end-queue/', views.management_month_end_queue, name='management_month_end_queue'),
     path('management/batches/<int:batch_id>/', views.management_batch_detail, name='management_batch_detail'),
     path('management/batches/<int:batch_id>/lessons/<int:item_id>/', views.management_edit_lesson_notes, name='management_edit_lesson_notes'),
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
+    path('management/batches/<int:batch_id>/csv/', views.management_batch_csv, name='management_batch_csv'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
+    path('management/batches/<int:batch_id>/delete/', views.management_delete_rejected_batch, name='management_delete_rejected_batch'),
+    path('management/batches/<int:batch_id>/generate-teacher-invoice/', views.management_generate_teacher_invoice, name='management_generate_teacher_invoice'),
+
+    # HELM-03: Helcim payment webhook — no 'helcim' in path per D-10 to prevent URL enumeration of payment processor
+    path('payment-callback/', views.payment_callback, name='payment_callback'),
+
+    # Phase 19: Pre-Billing Invoice endpoints
+    # CRITICAL: send-all/ MUST appear before <int:invoice_id>/ routes — Django URL resolver
+    # would try to coerce "send-all" to int and raise ValueError otherwise.
+    path('management/pre-billing/generate/', views.management_pre_billing_generate, name='management_pre_billing_generate'),
+    path('management/pre-billing/send-all/', views.management_pre_billing_send_all, name='management_pre_billing_send_all'),
+    path('management/pre-billing/', views.management_pre_billing_list, name='management_pre_billing_list'),
+    path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
+    path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),
+    path('management/pre-billing/<int:invoice_id>/remove-lesson/', views.management_pre_billing_remove_lesson, name='management_pre_billing_remove_lesson'),
+
+    # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
+    # NOTE: management/invoices/<int:pk>/ (PATCH) is separate from the existing
+    # management/invoices/<int:pk>/update/ (PUT) — different method + different URL path.
+    path('management/dashboard/batches/', views.management_dashboard_batches, name='management_dashboard_batches'),
+    path('management/dashboard/<int:batch_id>/', views.management_dashboard_data, name='management_dashboard_data'),
+    path('management/invoices/<int:pk>/', views.management_patch_invoice, name='management_patch_invoice'),
+    path('management/expenses/<int:batch_id>/', views.management_upsert_expenses, name='management_upsert_expenses'),
+    path('management/expense-items/<int:batch_id>/', views.management_expense_items, name='management_expense_items'),
+    path('management/expense-items/delete/<int:item_id>/', views.management_expense_item_delete, name='management_expense_item_delete'),
 ]

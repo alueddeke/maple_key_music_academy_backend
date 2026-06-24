@@ -13,10 +13,63 @@ from decimal import Decimal
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from billing.models import GlobalRateSettings, Lesson, Invoice
+from billing.models import GlobalRateSettings, Lesson, Invoice, MonthlyInvoiceBatch
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
+
+
+@pytest.mark.django_db
+class TestDeleteRejectedBatch:
+    """management_delete_rejected_batch — only rejected, never-invoiced batches may be deleted."""
+
+    def _batch(self, teacher, **kwargs):
+        defaults = dict(
+            teacher=teacher, school=teacher.school, month=7, year=2026, status='draft'
+        )
+        defaults.update(kwargs)
+        return MonthlyInvoiceBatch.objects.create(**defaults)
+
+    def test_delete_rejected_batch_succeeds(self, authenticated_management_client, teacher_user):
+        batch = self._batch(teacher_user, status='draft', rejection_reason='Fix dates')
+        url = reverse('management_delete_rejected_batch', args=[batch.id])
+        response = authenticated_management_client.delete(url)
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        assert not MonthlyInvoiceBatch.objects.filter(id=batch.id).exists()
+
+    def test_delete_approved_batch_blocked(self, authenticated_management_client, teacher_user):
+        batch = self._batch(teacher_user, status='approved')
+        url = reverse('management_delete_rejected_batch', args=[batch.id])
+        response = authenticated_management_client.delete(url)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert MonthlyInvoiceBatch.objects.filter(id=batch.id).exists()
+
+    def test_delete_plain_draft_blocked(self, authenticated_management_client, teacher_user):
+        # Draft with no rejection_reason is not a rejected batch — must not delete.
+        batch = self._batch(teacher_user, status='draft', rejection_reason='')
+        url = reverse('management_delete_rejected_batch', args=[batch.id])
+        response = authenticated_management_client.delete(url)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert MonthlyInvoiceBatch.objects.filter(id=batch.id).exists()
+
+    def test_delete_as_teacher_forbidden(self, authenticated_teacher_client, teacher_user):
+        batch = self._batch(teacher_user, status='draft', rejection_reason='Fix dates')
+        url = reverse('management_delete_rejected_batch', args=[batch.id])
+        response = authenticated_teacher_client.delete(url)
+        assert response.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+        assert MonthlyInvoiceBatch.objects.filter(id=batch.id).exists()
+
+    def test_rejected_list_excludes_plain_drafts(self, authenticated_management_client, teacher_user):
+        """The Rejected tab must list only genuinely-rejected drafts (non-empty
+        rejection_reason), not every fresh draft — and every listed batch is deletable."""
+        rejected = self._batch(teacher_user, month=5, status='draft', rejection_reason='Fix dates')
+        self._batch(teacher_user, month=6, status='draft', rejection_reason='')  # plain draft
+
+        url = reverse('management_rejected_batches')
+        response = authenticated_management_client.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        ids = [b['id'] for b in response.data]
+        assert ids == [rejected.id]
 
 
 @pytest.fixture

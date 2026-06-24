@@ -46,7 +46,20 @@ from .management import (
     management_batch_detail,
     management_edit_lesson_notes,
     management_approve_batch,
+    management_batch_csv,
     management_reject_batch,
+    management_delete_rejected_batch,
+    # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
+    management_dashboard_batches,
+    management_dashboard_data,
+    management_teacher_invoices,
+    management_patch_invoice,
+    management_upsert_expenses,
+    management_expense_items,
+    management_expense_item_delete,
+    # Phase 22: Month-End Adjustments
+    management_month_end_queue,
+    management_generate_teacher_invoice,
 )
 
 from .teacher import (
@@ -61,6 +74,8 @@ from .teacher import (
     batch_lesson_item,
     batch_submit,
     download_paystub,
+    # Phase 22: Month-End Adjustments
+    teacher_batch_adjustment_item,
 )
 
 from .lessons import (
@@ -79,4 +94,17 @@ from .students import (
 from .invitation import (
     validate_invitation_token,
     setup_account_with_invitation,
+)
+
+from .webhooks import (
+    payment_callback,
+)
+
+from .pre_billing import (
+    management_pre_billing_generate,
+    management_pre_billing_list,
+    management_pre_billing_detail,
+    management_pre_billing_send,
+    management_pre_billing_send_all,
+    management_pre_billing_remove_lesson,
 )

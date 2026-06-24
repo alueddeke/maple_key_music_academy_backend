@@ -1,5 +1,7 @@
+from decimal import Decimal
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models, transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from simple_history.models import HistoricalRecords
@@ -223,6 +225,14 @@ class BillableContact(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Helcim integration — set on first invoice send; never changed (PCI-safe: no card data)
+    helcim_customer_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="Helcim customer ID — set on first invoice send, never changed. PCI-safe: no card data.",
+    )
+
     # Audit logging
     history = HistoricalRecords()
 
@@ -255,6 +265,8 @@ class Lesson(models.Model):
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
         ('trial', 'Trial'),
+        ('forfeited', 'Forfeited'),
+        ('waived', 'Waived'),
     ]
 
     LESSON_TYPES = [
@@ -285,16 +297,6 @@ class Lesson(models.Model):
     status = models.CharField(max_length=20, choices=LESSON_STATUS, default='requested')
 
     # Cancellation tracking
-    cancelled_by_type = models.CharField(
-        max_length=20,
-        choices=[
-            ('teacher', 'Teacher Cancelled'),
-            ('student', 'Student Cancelled'),
-        ],
-        blank=True,
-        null=True,
-        help_text="Who cancelled the lesson (affects billing)"
-    )
     cancellation_reason = models.TextField(
         blank=True,
         help_text="Optional reason for cancellation"
@@ -575,6 +577,10 @@ class Invoice(models.Model):
                                       limit_choices_to={'user_type': 'management'})
     last_edited_at = models.DateTimeField(null=True, blank=True)
 
+    # Phase 21 payroll tracking (D-08)
+    date_paid = models.DateField(null=True, blank=True)
+    reference_number = models.CharField(max_length=100, null=True, blank=True)
+
     # Audit logging
     history = HistoricalRecords()
 
@@ -618,7 +624,7 @@ class Invoice(models.Model):
 
             last_invoice = Invoice.objects.filter(
                 invoice_number__startswith=prefix
-            ).order_by('-invoice_number').first()
+            ).order_by('-id').first()  # order by id (monotonic) to avoid lexicographic sort on CharField (WR-03)
 
             if last_invoice and last_invoice.invoice_number:
                 try:
@@ -794,6 +800,8 @@ class MonthlyInvoiceBatch(models.Model):
             student__is_active=True  # Only include schedules for active students
         )
 
+        from datetime import date as _date
+        today = _date.today()
         lessons_data = []
 
         for schedule in schedules:
@@ -801,7 +809,10 @@ class MonthlyInvoiceBatch(models.Model):
             dates = schedule.generate_lessons_for_month(self.year, self.month)
 
             for lesson_date in dates:
-                lessons_data.append({                    
+                # Future-dated lessons default to 'confirmed'; past/today default to 'completed'.
+                # Both are treated as billable at approval — the distinction is for teacher UX only.
+                default_status = 'confirmed' if lesson_date > today else 'completed'
+                lessons_data.append({
                     'recurring_schedule': schedule,
                     'scheduled_date': lesson_date,
                     'start_time': schedule.start_time,
@@ -811,9 +822,7 @@ class MonthlyInvoiceBatch(models.Model):
                     'lesson_type': schedule.lesson_type,
                     'teacher_rate': schedule.teacher_rate,
                     'student_rate': schedule.student_rate,
-                    # Default status (teacher can change via UI)
-                    'status': 'completed',
-                    'cancelled_by_type': None,
+                    'status': default_status,
                     'cancellation_reason': '',})
         return lessons_data
 
@@ -839,7 +848,6 @@ class BatchLessonItem(models.Model):
 
     # status (teacher marks this)
     status = models.CharField(max_length=20, choices=Lesson.LESSON_STATUS, default='completed')
-    cancelled_by_type = models.CharField(max_length=20, choices=[('teacher', 'Teacher'), ('student', 'Student')], blank=True, null=True)
     cancellation_reason = models.TextField(blank=True)
 
     # Notes
@@ -882,10 +890,11 @@ class BatchLessonItem(models.Model):
         return f"{self.batch.batch_number} | {self.scheduled_date} | {self.student.get_full_name()}"
 
     def calculate_teacher_payment(self):
-        """Calculate what teacher gets paid for this lesson"""
+        """Calculate what teacher gets paid for this lesson.
+        Returns $0.00 for cancelled and waived lessons (D-06 Phase 20)."""
         from decimal import Decimal
 
-        if self.status == 'cancelled':
+        if self.status in ('cancelled', 'waived'):
             return Decimal('0.00')
 
         # Trial lessons: teacher is paid at their normal rate (student is not charged)
@@ -895,8 +904,9 @@ class BatchLessonItem(models.Model):
         """Calculate what student is billed for this lesson"""
         from decimal import Decimal
 
-        # Cancelled or trial: student not charged
-        if self.status in ('cancelled', 'trial'):
+        # Cancelled, trial, or waived: student not charged
+        # forfeited: student IS charged (credit consumed by Phase 20 reconciliation)
+        if self.status in ('cancelled', 'trial', 'waived'):
             return Decimal('0.00')
 
         return self.student_rate * self.duration
@@ -947,6 +957,20 @@ class StudentInvoice(models.Model):
     # Total amount to charge student (sum of all completed lesson charges)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
 
+    # Phase 20 (D-12): credit reconciliation fields
+    credit_applied = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Rollover credit applied to reduce this invoice. StudentInvoice.amount (gross) minus PreBillingInvoice.amount.",
+    )
+    amount_after_credit = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Amount actually charged to student = PreBillingInvoice.amount for this period. Falls back to StudentInvoice.amount if no PreBillingInvoice exists.",
+    )
+
     # Lesson items included in this invoice (completed lessons only)
     lesson_items = models.ManyToManyField(
         BatchLessonItem,
@@ -996,7 +1020,7 @@ class StudentInvoice(models.Model):
 
                 last_invoice = StudentInvoice.objects.filter(
                     invoice_number__startswith=prefix
-                ).order_by('-invoice_number').first()
+                ).order_by('-id').first()  # order by id (monotonic) to avoid lexicographic sort on CharField (WR-03)
 
                 if last_invoice:
                     try:
@@ -1031,6 +1055,152 @@ class StudentInvoice(models.Model):
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)
+
+
+class StudentCreditAccount(models.Model):
+    """
+    Per-student credit ledger for pre-billing payment system.
+    One account per student per school. Balance enforced >= 0 at DB level.
+    Phase 20 reads balance inside select_for_update() + transaction.atomic().
+    """
+    student = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='credit_accounts',
+        limit_choices_to={'user_type': 'student'},
+    )
+    school = models.ForeignKey(
+        School,
+        on_delete=models.PROTECT,
+        related_name='student_credit_accounts',
+        help_text="School this credit account belongs to",
+    )
+    balance = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Current credit balance in dollars. Always >= 0 (DB enforced).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        verbose_name = 'Student Credit Account'
+        verbose_name_plural = 'Student Credit Accounts'
+        unique_together = [['student', 'school']]
+        constraints = [
+            models.CheckConstraint(
+                check=Q(balance__gte=0),
+                name='credit_account_balance_non_negative',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} ({self.school.name}) - ${self.balance}"
+
+
+class CreditTransaction(models.Model):
+    """
+    Immutable ledger entry for student credit account movements.
+    Amount is ALWAYS positive; direction is implied by type:
+      pre_billing_payment → balance += amount
+      forfeited           → balance -= amount
+      waived_rollover     → balance += amount
+    Never use signed amounts (D-09: guards against sign-flip bugs).
+    """
+    TRANSACTION_TYPES = [
+        ('pre_billing_payment', 'Pre-Billing Payment'),
+        ('forfeited', 'Forfeited'),
+        ('waived_rollover', 'Waived Rollover'),
+    ]
+
+    account = models.ForeignKey(
+        StudentCreditAccount,
+        on_delete=models.PROTECT,
+        related_name='transactions',
+    )
+    school = models.ForeignKey(
+        School,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Denormalized for school-isolation queries — do not remove",
+    )
+    type = models.CharField(max_length=30, choices=TRANSACTION_TYPES)
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        help_text="Always positive. Direction determined by type field.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Credit Transaction'
+        verbose_name_plural = 'Credit Transactions'
+        constraints = [
+            models.CheckConstraint(
+                check=Q(amount__gt=0),
+                name='credit_transaction_amount_positive',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.get_type_display()} ${self.amount} — {self.account.student.get_full_name()}"
+
+
+class HelcimWebhookEvent(models.Model):
+    """
+    Records a single Helcim payment webhook receipt.
+
+    helcim_transaction_id is the idempotency key (unique constraint) — duplicate
+    POSTs from Helcim retry mechanism (24 h+) are safely no-ops via get_or_create.
+
+    school FK is null at receipt time (unauthenticated webhook, no user context).
+    Phase 20 sets school when the invoice is resolved (Pitfall 2 / RESEARCH.md).
+    invoice_id is a plain CharField — PreBillingInvoice does not exist until Phase 19 (D-16).
+    """
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='helcim_webhook_events',
+        help_text="Set by Phase 20 credit reconciliation. Null until invoice resolved.",
+    )
+    helcim_transaction_id = models.CharField(
+        max_length=100,
+        unique=True,
+        help_text="Idempotency key — unique per Helcim transaction. Duplicate POSTs are no-ops.",
+    )
+    raw_payload = models.JSONField(
+        help_text="Full webhook body stored for debugging and audit. PCI-safe: Helcim sends only id/type, no card data.",
+    )
+    invoice_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="invoiceNumber from secondary GET call in Plan 03. Blank until secondary GET completes.",
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Payment amount. Always use Decimal(str(value)) when converting from Helcim JSON.",
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-received_at']
+        verbose_name = 'Helcim Webhook Event'
+        verbose_name_plural = 'Helcim Webhook Events'
+
+    def __str__(self):
+        return f"HelcimWebhookEvent #{self.helcim_transaction_id} — {self.received_at}"
 
 
 class ApprovedEmail(models.Model):
@@ -1250,3 +1420,137 @@ class InvoiceRecipientEmail(models.Model):
 
     def __str__(self):
         return self.email
+
+
+class PreBillingInvoice(models.Model):
+    """
+    Pre-billing invoice sent to a parent/guardian before Helcim charges.
+
+    Tracks the full lifecycle: draft → sent → adjusted → paid.
+    Locks the amount at draft generation (D-11). Status transitions are
+    audited via HistoricalRecords. No card data stored — only helcim_invoice_id
+    and payment_token (the Helcim hosted-payment URL token, not a PAN).
+
+    Phase 19: generate + send flow.
+    Phase 20: paid transition via webhook reconciliation.
+    """
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('sent', 'Sent'),
+        ('adjusted', 'Adjusted'),
+        ('paid', 'Paid'),
+    ]
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='pre_billing_invoices',
+    )
+    student = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='pre_billing_invoices',
+        limit_choices_to={'user_type': 'student'},
+    )
+    lessons = models.ManyToManyField(
+        'Lesson',
+        related_name='pre_billing_invoices',
+        blank=True,
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='draft',
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Invoice amount locked at draft generation. Floor at 0 enforced in view layer (D-05).",
+    )
+    period_start = models.DateField()
+    period_end = models.DateField()
+    helcim_invoice_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Helcim invoice ID — populated after send (BILL-07). PCI-safe: no card data.",
+    )
+    payment_token = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Raw Helcim hosted-payment token (not the full URL). URL built as: https://{HELCIM_SUBDOMAIN}.myhelcim.com/order/?token={payment_token}",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Pre-Billing Invoice'
+        verbose_name_plural = 'Pre-Billing Invoices'
+        constraints = [
+            # One pre-billing invoice per student per period — DB-level guard against
+            # duplicate invoices from a double-clicked or concurrent generate call.
+            models.UniqueConstraint(
+                fields=['student', 'school', 'period_start'],
+                name='unique_prebilling_per_student_period',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} — {self.period_start:%B %Y} ({self.get_status_display()})"
+
+
+class SchoolMonthlyExpenses(models.Model):
+    """Monthly operating expenses for a school, used in billing dashboard summary cards (Phase 21 D-10)."""
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='monthly_expenses'
+    )
+    period_start = models.DateField()
+    period_end = models.DateField()
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        unique_together = ['school', 'period_start', 'period_end']
+
+    def __str__(self):
+        return f"{self.school} expenses {self.period_start} – {self.period_end}: ${self.amount}"
+
+
+class SchoolExpenseItem(models.Model):
+    """Individual expense line item for a billing period (Phase 21)."""
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='expense_items'
+    )
+    period_start = models.DateField()
+    period_end = models.DateField()
+    title = models.CharField(max_length=200)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    notes = models.TextField(blank=True, default='')
+    is_recurring = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.title}: ${self.amount} ({self.period_start})"

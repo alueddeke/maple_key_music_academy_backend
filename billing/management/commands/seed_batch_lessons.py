@@ -7,7 +7,7 @@ Usage:
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from decimal import Decimal
-from billing.models import User, Student, MonthlyInvoiceBatch, BatchLessonItem
+from billing.models import User, MonthlyInvoiceBatch, BatchLessonItem
 import random
 from datetime import datetime, timedelta
 
@@ -55,19 +55,24 @@ class Command(BaseCommand):
             return
 
         # Get teacher's students
-        students = Student.objects.filter(assigned_teachers=teacher, is_active=True)
+        students = User.objects.filter(
+            assigned_teachers=teacher,
+            user_type='student',
+            is_active=True,
+        )
 
         if not students.exists():
-            self.stdout.write(self.style.ERROR(f'No students assigned to teacher: {teacher.name}'))
+            self.stdout.write(self.style.ERROR(f'No students assigned to teacher: {teacher.get_full_name()}'))
             self.stdout.write('Run: python manage.py seed_teacher_students first')
             return
 
-        self.stdout.write(f'Creating batch for {teacher.name} - {month}/{year}')
+        self.stdout.write(f'Creating batch for {teacher.get_full_name()} - {month}/{year}')
         self.stdout.write(f'Found {students.count()} students')
 
         # Create or get batch
         batch, created = MonthlyInvoiceBatch.objects.get_or_create(
             teacher=teacher,
+            school=teacher.school,
             month=month,
             year=year,
             defaults={
@@ -115,9 +120,8 @@ class Command(BaseCommand):
                     teacher_rate = teacher_hourly_rate
                     student_rate = inperson_student_rate
 
-                # Calculate payment based on duration
-                teacher_payment = (teacher_rate * Decimal(duration) / Decimal('60')).quantize(Decimal('0.01'))
-                student_charge = (student_rate * Decimal(duration) / Decimal('60')).quantize(Decimal('0.01'))
+                # Convert duration from minutes to hours (field stores hours as Decimal)
+                duration_hours = Decimal(duration) / Decimal('60')
 
                 # Random status (mostly completed, some pending)
                 status = random.choices(
@@ -131,16 +135,13 @@ class Command(BaseCommand):
                     student=student,
                     scheduled_date=date.date(),
                     start_time=time,
-                    duration=duration,
+                    duration=duration_hours,
                     lesson_type=lesson_type,
                     teacher_rate=teacher_rate,
                     student_rate=student_rate,
-                    teacher_payment=teacher_payment,
-                    student_charge=student_charge,
                     status=status,
-                    cancelled_by_type='teacher' if status == 'cancelled' else None,
-                    cancellation_reason='Student was sick' if status == 'cancelled' else None,
-                    teacher_notes=f'Lesson {lesson_num + 1} - Worked on scales' if random.random() > 0.5 else None,
+                    cancellation_reason='Student was sick' if status == 'cancelled' else '',
+                    teacher_notes=f'Lesson {lesson_num + 1} - Worked on scales' if random.random() > 0.5 else '',
                     is_one_off=False,
                 )
 
@@ -149,9 +150,19 @@ class Command(BaseCommand):
         # Refresh batch to recalculate totals
         batch.refresh_from_db()
 
-        self.stdout.write(self.style.SUCCESS(f'\n✅ Done! Created batch with {lesson_count} lessons'))
+        # Compute totals via model methods (not serializer fields)
+        total_teacher = sum(
+            item.calculate_teacher_payment()
+            for item in batch.lesson_items.all()
+        )
+        total_student = sum(
+            item.calculate_student_charge()
+            for item in batch.lesson_items.all()
+        )
+
+        self.stdout.write(self.style.SUCCESS(f'\nDone! Created batch with {lesson_count} lessons'))
         self.stdout.write(f'Batch Number: {batch.batch_number}')
         self.stdout.write(f'Status: {batch.status}')
-        self.stdout.write(f'Total Teacher Payment: ${batch.total_teacher_payment}')
-        self.stdout.write(f'Total Student Charges: ${batch.total_student_charges}')
+        self.stdout.write(f'Total Teacher Payment: ${total_teacher}')
+        self.stdout.write(f'Total Student Charges: ${total_student}')
         self.stdout.write(f'\nView in UI: /invoice (login as {teacher_email})')

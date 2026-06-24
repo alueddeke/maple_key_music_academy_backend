@@ -15,6 +15,7 @@ from custom_auth.decorators import (
 )
 import logging
 import uuid
+from datetime import date
 from django.db import transaction
 from django.core.exceptions import FieldDoesNotExist
 
@@ -95,6 +96,24 @@ def teacher_invoice_stats(request):
         status='paid'
     ).count()
 
+    # Approved batches still awaiting a teacher invoice = the open "mark exceptions"
+    # window (teacher can adjust lesson statuses before management finalizes payroll).
+    adjustments_open_qs = MonthlyInvoiceBatch.objects.filter(
+        teacher=teacher,
+        school=teacher.school,
+        status='approved',
+        invoice__isnull=True,
+    ).order_by('-year', '-month')
+    adjustments_open = [
+        {
+            'id': b.id,
+            'month': b.month,
+            'year': b.year,
+            'batch_number': b.batch_number,
+        }
+        for b in adjustments_open_qs
+    ]
+
     # Get most recent rejected invoices
     recent_rejected = Invoice.objects.filter(
         invoice_type='teacher_payment',
@@ -120,6 +139,8 @@ def teacher_invoice_stats(request):
         'approved_count': approved_count,
         'paid_count': paid_count,
         'recent_rejected': rejected_invoices,
+        'adjustments_open_count': adjustments_open_qs.count(),
+        'adjustments_open': adjustments_open,
     })
 
 @api_view(['POST'])
@@ -468,7 +489,7 @@ def teacher_assigned_students(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@teacher_or_management_required
 def teacher_monthly_batches(request):
     """
     This function handles two main jobs:
@@ -584,7 +605,7 @@ def teacher_monthly_batches(request):
 
 
 @api_view(['GET', 'PUT', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@teacher_or_management_required
 def batch_detail(request, batch_id):
     """
     GET: Retrieve batch with all lesson items
@@ -630,7 +651,7 @@ def batch_detail(request, batch_id):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def batch_add_lesson(request, batch_id):
     """Add a one-off lesson to a draft batch"""
     try:
@@ -654,14 +675,24 @@ def batch_add_lesson(request, batch_id):
     # Auto-populate rates based on lesson type if not provided
     if 'teacher_rate' not in data or 'student_rate' not in data:
         lesson_type = data.get('lesson_type', 'in_person')
-        global_settings = GlobalRateSettings.get_settings()
-
-        if lesson_type == 'online':
-            data['teacher_rate'] = global_settings.online_teacher_rate
-            data['student_rate'] = global_settings.online_student_rate
-        else:  # in_person
-            data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
-            data['student_rate'] = global_settings.inperson_student_rate
+        try:
+            from billing.models import SchoolSettings
+            school_settings = SchoolSettings.get_settings_for_school(request.user.school)
+            if lesson_type == 'online':
+                data['teacher_rate'] = school_settings.online_teacher_rate
+                data['student_rate'] = school_settings.online_student_rate
+            else:  # in_person
+                data['teacher_rate'] = request.user.hourly_rate or school_settings.inperson_student_rate
+                data['student_rate'] = school_settings.inperson_student_rate
+        except Exception:
+            # Fallback to legacy GlobalRateSettings for backward compatibility
+            global_settings = GlobalRateSettings.get_settings()
+            if lesson_type == 'online':
+                data['teacher_rate'] = global_settings.online_teacher_rate
+                data['student_rate'] = global_settings.online_student_rate
+            else:  # in_person
+                data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
+                data['student_rate'] = global_settings.inperson_student_rate
 
     # Auto-default trial: only if student has no Lesson records AND no BatchLessonItems
     student_id = data.get('student_id') or data.get('student')
@@ -683,7 +714,7 @@ def batch_add_lesson(request, batch_id):
 
 
 @api_view(['PUT', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def batch_lesson_item(request, batch_id, item_id):
     """
     PUT: Update a lesson item's status/notes (teacher marks completed/cancelled)
@@ -706,7 +737,7 @@ def batch_lesson_item(request, batch_id, item_id):
         )
 
     if request.method == 'PUT':
-        allowed_fields = ['status', 'cancelled_by_type', 'cancellation_reason', 'teacher_notes']
+        allowed_fields = ['status', 'cancellation_reason', 'teacher_notes']
         if item.is_one_off:
             allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
@@ -727,8 +758,74 @@ def batch_lesson_item(request, batch_id, item_id):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# Phase 22: Month-End Adjustments — teacher marks exceptions on approved batches
+@api_view(['PATCH'])
+@teacher_required
+def teacher_batch_adjustment_item(request, batch_id, item_id):
+    """
+    PATCH: Allow teacher to mark lesson exceptions (waived/forfeited/cancelled)
+    on an already-approved batch that has not yet had an Invoice generated.
+
+    Guards:
+      - Batch must be 'approved' (400 if not)
+      - Batch must not be locked (batch.invoice_id is not None → 400)
+      - Future lessons (scheduled_date > today) may not be marked completed/forfeited (D-03 → 400)
+      - Status must be in the allowed allowlist (400 if invalid)
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            teacher=request.user,
+            school=request.user.school,
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'approved':
+        return Response(
+            {'error': 'Adjustments only allowed on approved batches'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    # Use integer FK accessor — avoids unnecessary ORM query (T-22-02)
+    if batch.invoice_id is not None:
+        return Response(
+            {'error': 'Batch is locked — teacher Invoice has been generated'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        item = batch.lesson_items.get(id=item_id)
+    except BatchLessonItem.DoesNotExist:
+        return Response({'error': 'Lesson item not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    new_status = request.data.get('status')
+    today = date.today()
+
+    # D-03: future lessons may not be marked completed or forfeited
+    if item.scheduled_date > today:
+        if new_status in ('completed', 'forfeited'):
+            return Response(
+                {'error': f'Cannot mark future lesson as {new_status}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    allowed_statuses = ['confirmed', 'completed', 'cancelled', 'trial', 'waived', 'forfeited']
+    if new_status and new_status not in allowed_statuses:
+        return Response(
+            {'error': f'Invalid status. Allowed: {allowed_statuses}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    update_data = {k: v for k, v in request.data.items() if k in ['status', 'cancellation_reason', 'teacher_notes']}
+    serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def batch_submit(request, batch_id):
     """Submit a draft batch for management review"""
     try:
@@ -765,7 +862,7 @@ def batch_submit(request, batch_id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@teacher_or_management_required
 def download_paystub(request, batch_id):
     """
     Download paystub PDF for approved batch.
@@ -777,13 +874,17 @@ def download_paystub(request, batch_id):
         is_management = request.user.user_type == 'management'
 
         if is_management:
-            # Management can download any batch
-            batch = MonthlyInvoiceBatch.objects.get(id=batch_id)
+            # Management can download any batch within their school
+            batch = MonthlyInvoiceBatch.objects.get(
+                id=batch_id,
+                school=request.user.school,
+            )
         else:
             # Teachers can only download their own batches
             batch = MonthlyInvoiceBatch.objects.get(
                 id=batch_id,
-                teacher=request.user
+                teacher=request.user,
+                school=request.user.school,
             )
     except MonthlyInvoiceBatch.DoesNotExist:
         return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)

@@ -58,6 +58,10 @@ jobs:
           FRONTEND_URL: http://localhost:5173
           RESEND_API_KEY: ci-resend-key
           DEFAULT_FROM_EMAIL: ci@test.com
+          HELCIM_API_TOKEN: ci-helcim-token
+          HELCIM_TERMINAL_ID: ci-terminal
+          HELCIM_WEBHOOK_SECRET: dGVzdC1zZWNyZXQ=
+          HELCIM_SUBDOMAIN: citest
         run: pytest tests/
 
   build_and_push:
@@ -163,6 +167,10 @@ jobs:
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
+              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
+              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
+              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py migrate; then
               echo "========================================="
@@ -186,6 +194,10 @@ jobs:
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
+              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
+              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
+              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py migrate --check; then
               echo "❌ Unapplied migrations detected after migrate run — deploy aborted"
@@ -211,6 +223,10 @@ jobs:
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
+              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
+              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
+              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
               python manage.py collectstatic --noinput
@@ -241,6 +257,10 @@ jobs:
               -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
               -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
               -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
+              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
+              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
+              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
               -v /var/log/maple-key:/var/log/maple-key \
               -v static_volume:/app/staticfiles \
               ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
@@ -285,6 +305,10 @@ jobs:
                   -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
                   -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
                   -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
+              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
+              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
+              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
+              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
                   -v /var/log/maple-key:/var/log/maple-key \
                   -v static_volume:/app/staticfiles \
                   "$OLD_IMAGE"

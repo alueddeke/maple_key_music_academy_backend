@@ -313,6 +313,15 @@ EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@maplekey.com')
 TEST_EMAIL_RECIPIENT = config('TEST_EMAIL_RECIPIENT', default='antonilueddeke@gmail.com')
 
+# --- Helcim (Phase 18) ---
+# Hard fail-fast on missing values is in billing/apps.py:BillingConfig.ready().
+# default=None here is intentional — None is unambiguous for downstream if/not checks.
+# Consumed by billing/services/helcim_client.py (Plan 01) and billing/views/webhooks.py (Plan 03).
+HELCIM_API_TOKEN = config('HELCIM_API_TOKEN', default=None)
+HELCIM_TERMINAL_ID = config('HELCIM_TERMINAL_ID', default=None)
+HELCIM_WEBHOOK_SECRET = config('HELCIM_WEBHOOK_SECRET', default=None)
+HELCIM_SUBDOMAIN = config('HELCIM_SUBDOMAIN', default=None)
+
 # Structured logging — JSON format for production, console for local dev
 # File handler built conditionally: RotatingFileHandler requires /var/log/maple-key/
 # to exist and must not be instantiated in local dev or CI (DEBUG=True).

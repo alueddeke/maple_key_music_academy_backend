@@ -185,7 +185,7 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
             'id', 'student', 'student_name',
             'scheduled_date', 'start_time', 'duration',
             'lesson_type', 'teacher_rate', 'student_rate',
-            'status', 'cancelled_by_type', 'cancellation_reason',
+            'status', 'cancellation_reason',
             'teacher_notes', 'admin_notes', 'is_one_off',
             'teacher_payment', 'student_charge',
             'created_at'
@@ -200,6 +200,7 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
     lesson_count = serializers.SerializerMethodField()
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
     paystub_url = serializers.SerializerMethodField()
+    invoice_detail = serializers.SerializerMethodField()
 
     class Meta:
         model = MonthlyInvoiceBatch
@@ -207,7 +208,7 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
             'id', 'batch_number', 'teacher', 'teacher_name',
             'month', 'year', 'status',
             'submitted_at', 'reviewed_by', 'reviewed_at',
-            'rejection_reason', 'invoice',
+            'rejection_reason', 'invoice', 'invoice_detail',
             'payment_method', 'payment_method_display', 'payment_date',
             'lesson_items', 'total_teacher_payment', 'total_student_charges',
             'lesson_count', 'paystub_url', 'created_at', 'updated_at'
@@ -239,6 +240,21 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
         if obj.status == 'approved':
             return f'/api/billing/teacher/batches/{obj.id}/paystub/'
         return None
+
+    def get_invoice_detail(self, obj):
+        """Payment status of the generated teacher invoice, so the batch detail
+        page can show/mark paid/unpaid without a second fetch. None until generated."""
+        inv = obj.invoice
+        if not inv:
+            return None
+        return {
+            'id': inv.id,
+            'invoice_number': inv.invoice_number,
+            'status': inv.status,
+            'date_paid': inv.date_paid,
+            'reference_number': inv.reference_number,
+            'total_amount': str(inv.total_amount),
+        }
 
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):

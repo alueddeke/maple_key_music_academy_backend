@@ -9,9 +9,10 @@ generated on-demand from the approved batch.
 The first lesson item is sent with status='completed' but auto-promoted to 'trial' by
 BatchLessonItem.save() because the student has no prior Lesson or BatchLessonItem records.
 The second item remains 'completed'. On approval, management_approve_batch creates one
-Lesson for the trial item and one StudentInvoice for the completed item, and returns a
-CSV HttpResponse (not JSON). TeacherPaystub is NOT a DB model — it is generated on-demand
-by download_paystub and returned as application/pdf.
+Lesson for the trial item and one StudentInvoice for the completed item, and returns JSON
+{status, batch_id, invoice_count} (HELM-05). CSV is served by GET /csv/ separately.
+TeacherPaystub is NOT a DB model — it is generated on-demand by download_paystub and
+returned as application/pdf.
 """
 
 import pytest
@@ -132,21 +133,36 @@ class TestBatchSubmitApprovePaystubCreated:
         response = teacher_client.post(url, format='json')
         assert response.status_code == status.HTTP_200_OK
 
-        # Step 5: Management approves — returns CSV HttpResponse (not JSON)
+        # Step 5: Management approves — returns JSON (HELM-05: CSV served by GET /csv/ separately)
         url = reverse('management_approve_batch', kwargs={'batch_id': batch_id})
         response = management_client.post(url, format='json')
         assert response.status_code == 200
-        assert 'text/csv' in response.get('Content-Type', '')
+        assert response['Content-Type'].startswith('application/json')
+        assert response.json()['status'] == 'approved'
+        assert response.json()['batch_id'] == batch_id
+
+        # Step 5b: CSV is available via GET /csv/ after approval (HELM-05)
+        csv_url = reverse('management_batch_csv', kwargs={'batch_id': batch_id})
+        csv_response = management_client.get(csv_url)
+        assert csv_response.status_code == 200
+        assert 'text/csv' in csv_response.get('Content-Type', '')
 
         # Step 6: Assert records created after approval
-        # trial item -> Lesson record created (is_trial=True)
-        assert Lesson.objects.filter(school=school).count() == 1
-        lesson = Lesson.objects.get(school=school)
-        assert lesson.is_trial is True
-        assert lesson.status == 'trial'
+        # trial item -> Lesson record created (is_trial=True, status='trial')
+        # completed item -> Lesson record created (is_trial=False, status='confirmed')
+        assert Lesson.objects.filter(school=school).count() == 2
+        trial_lesson = Lesson.objects.get(school=school, status='trial')
+        assert trial_lesson.is_trial is True
         # Rate locked from school settings at lesson creation; use teacher_user.hourly_rate
         # to stay valid if conftest changes the rate.
-        assert lesson.teacher_rate == teacher_user.hourly_rate
+        assert trial_lesson.teacher_rate == teacher_user.hourly_rate
+
+        confirmed_lesson = Lesson.objects.get(school=school, status='confirmed')
+        assert confirmed_lesson.is_trial is False
+        assert confirmed_lesson.student == student
+        # created_lesson FK on BatchLessonItem points to the confirmed Lesson
+        second_item.refresh_from_db()
+        assert second_item.created_lesson == confirmed_lesson
 
         # completed item -> StudentInvoice record created
         assert StudentInvoice.objects.filter(school=school).count() == 1
