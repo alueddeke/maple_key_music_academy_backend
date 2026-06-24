@@ -1334,12 +1334,18 @@ def management_generate_teacher_invoice(request, batch_id):
 @permission_classes([IsAuthenticated])
 @management_required
 def management_rejected_batches(request):
-    """List all rejected batches"""
+    """List all rejected batches.
+
+    A rejected batch is a draft that carries a rejection_reason. rejection_reason is
+    a TextField (blank=True) that defaults to '' — never NULL — so filtering on
+    isnull alone matches every fresh draft. Exclude the empty string so only
+    genuinely-rejected batches appear (and stay deletable; the delete guard uses the
+    same rule).
+    """
     batches = MonthlyInvoiceBatch.objects.filter(
         status='draft',
-        rejection_reason__isnull=False,  # Has rejection reason = was rejected
-        school=request.user.school
-    ).order_by('-reviewed_at')
+        school=request.user.school,
+    ).exclude(rejection_reason='').exclude(rejection_reason__isnull=True).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
     return Response(serializer.data)

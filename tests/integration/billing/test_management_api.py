@@ -59,6 +59,18 @@ class TestDeleteRejectedBatch:
         assert response.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
         assert MonthlyInvoiceBatch.objects.filter(id=batch.id).exists()
 
+    def test_rejected_list_excludes_plain_drafts(self, authenticated_management_client, teacher_user):
+        """The Rejected tab must list only genuinely-rejected drafts (non-empty
+        rejection_reason), not every fresh draft — and every listed batch is deletable."""
+        rejected = self._batch(teacher_user, month=5, status='draft', rejection_reason='Fix dates')
+        self._batch(teacher_user, month=6, status='draft', rejection_reason='')  # plain draft
+
+        url = reverse('management_rejected_batches')
+        response = authenticated_management_client.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        ids = [b['id'] for b in response.data]
+        assert ids == [rejected.id]
+
 
 @pytest.fixture
 def api_client():
