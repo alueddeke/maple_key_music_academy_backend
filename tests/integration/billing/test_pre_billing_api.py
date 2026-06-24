@@ -149,8 +149,14 @@ def test_generate_drafts(management_client, school, teacher_user, student_with_c
     POST generate endpoint returns 200 with generated/skipped_existing/skipped_no_contact.
     BILL-03: draft generation creates PreBillingInvoice per student with BillableContact.
     """
+    # Target the CURRENT month explicitly so the confirmed-Lesson sourcing path is
+    # exercised. Generate now defaults to NEXT month (Phase 24 D-03/D-07), which would
+    # source from RecurringLessonsSchedule instead.
+    today = date.today()
     student, contact = student_with_contact
-    _make_confirmed_lesson(student, teacher_user, school)
+    _make_confirmed_lesson(
+        student, teacher_user, school, lesson_date=date(today.year, today.month, 10)
+    )
 
     # Student without contact — must be skipped
     User.objects.create_user(
@@ -164,12 +170,15 @@ def test_generate_drafts(management_client, school, teacher_user, student_with_c
     )
 
     url = reverse('management_pre_billing_generate')
-    response = management_client.post(url, format='json')
+    response = management_client.post(
+        url, {'month': today.month, 'year': today.year}, format='json'
+    )
 
     assert response.status_code == 200
     assert response.data['generated'] >= 1
     assert response.data['skipped_no_contact'] >= 1
     assert 'skipped_existing' in response.data
+    assert 'skipped_no_schedule' in response.data  # Phase 24 D-09
     assert PreBillingInvoice.objects.filter(school=school).count() >= 1
 
 
@@ -198,12 +207,17 @@ def test_generate_drafts_incremental(management_client, school, teacher_user, st
         period_end=period_end,
     )
 
+    # Target the SAME period the pre-created draft lives in (current month). Generate
+    # now defaults to next month (Phase 24 D-03/D-07), so the period must be explicit.
     url = reverse('management_pre_billing_generate')
-    response = management_client.post(url, format='json')
+    response = management_client.post(
+        url, {'month': today.month, 'year': today.year}, format='json'
+    )
 
     assert response.status_code == 200
-    assert response.data['skipped_existing'] >= 1
-    # Student already had a draft — no new invoice created for them
+    # Phase 24 D-10: a pre-existing DRAFT in the targeted period is refreshed, not
+    # skipped — so it is NOT counted in skipped_existing (only sent/adjusted are).
+    # The student must still have exactly one invoice (no duplicate created).
     assert PreBillingInvoice.objects.filter(school=school, student=student).count() == 1
 
 
