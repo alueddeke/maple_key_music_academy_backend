@@ -58,6 +58,10 @@ jobs:
           FRONTEND_URL: http://localhost:5173
           RESEND_API_KEY: ci-resend-key
           DEFAULT_FROM_EMAIL: ci@test.com
+          HELCIM_API_TOKEN: ci-helcim-token
+          HELCIM_TERMINAL_ID: ci-terminal
+          HELCIM_WEBHOOK_SECRET: dGVzdC1zZWNyZXQ=
+          HELCIM_SUBDOMAIN: citest
         run: pytest tests/
 
   build_and_push:
