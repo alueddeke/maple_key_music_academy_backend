@@ -21,7 +21,16 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from django.contrib.auth import get_user_model
 
-from billing.models import PreBillingInvoice, BillableContact, Lesson
+from billing.models import (
+    PreBillingInvoice,
+    BillableContact,
+    Lesson,
+    RecurringLessonsSchedule,
+    StudentCreditAccount,
+    CreditTransaction,
+    MonthlyInvoiceBatch,
+    BatchLessonItem,
+)
 from billing.services.helcim_client import HelcimAPIError
 
 User = get_user_model()
@@ -469,3 +478,274 @@ def test_void_failure_inline_error(management_client, school, teacher_user, stud
 
     invoice.refresh_from_db()
     assert invoice.status == 'sent'  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Tests — B-1: end-to-end wallet-timing no-double-bill (BILL-04)
+#
+# The bill-ahead flow and end-of-month batch approval flow are NOT linked
+# invoice-to-invoice. They meet only at the period-keyed StudentCreditAccount
+# wallet (F-3): parent pays → wallet +; batch approval drains → wallet −.
+# These tests are the guardrail that the two flows do not double-charge during
+# the current-month / next-month transition, including a student who carries a
+# rollover credit into the cycle.
+# ---------------------------------------------------------------------------
+
+# Future period: NEXT calendar month relative to today, so generate exercises
+# the 24-01 RecurringLessonsSchedule-sourcing branch (D-04/D-08) rather than the
+# confirmed-Lesson path.
+def _next_period():
+    today = date.today()
+    if today.month == 12:
+        return today.year + 1, 1
+    return today.year, today.month + 1
+
+
+def _make_active_schedule(student, teacher, school, year, month,
+                          student_rate=Decimal('60.00'),
+                          teacher_rate=Decimal('45.00'),
+                          duration=Decimal('1.0'),
+                          day_of_week=2):
+    """
+    Active weekly recurring schedule starting on the 1st of the target month.
+
+    start_date is set to the first of the billing month so every weekly
+    occurrence within the month is projected by generate_lessons_for_month.
+    """
+    return RecurringLessonsSchedule.objects.create(
+        teacher=teacher,
+        student=student,
+        school=school,
+        day_of_week=day_of_week,
+        start_time=time(15, 0),
+        duration=duration,
+        lesson_type='online',
+        teacher_rate=teacher_rate,
+        student_rate=student_rate,
+        is_active=True,
+        start_date=date(year, month, 1),
+    )
+
+
+def _generate_for_period(client, year, month):
+    url = reverse('management_pre_billing_generate')
+    return client.post(url, {'month': month, 'year': year}, format='json')
+
+
+def _pay_invoice_into_wallet(student, school, amount):
+    """
+    Simulate the parent paying the bill-ahead invoice: credit the period-keyed
+    wallet by the paid amount and write the immutable ledger entry
+    (CreditTransaction type='pre_billing_payment' → balance += amount).
+    This mirrors the payment path the rest of the suite uses; no real Helcim
+    HTTP is involved.
+    """
+    account, _ = StudentCreditAccount.objects.get_or_create(
+        student=student, school=school, defaults={'balance': Decimal('0.00')},
+    )
+    account.balance += amount
+    account.save(update_fields=['balance'])
+    CreditTransaction.objects.create(
+        account=account, school=school,
+        type='pre_billing_payment', amount=amount,
+    )
+    return account
+
+
+def _make_submitted_batch_for_period(teacher, school, student, year, month,
+                                     count, student_rate=Decimal('60.00'),
+                                     teacher_rate=Decimal('45.00'),
+                                     duration=Decimal('1.0')):
+    """
+    Build a teacher MonthlyInvoiceBatch for the SAME year/month with ``count``
+    completed BatchLessonItems for ``student`` and mark it submitted (ready to
+    approve). Mirrors the batch-create + approve pattern in test_batch_credit.py.
+    """
+    batch = MonthlyInvoiceBatch.objects.create(
+        teacher=teacher, school=school, month=month, year=year,
+    )
+    for i in range(count):
+        item = BatchLessonItem.objects.create(
+            batch=batch,
+            student=student,
+            scheduled_date=date(year, month, 1 + i),
+            start_time=time(15, 0),
+            duration=duration,
+            lesson_type='online',
+            teacher_rate=teacher_rate,
+            student_rate=student_rate,
+            status='completed',
+        )
+        # BatchLessonItem.save() auto-promotes the FIRST item for a student with
+        # no prior Lesson/BatchLessonItem to status='trial' (zero-charge). These
+        # are delivered, billable lessons, so force status back to 'completed' via
+        # an update that bypasses the adding-time auto-trial branch.
+        if item.status != 'completed':
+            BatchLessonItem.objects.filter(pk=item.pk).update(status='completed')
+    batch.status = 'submitted'
+    batch.save()
+    return batch
+
+
+def _approve_batch(management_client, batch):
+    url = reverse('management_approve_batch', kwargs={'batch_id': batch.id})
+    return management_client.post(url)
+
+
+@pytest.mark.django_db
+def test_bill_ahead_pay_then_approve_no_double_charge(
+    management_client, school, school_settings, teacher_user, student_with_contact,
+):
+    """
+    B-1 end-to-end: bill-ahead (next month) → parent pays (wallet +) → that
+    same month's teacher batch approved later (wallet −) nets to the correct
+    balance with NO double charge.
+
+    Cycle:
+      1. Active recurring schedule for NEXT month → generate sources from it
+         (D-04/D-08); draft amount = student_rate × projected occurrences.
+      2. Parent pays → wallet += draft amount (CreditTransaction='pre_billing_payment').
+      3. That month's batch (same lessons delivered) approved → wallet drained
+         by student_rate per completed item (management.py:1693-1696).
+      4. Final wallet balance = paid-in − lessons-consumed == 0 (no double charge).
+
+    The genuine reconciliation at management.py:1710-1737 runs unmodified (D-06).
+    """
+    student, contact = student_with_contact
+    year, month = _next_period()
+    student_rate = Decimal('60.00')
+
+    # Wallet starts empty (no rollover for this scenario).
+    StudentCreditAccount.objects.create(
+        student=student, school=school, balance=Decimal('0.00'),
+    )
+
+    schedule = _make_active_schedule(
+        student, teacher_user, school, year, month, student_rate=student_rate,
+    )
+    # Projected occurrences for the period drive both the draft amount AND the
+    # number of delivered lessons in the batch, so the two flows are matched.
+    projected = schedule.generate_lessons_for_month(year, month)
+    n = len(projected)
+    assert n > 0, "schedule must project at least one lesson into the billing month"
+
+    gross = student_rate * Decimal(n)
+
+    # Step 1: generate the bill-ahead draft from the recurring schedule.
+    response = _generate_for_period(management_client, year, month)
+    assert response.status_code == 200
+    assert response.data['generated'] >= 1
+
+    invoice = PreBillingInvoice.objects.get(
+        student=student, school=school, period_start=date(year, month, 1),
+    )
+    # No rollover → draft amount equals the projected gross.
+    assert invoice.amount == gross
+    # Future-period invoices carry no Lesson rows (intentional, 24-01).
+    assert invoice.lessons.count() == 0
+
+    # Step 2: parent pays the invoice → wallet funded.
+    _pay_invoice_into_wallet(student, school, invoice.amount)
+    account = StudentCreditAccount.objects.get(student=student, school=school)
+    assert account.balance == gross  # paid-in
+
+    # Step 3: later, that month's batch (same n lessons delivered) is approved.
+    batch = _make_submitted_batch_for_period(
+        teacher_user, school, student, year, month, count=n,
+        student_rate=student_rate,
+    )
+    approve_resp = _approve_batch(management_client, batch)
+    assert approve_resp.status_code == 200
+
+    # Step 4: wallet drained by lessons-consumed; nets to zero — NO double charge.
+    account.refresh_from_db()
+    expected_final = max(Decimal('0.00'), gross - (student_rate * Decimal(n)))
+    assert account.balance == expected_final == Decimal('0.00')
+
+    # No duplicate PreBillingInvoice for the same (student, school, period_start).
+    assert PreBillingInvoice.objects.filter(
+        student=student, school=school, period_start=date(year, month, 1),
+    ).count() == 1
+
+    # Reconciliation populated the period-keyed credit fields (D-06 path ran).
+    from billing.models import StudentInvoice
+    student_invoice = StudentInvoice.objects.get(batch=batch, student=student)
+    # gross delivered == pre-billing amount → no extra credit applied, charge = pre-billing.
+    assert student_invoice.amount_after_credit == invoice.amount
+
+
+@pytest.mark.django_db
+def test_bill_ahead_with_rollover_credit_nets_correctly(
+    management_client, school, school_settings, teacher_user, student_with_contact,
+):
+    """
+    B-1 rollover variant: a student who STARTS the cycle carrying a non-zero
+    rollover credit. Bill-ahead nets the rollover (amount = gross − rollover);
+    the parent pays the reduced amount; the batch approval drains the full gross;
+    the final wallet balance is the rollover-adjusted expected value (zero) with
+    NO double charge.
+
+    Arithmetic:
+      gross         = student_rate × n
+      draft amount  = gross − rollover        (credit netted at generation)
+      after pay-in  = rollover + (gross − rollover) = gross
+      after drain   = gross − (student_rate × n) = 0
+    """
+    student, contact = student_with_contact
+    year, month = _next_period()
+    student_rate = Decimal('60.00')
+    rollover = Decimal('30.00')
+
+    # Wallet starts with a rollover credit carried into the cycle.
+    StudentCreditAccount.objects.create(
+        student=student, school=school, balance=rollover,
+    )
+
+    schedule = _make_active_schedule(
+        student, teacher_user, school, year, month, student_rate=student_rate,
+    )
+    projected = schedule.generate_lessons_for_month(year, month)
+    n = len(projected)
+    assert n > 0
+    gross = student_rate * Decimal(n)
+    assert gross > rollover, "test assumes gross exceeds the rollover credit"
+
+    # Step 1: generate — credit is netted at draft creation (amount = gross − rollover).
+    response = _generate_for_period(management_client, year, month)
+    assert response.status_code == 200
+
+    invoice = PreBillingInvoice.objects.get(
+        student=student, school=school, period_start=date(year, month, 1),
+    )
+    expected_draft = gross - rollover
+    assert invoice.amount == expected_draft
+
+    # Step 2: parent pays the reduced (rollover-adjusted) amount.
+    _pay_invoice_into_wallet(student, school, invoice.amount)
+    account = StudentCreditAccount.objects.get(student=student, school=school)
+    # rollover + (gross − rollover) == gross funded in the wallet.
+    assert account.balance == gross
+
+    # Step 3: approve the month's batch (n delivered lessons) → drain full gross.
+    batch = _make_submitted_batch_for_period(
+        teacher_user, school, student, year, month, count=n,
+        student_rate=student_rate,
+    )
+    approve_resp = _approve_batch(management_client, batch)
+    assert approve_resp.status_code == 200
+
+    # Step 4: rollover-adjusted final balance nets to zero — no double charge.
+    account.refresh_from_db()
+    expected_final = max(Decimal('0.00'), gross - (student_rate * Decimal(n)))
+    assert account.balance == expected_final == Decimal('0.00')
+
+    # The pay-in ledger entry recorded the reduced amount, proving the rollover
+    # reduced what the parent was charged (not an extra deduction).
+    paid_txn = CreditTransaction.objects.get(
+        account=account, type='pre_billing_payment',
+    )
+    assert paid_txn.amount == expected_draft
+
+    assert PreBillingInvoice.objects.filter(
+        student=student, school=school, period_start=date(year, month, 1),
+    ).count() == 1
