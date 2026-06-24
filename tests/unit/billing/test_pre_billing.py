@@ -211,3 +211,265 @@ class TestLineItemsPerLesson:
         assert invoice.lessons.count() == 4
         scheduled = [l.scheduled_date for l in invoice.lessons.all()]
         assert len(set(scheduled)) == 4  # all dates are distinct
+
+
+# ---------------------------------------------------------------------------
+# Class 5 — Bill-ahead: period resolution + schedule sourcing (Phase 24)
+# ---------------------------------------------------------------------------
+#
+# Covers D-04/D-05/D-08/D-09/D-10 + B-2:
+#   - _resolve_period defaults to NEXT month, honors month/year, December rollover
+#   - future periods source lessons from RecurringLessonsSchedule (not Lesson rows)
+#   - no-schedule students are skipped with a visible skipped_no_schedule count
+#   - re-run refreshes DRAFT amounts but leaves SENT invoices untouched
+#   - current/past periods still source from confirmed Lesson rows
+#
+# Tests named with: next_month / resolve_period / schedule / skip / refresh
+# so the Task 3 verify filter selects them.
+
+from datetime import timedelta
+
+from rest_framework.test import APIClient
+
+from billing.models import RecurringLessonsSchedule
+from billing.views.pre_billing import _resolve_period, _next_month
+
+
+def _next_calendar_month(today):
+    """Independent reference for the first day of next month (Dec → Jan rollover)."""
+    if today.month == 12:
+        return date(today.year + 1, 1, 1)
+    return date(today.year, today.month + 1, 1)
+
+
+class _StubRequest:
+    """Minimal request stand-in for unit-testing _resolve_period in isolation."""
+
+    def __init__(self, method='POST', data=None, query_params=None):
+        self.method = method
+        self.data = data or {}
+        self.query_params = query_params or {}
+
+
+def _make_schedule(teacher, student, school, *, day_of_week,
+                   student_rate=Decimal('60.00'), duration=Decimal('1.00'),
+                   start_date=None, is_active=True):
+    """Create an active RecurringLessonsSchedule for a teacher/student pair."""
+    return RecurringLessonsSchedule.objects.create(
+        teacher=teacher,
+        student=student,
+        school=school,
+        day_of_week=day_of_week,
+        start_time=time(15, 0),
+        duration=duration,
+        lesson_type='online',
+        teacher_rate=Decimal('45.00'),
+        student_rate=student_rate,
+        is_active=is_active,
+        start_date=start_date or date(2020, 1, 1),
+    )
+
+
+@pytest.fixture
+def management_client(management_user):
+    client = APIClient()
+    client.force_authenticate(user=management_user)
+    return client
+
+
+@pytest.mark.django_db
+class TestResolvePeriod:
+    """B-2: _resolve_period derives the billing period from request params."""
+
+    def test_resolve_period_defaults_to_next_month(self):
+        """No params → period_start is the first day of NEXT calendar month."""
+        today = date.today()
+        period_start, period_end = _resolve_period(_StubRequest(method='POST', data={}))
+        expected_start = _next_calendar_month(today)
+        assert period_start == expected_start
+        # period_end is the last day of that same month
+        import calendar as _cal
+        last = _cal.monthrange(expected_start.year, expected_start.month)[1]
+        assert period_end == date(expected_start.year, expected_start.month, last)
+
+    def test_resolve_period_december_rollover(self):
+        """December rolls over to January of the following year."""
+        assert _next_month(date(2026, 12, 15)) == (2027, 1)
+        assert _next_month(date(2026, 11, 30)) == (2026, 12)
+
+    def test_resolve_period_honors_supplied_month_year(self):
+        """Explicit month/year in the body resolve to that exact period."""
+        req = _StubRequest(method='POST', data={'month': 9, 'year': 2026})
+        period_start, period_end = _resolve_period(req)
+        assert period_start == date(2026, 9, 1)
+        assert period_end == date(2026, 9, 30)
+
+    def test_resolve_period_invalid_month_falls_back_to_next_month(self):
+        """Invalid month (out of 1–12) falls back to next month, no raise (T-24-01)."""
+        today = date.today()
+        req = _StubRequest(method='POST', data={'month': 13, 'year': 2026})
+        period_start, _ = _resolve_period(req)
+        assert period_start == _next_calendar_month(today)
+
+
+@pytest.mark.django_db
+class TestBillAheadGeneration:
+    """D-04/D-08/D-09/D-10: schedule-sourced future billing with skip + refresh."""
+
+    def _future_year_month(self):
+        """A period guaranteed to be in the future relative to today."""
+        return _next_month(date.today())
+
+    def test_future_period_sources_from_schedule(self, management_client, school,
+                                                  teacher_user):
+        """
+        Future month with an active schedule but ZERO Lesson rows still produces a
+        draft whose amount derives from generate_lessons_for_month (D-04/D-08).
+        """
+        student, _ = _make_student_with_contact(school)
+        year, month = self._future_year_month()
+        # Active schedule on a fixed weekday; no Lesson rows exist for the future month.
+        sched = _make_schedule(teacher_user, student, school, day_of_week=0,
+                               student_rate=Decimal('60.00'),
+                               duration=Decimal('1.00'))
+        assert Lesson.objects.filter(student=student).count() == 0
+
+        resp = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': month, 'year': year}, format='json',
+        )
+        assert resp.status_code == 200, resp.content
+
+        invoice = PreBillingInvoice.objects.get(student=student, school=school)
+        expected_dates = sched.generate_lessons_for_month(year, month)
+        assert len(expected_dates) > 0
+        expected_amount = (Decimal('60.00') * Decimal('1.00')) * len(expected_dates)
+        assert invoice.amount == expected_amount
+        assert invoice.amount > 0
+
+    def test_no_schedule_student_skipped_with_count(self, management_client, school):
+        """
+        A student with a contact but NO schedule and NO lessons in a future month
+        gets NO row and is counted in skipped_no_schedule (D-09).
+        """
+        student, _ = _make_student_with_contact(school)
+        year, month = self._future_year_month()
+
+        resp = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': month, 'year': year}, format='json',
+        )
+        assert resp.status_code == 200, resp.content
+        body = resp.json()
+        assert 'skipped_no_schedule' in body
+        assert body['skipped_no_schedule'] >= 1
+        assert PreBillingInvoice.objects.filter(student=student).count() == 0
+
+    def test_rerun_refreshes_draft_and_leaves_sent_untouched(self, management_client,
+                                                             school, teacher_user):
+        """
+        Re-running generate updates a DRAFT amount to the current schedule, but a
+        SENT invoice in the same period is never touched (D-10).
+        """
+        # Student A — draft that should refresh after a schedule change.
+        student_a, _ = _make_student_with_contact(school)
+        # Student B — pre-existing SENT invoice that must stay frozen.
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        student_b = User.objects.create_user(
+            email="sent_student@prebilling.test",
+            password="testpass123",
+            user_type="student",
+            first_name="Sent",
+            last_name="Student",
+            school=school,
+            is_approved=True,
+        )
+        BillableContact.objects.create(
+            student=student_b, school=school, is_primary=True,
+            first_name="Sent", last_name="Contact",
+            email="sent_contact@prebilling.test", phone="555-0300",
+            street_address="1 A St", city="Toronto", province="ON",
+            postal_code="M5H 2N2",
+        )
+
+        year, month = self._future_year_month()
+        period_start = date(year, month, 1)
+
+        sched_a = _make_schedule(teacher_user, student_a, school, day_of_week=0,
+                                 student_rate=Decimal('60.00'),
+                                 duration=Decimal('1.00'))
+
+        # First generate → student_a gets a DRAFT.
+        resp1 = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': month, 'year': year}, format='json',
+        )
+        assert resp1.status_code == 200, resp1.content
+        inv_a = PreBillingInvoice.objects.get(student=student_a, period_start=period_start)
+        first_amount = inv_a.amount
+        assert first_amount > 0
+
+        # Pre-existing SENT invoice for student_b in the SAME period — frozen.
+        sent = PreBillingInvoice.objects.create(
+            student=student_b, school=school, status='sent',
+            amount=Decimal('999.00'),
+            period_start=period_start,
+            period_end=date(year, month, 28),
+        )
+
+        # Change student_a's schedule so the refreshed amount differs.
+        sched_a.student_rate = Decimal('120.00')
+        sched_a.save()
+
+        # Second generate → DRAFT refreshes; SENT untouched.
+        resp2 = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': month, 'year': year}, format='json',
+        )
+        assert resp2.status_code == 200, resp2.content
+
+        inv_a.refresh_from_db()
+        assert inv_a.status == 'draft'
+        assert inv_a.amount != first_amount      # refreshed to new schedule rate
+        assert inv_a.amount > first_amount
+
+        sent.refresh_from_db()
+        assert sent.status == 'sent'
+        assert sent.amount == Decimal('999.00')  # frozen
+
+    def test_current_period_sources_from_confirmed_lessons(self, management_client,
+                                                           school, teacher_user):
+        """
+        Current/past period keeps sourcing from confirmed Lesson rows, NOT the
+        schedule projection (D-08 — existing behavior preserved).
+        """
+        from django.utils import timezone
+        student, _ = _make_student_with_contact(school)
+        today = date.today()
+
+        # A confirmed lesson dated within the CURRENT month.
+        # is_trial must be set explicitly False — Lesson.save() auto-detects a
+        # first-time student as trial and zeroes student_rate otherwise.
+        lesson = Lesson(
+            teacher=teacher_user, student=student, school=school,
+            lesson_type='online', teacher_rate=Decimal('45.00'),
+            student_rate=Decimal('70.00'),
+            scheduled_date=timezone.make_aware(
+                timezone.datetime(today.year, today.month, 1, 15, 0)
+            ),
+            duration=Decimal('1.00'), status='confirmed',
+            is_trial=False,
+        )
+        lesson._is_trial_explicitly_set = True
+        lesson.save()
+
+        resp = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': today.month, 'year': today.year}, format='json',
+        )
+        assert resp.status_code == 200, resp.content
+
+        invoice = PreBillingInvoice.objects.get(student=student, school=school)
+        # Sourced from the confirmed Lesson row → 70 * 1 = 70.
+        assert invoice.amount == Decimal('70.00')
