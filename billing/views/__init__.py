@@ -33,6 +33,7 @@ from .management import (
     manage_billable_contact,
     student_recurring_schedules,
     recurring_schedule_detail,
+    student_pause_lessons,
     assign_teachers_to_student,
     unassign_teacher_from_student,
     teacher_students,
