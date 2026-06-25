@@ -156,6 +156,7 @@ class RecurringScheduleSerializer(serializers.ModelSerializer):
             'day_of_week', 'day_of_week_display', 'start_time', 'duration',
             'lesson_type', 'teacher_rate', 'student_rate',
             'is_active', 'start_date', 'end_date',
+            'pause_start', 'pause_end',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['teacher_rate', 'student_rate', 'created_at', 'updated_at']

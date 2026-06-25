@@ -759,18 +759,23 @@ def batch_lesson_item(request, batch_id, item_id):
 
 
 # Phase 22: Month-End Adjustments — teacher marks exceptions on approved batches
+# Phase 25: Extended to support in-place reschedule (scheduled_date/start_time)
 @api_view(['PATCH'])
 @teacher_required
 def teacher_batch_adjustment_item(request, batch_id, item_id):
     """
     PATCH: Allow teacher to mark lesson exceptions (waived/forfeited/cancelled)
     on an already-approved batch that has not yet had an Invoice generated.
+    Extended in Phase 25 to also accept scheduled_date/start_time for in-place
+    reschedule within the batch billing month.
 
     Guards:
       - Batch must be 'approved' (400 if not)
       - Batch must not be locked (batch.invoice_id is not None → 400)
       - Future lessons (scheduled_date > today) may not be marked completed/forfeited (D-03 → 400)
       - Status must be in the allowed allowlist (400 if invalid)
+      - Reschedule: new scheduled_date must be within batch.month/batch.year (D-01 → 400)
+      - Reschedule: malformed date string returns 400 (T-25-01)
     """
     try:
         batch = MonthlyInvoiceBatch.objects.get(
@@ -802,6 +807,8 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
     today = date.today()
 
     # D-03: future lessons may not be marked completed or forfeited
+    # This guard is scoped to STATUS changes only — reschedule keeps status 'confirmed'
+    # and must not be blocked by this guard.
     if item.scheduled_date > today:
         if new_status in ('completed', 'forfeited'):
             return Response(
@@ -816,7 +823,45 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    update_data = {k: v for k, v in request.data.items() if k in ['status', 'cancellation_reason', 'teacher_notes']}
+    # Phase 25 D-01: In-month reschedule validation (T-25-01)
+    # If the request includes scheduled_date, validate it is within the batch billing month.
+    new_scheduled_date_str = request.data.get('scheduled_date')
+    if new_scheduled_date_str is not None:
+        try:
+            new_scheduled_date = date.fromisoformat(str(new_scheduled_date_str))
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Invalid date format. Use YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_scheduled_date.month != batch.month or new_scheduled_date.year != batch.year:
+            return Response(
+                {
+                    'error': (
+                        f'Reschedule date must be within the batch billing month '
+                        f'({batch.year}-{batch.month:02d}).'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        new_scheduled_date = None
+
+    # Phase 25 D-02: audit note — append [Rescheduled] line when date changes
+    # Build update_data from whitelisted fields (T-25-03: mass-assignment guard)
+    update_data = {
+        k: v for k, v in request.data.items()
+        if k in ['status', 'cancellation_reason', 'teacher_notes', 'scheduled_date', 'start_time']
+    }
+
+    if new_scheduled_date is not None and new_scheduled_date != item.scheduled_date:
+        audit_line = f'[Rescheduled] {item.scheduled_date.isoformat()} -> {new_scheduled_date.isoformat()}'
+        existing_notes = update_data.get('teacher_notes', item.teacher_notes) or ''
+        if existing_notes:
+            update_data['teacher_notes'] = existing_notes + '\n' + audit_line
+        else:
+            update_data['teacher_notes'] = audit_line
+
     serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
     if serializer.is_valid():
         serializer.save()

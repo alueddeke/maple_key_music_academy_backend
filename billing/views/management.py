@@ -932,6 +932,96 @@ def recurring_schedule_detail(request, student_id, schedule_id):
 
 
 # ============================================================================
+# STUDENT PAUSE/RESUME ENDPOINTS
+# ============================================================================
+
+@api_view(['POST'])
+@management_required
+def student_pause_lessons(request, student_id):
+    """
+    Apply or clear a pause window across ALL of a student's recurring schedules.
+
+    POST body:
+      { "pause_start": "YYYY-MM-DD",  -- required for pause; null to clear
+        "pause_end":   "YYYY-MM-DD" | null }
+
+    Behaviour:
+    - Both fields non-null  -> bounded pause (pause_end >= pause_start).
+    - pause_start non-null, pause_end null -> open-ended pause.
+    - Both null -> clear the window (Resume).
+
+    School-scoped lookup: cross-school student_id returns 404 (IDOR-safe, T-26-02).
+    Only management may call (T-26-01).
+    """
+    from datetime import datetime as _dt
+
+    # Scope student lookup to the caller's school (IDOR guard T-26-02)
+    try:
+        student = User.objects.get(
+            pk=student_id,
+            user_type='student',
+            is_active=True,
+            school=request.user.school,
+        )
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    body = request.data
+    pause_start_raw = body.get('pause_start', '__missing__')
+    pause_end_raw = body.get('pause_end', None)
+
+    # pause_start is required in the body (key must be present)
+    if pause_start_raw == '__missing__':
+        return Response(
+            {'error': 'pause_start is required (use null to clear the window)'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Parse dates (T-26-03)
+    pause_start = None
+    pause_end = None
+
+    if pause_start_raw is not None:
+        try:
+            pause_start = _dt.strptime(str(pause_start_raw), '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'pause_start must be a valid date (YYYY-MM-DD) or null'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    if pause_end_raw is not None:
+        try:
+            pause_end = _dt.strptime(str(pause_end_raw), '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'pause_end must be a valid date (YYYY-MM-DD) or null'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    # Ordering validation: when both set, pause_end must be >= pause_start (T-26-03)
+    if pause_start is not None and pause_end is not None and pause_end < pause_start:
+        return Response(
+            {'error': 'pause_end must be on or after pause_start'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Apply to all of the student's schedules in this school (D-02)
+    RecurringLessonsSchedule.objects.filter(
+        student=student,
+        school=request.user.school,
+    ).update(pause_start=pause_start, pause_end=pause_end)
+
+    # Return updated schedules serialized
+    schedules = RecurringLessonsSchedule.objects.filter(
+        student=student,
+        school=request.user.school,
+    )
+    serializer = RecurringScheduleSerializer(schedules, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ============================================================================
 # TEACHER-STUDENT ASSIGNMENT ENDPOINTS
 # ============================================================================
 

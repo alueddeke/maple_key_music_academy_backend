@@ -445,6 +445,16 @@ class RecurringLessonsSchedule(models.Model):
     start_date = models.DateField(help_text="When this recurring schedule begins")
     end_date = models.DateField(null=True, blank=True, help_text="Optional end date to track")
 
+    # Planned-leave pause window (D-01)
+    pause_start = models.DateField(
+        null=True, blank=True,
+        help_text="Start of planned leave window (inclusive). Set alongside pause_end for a bounded pause, or alone for an open-ended pause."
+    )
+    pause_end = models.DateField(
+        null=True, blank=True,
+        help_text="End of planned leave window (inclusive). Null means pause extends indefinitely from pause_start."
+    )
+
     # Tracking
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -510,7 +520,15 @@ class RecurringLessonsSchedule(models.Model):
         while current_date <= month_end:
             if current_date >= self.start_date:
                 if self.end_date is None or current_date <= self.end_date:
-                    lesson_dates.append(current_date)
+                    # Exclude dates inside the pause window (inclusive both ends;
+                    # open-ended when pause_end is None)
+                    in_pause = (
+                        self.pause_start is not None
+                        and current_date >= self.pause_start
+                        and (self.pause_end is None or current_date <= self.pause_end)
+                    )
+                    if not in_pause:
+                        lesson_dates.append(current_date)
             current_date += timedelta(days=7)
 
         return lesson_dates
