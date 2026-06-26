@@ -935,6 +935,82 @@ def recurring_schedule_detail(request, student_id, schedule_id):
 # STUDENT PAUSE/RESUME ENDPOINTS
 # ============================================================================
 
+def reconcile_open_batches_for_student(student, school):
+    """
+    Re-sync FUTURE-dated, schedule-sourced lesson items for ``student`` in this
+    school's still-open (``draft``/``submitted``) teacher batches to match the
+    live, pause-aware projection (``get_scheduled_lessons_data``).
+
+    Called after a pause/resume change so teachers submit accurate invoices:
+    - PAUSE: future items now inside the pause window are no longer projected,
+      so they are DELETED from open batches.
+    - RESUME: future items the schedule projects again (and are missing) are
+      ADDED back to open batches.
+
+    Boundaries (billing integrity):
+    - Only ``draft`` and ``submitted`` batches are touched. ``approved`` batches
+      are locked (Lesson records / invoices already exist) and never change
+      (T-26-10).
+    - Only items with ``scheduled_date > today`` are touched. Lessons that have
+      already happened are billable and are never removed or resurrected.
+    - Only schedule-sourced items (``recurring_schedule`` set) are deleted;
+      manual one-offs are left alone.
+    """
+    today = date.today()
+    teacher_ids = list(
+        RecurringLessonsSchedule.objects.filter(
+            student=student, school=school, is_active=True
+        ).values_list('teacher_id', flat=True).distinct()
+    )
+    if not teacher_ids:
+        return
+
+    batches = MonthlyInvoiceBatch.objects.filter(
+        school=school,
+        status__in=['draft', 'submitted'],
+        teacher_id__in=teacher_ids,
+    )
+    for batch in batches:
+        projected = [
+            d for d in batch.get_scheduled_lessons_data()
+            if d['student'].id == student.id and d['scheduled_date'] > today
+        ]
+        projected_keys = {(d['scheduled_date'], d['start_time']) for d in projected}
+
+        # DELETE future, schedule-sourced items the live projection no longer
+        # includes (now inside the pause window).
+        future_items = BatchLessonItem.objects.filter(
+            batch=batch,
+            student=student,
+            scheduled_date__gt=today,
+            recurring_schedule__isnull=False,
+        )
+        for item in future_items:
+            if (item.scheduled_date, item.start_time) not in projected_keys:
+                item.delete()
+
+        # ADD future projected items missing from the batch (resume restores).
+        present_keys = {
+            (i.scheduled_date, i.start_time)
+            for i in BatchLessonItem.objects.filter(batch=batch, student=student)
+        }
+        for d in projected:
+            if (d['scheduled_date'], d['start_time']) not in present_keys:
+                BatchLessonItem.objects.create(
+                    batch=batch,
+                    student=student,
+                    scheduled_date=d['scheduled_date'],
+                    start_time=d['start_time'],
+                    duration=d['duration'],
+                    lesson_type=d['lesson_type'],
+                    teacher_rate=d['teacher_rate'],
+                    student_rate=d['student_rate'],
+                    status=d['status'],
+                    recurring_schedule=d['recurring_schedule'],
+                    is_one_off=False,
+                )
+
+
 @api_view(['POST'])
 @management_required
 def student_pause_lessons(request, student_id):
@@ -1011,6 +1087,10 @@ def student_pause_lessons(request, student_id):
         student=student,
         school=request.user.school,
     ).update(pause_start=pause_start, pause_end=pause_end)
+
+    # Reflect the change on open teacher batches so teachers submit accurate
+    # invoices: remove now-paused future lessons (and restore them on resume).
+    reconcile_open_batches_for_student(student, request.user.school)
 
     # Return updated schedules serialized
     schedules = RecurringLessonsSchedule.objects.filter(
