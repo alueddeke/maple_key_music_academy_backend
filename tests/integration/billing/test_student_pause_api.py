@@ -13,13 +13,16 @@ Covers:
 """
 
 import pytest
-from datetime import date
+from datetime import date, time
 from decimal import Decimal
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.contrib.auth import get_user_model
-from billing.models import RecurringLessonsSchedule, SchoolSettings
+from billing.models import (
+    RecurringLessonsSchedule, SchoolSettings,
+    MonthlyInvoiceBatch, BatchLessonItem,
+)
 
 User = get_user_model()
 
@@ -249,3 +252,150 @@ class TestStudentPauseEndpoint:
         response = authenticated_management_client.post(url, data, format='json')
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+# ---------------------------------------------------------------------------
+# Cascade to open teacher batches — pause reflected on teacher invoices
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def student_one_wed_schedule(school, teacher_user, school_settings_fixture, db):
+    """Student with a SINGLE Wednesday 15:00 recurring schedule (deterministic)."""
+    student = User.objects.create_user(
+        email="cascade_student@test.com",
+        password="testpass123",
+        user_type="student",
+        first_name="Cascade",
+        last_name="Student",
+        school=school,
+        is_approved=True,
+    )
+    sched = RecurringLessonsSchedule.objects.create(
+        teacher=teacher_user,
+        student=student,
+        school=school,
+        day_of_week=2,
+        start_time="15:00",
+        duration=Decimal("1.0"),
+        lesson_type="in_person",
+        teacher_rate=Decimal("50.00"),
+        student_rate=Decimal("100.00"),
+        is_active=True,
+        start_date=date(2026, 1, 7),
+        created_by=teacher_user,
+    )
+    return student, sched
+
+
+def _make_batch(teacher, school, student, sched, month, year, status_value, dates):
+    batch = MonthlyInvoiceBatch.objects.create(
+        teacher=teacher, school=school, month=month, year=year, status=status_value,
+    )
+    for d in dates:
+        BatchLessonItem.objects.create(
+            batch=batch, student=student, scheduled_date=d, start_time=time(15, 0),
+            duration=Decimal("1.0"), lesson_type="in_person",
+            teacher_rate=Decimal("50.00"), student_rate=Decimal("100.00"),
+            status="confirmed", recurring_schedule=sched, is_one_off=False,
+        )
+    return batch
+
+
+@pytest.mark.django_db
+class TestPauseCascadeToOpenBatches:
+    """Pausing a student removes future in-window lessons from open teacher batches.
+
+    today is 2026-06-25, so all July dates are future. Boundaries: only
+    draft/submitted batches, only future schedule-sourced items (T-26-10).
+    """
+
+    def _url(self, student_id):
+        return reverse('student_pause_lessons', args=[student_id])
+
+    def _dates(self, batch, student):
+        return set(
+            BatchLessonItem.objects.filter(batch=batch, student=student)
+            .values_list('scheduled_date', flat=True)
+        )
+
+    def test_pause_removes_future_in_window_items_from_draft(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'draft',
+                            [date(2026, 7, 8), date(2026, 7, 15)])
+        resp = authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        assert self._dates(batch, student) == set()  # both future July items removed
+
+    def test_pause_keeps_items_outside_window(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'draft',
+                            [date(2026, 7, 8)])
+        # Pause August only -> July 8 is outside the window, must stay.
+        resp = authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': '2026-08-01', 'pause_end': '2026-08-31'}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        assert date(2026, 7, 8) in self._dates(batch, student)
+
+    def test_pause_keeps_past_items(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        # Past-dated item (before today 2026-06-25), inside an open-ended pause.
+        batch = _make_batch(teacher_user, school, student, sched, 6, 2026, 'draft',
+                            [date(2026, 6, 10)])
+        resp = authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': '2026-06-01', 'pause_end': None}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        assert date(2026, 6, 10) in self._dates(batch, student)  # already happened -> kept
+
+    def test_pause_does_not_touch_approved_batch(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'approved',
+                            [date(2026, 7, 8)])
+        resp = authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        assert date(2026, 7, 8) in self._dates(batch, student)  # locked -> unchanged
+
+    def test_pause_cleans_submitted_batch(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'submitted',
+                            [date(2026, 7, 8)])
+        resp = authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        assert date(2026, 7, 8) not in self._dates(batch, student)
+
+    def test_resume_readds_future_items_to_open_batch(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'draft',
+                            [date(2026, 7, 8), date(2026, 7, 15)])
+        # Pause removes them...
+        authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+        assert self._dates(batch, student) == set()
+        # ...resume restores the future July Wednesdays the schedule projects.
+        resp = authenticated_management_client.post(
+            self._url(student.id),
+            {'pause_start': None, 'pause_end': None}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        restored = self._dates(batch, student)
+        assert date(2026, 7, 8) in restored
+        assert date(2026, 7, 15) in restored
