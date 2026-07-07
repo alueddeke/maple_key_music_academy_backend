@@ -94,6 +94,9 @@ INSTALLED_APPS = [
 
     # Custom authentication app
     'custom_auth',  # Your custom auth app for OAuth views and JWT handling
+
+    # Dashboard analytics (read-only aggregation + side-table capture models)
+    'analytics',
 ]
 
 MIDDLEWARE = [
