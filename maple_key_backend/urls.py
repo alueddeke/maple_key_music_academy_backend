@@ -22,4 +22,5 @@ urlpatterns = [
     path("api/billing/", include('billing.urls')),
     path("api/auth/", include('custom_auth.urls')),
     path("api/teacher-profiles/", include('teacher_profiles.urls')),
+    path("api/notifications/", include('notifications.urls')),
 ]
