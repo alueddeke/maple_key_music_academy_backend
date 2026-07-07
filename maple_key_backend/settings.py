@@ -94,6 +94,9 @@ INSTALLED_APPS = [
 
     # Custom authentication app
     'custom_auth',  # Your custom auth app for OAuth views and JWT handling
+
+    # In-app notifications (bell dropdown) — full path so ready() connects signals
+    'notifications.apps.NotificationsConfig',
 ]
 
 MIDDLEWARE = [
