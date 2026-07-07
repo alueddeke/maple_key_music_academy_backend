@@ -103,6 +103,41 @@ class TestWaiveUsageCounting:
         assert usage['used'] == 2
         assert usage['remaining'] == 0
 
+    def test_future_dated_waives_count_in_rolling_window(
+        self, policy_on, teacher_user, student_user, draft_batch
+    ):
+        # Waiving ahead with notice is the normal case — future waives must
+        # count immediately or the limit is trivially bypassed (W2 UAT bug).
+        make_item(draft_batch, student_user, day_offset=2, status='waived')
+        make_item(draft_batch, student_user, day_offset=9, status='waived')
+        usage = get_waive_usage(student_user, teacher_user.school)
+        assert usage['used'] == 2
+        assert usage['remaining'] == 0
+        assert usage['period_end'] is None  # rolling window has no upper bound
+
+    def test_approved_waive_counts_once_not_twice(
+        self, policy_on, teacher_user, student_user, draft_batch
+    ):
+        # Approval creates a waived audit Lesson and links it to the item —
+        # the pair must count as ONE waive (W2 UAT bug: 3 waives read as 6).
+        item = make_item(draft_batch, student_user, day_offset=-7, status='waived')
+        lesson = Lesson.objects.create(
+            school=teacher_user.school,
+            teacher=teacher_user,
+            student=student_user,
+            scheduled_date=timezone.now() - timedelta(days=7),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='waived',
+        )
+        item.created_lesson = lesson
+        item.save(update_fields=['created_lesson'])
+
+        usage = get_waive_usage(student_user, teacher_user.school)
+        assert usage['used'] == 1
+
     def test_disabled_policy_reports_unlimited(self, teacher_user, student_user, db):
         usage = get_waive_usage(student_user, teacher_user.school)
         assert usage['enabled'] is False

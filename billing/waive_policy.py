@@ -73,7 +73,10 @@ def get_waive_usage(student, school, on_date=None, exclude_item_id=None):
         return disabled
 
     if settings.waive_period_type == 'rolling':
-        period = (_shift_months(on_date, settings.waive_period_months), on_date)
+        # No upper bound: teachers waive future lessons ahead of time (proper
+        # notice IS the waive case), so future-dated waives count immediately —
+        # otherwise a student could bank unlimited waives for upcoming lessons.
+        period = (_shift_months(on_date, settings.waive_period_months), None)
     else:
         period = _fixed_window_for(settings, on_date)
         if period is None:
@@ -81,24 +84,30 @@ def get_waive_usage(student, school, on_date=None, exclude_item_id=None):
 
     start, end = period
 
+    # Approval writes a waived audit Lesson AND links it via created_lesson —
+    # exclude linked items so an approved waive counts once, via the Lesson.
     item_qs = BatchLessonItem.objects.filter(
         student=student,
         batch__school=school,
         status='waived',
         scheduled_date__gte=start,
-        scheduled_date__lte=end,
+        created_lesson__isnull=True,
     )
+    if end is not None:
+        item_qs = item_qs.filter(scheduled_date__lte=end)
     if exclude_item_id is not None:
         item_qs = item_qs.exclude(pk=exclude_item_id)
 
     # Lesson.scheduled_date is a DateTimeField — compare on the date part
-    lesson_count = Lesson.objects.filter(
+    lesson_qs = Lesson.objects.filter(
         student=student,
         school=school,
         status='waived',
         scheduled_date__date__gte=start,
-        scheduled_date__date__lte=end,
-    ).count()
+    )
+    if end is not None:
+        lesson_qs = lesson_qs.filter(scheduled_date__date__lte=end)
+    lesson_count = lesson_qs.count()
 
     used = item_qs.count() + lesson_count
     return {
@@ -107,7 +116,7 @@ def get_waive_usage(student, school, on_date=None, exclude_item_id=None):
         'used': used,
         'remaining': max(0, settings.waive_limit - used),
         'period_start': start.isoformat(),
-        'period_end': end.isoformat(),
+        'period_end': end.isoformat() if end is not None else None,
     }
 
 
