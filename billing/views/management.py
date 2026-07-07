@@ -2012,24 +2012,34 @@ def management_reject_batch(request, batch_id):
     # Freeze what was actually rejected BEFORE the batch goes back to draft —
     # the live batch keeps evolving (teacher edits, schedule re-sync), so this
     # snapshot is the only record of what the teacher submitted (MAP-99).
-    items = list(batch.lesson_items.all())
-    BatchRejectionSnapshot.objects.create(
-        batch=batch,
-        school=batch.school,
-        rejected_by=request.user,
-        rejection_reason=rejection_reason,
-        items=BatchLessonItemSerializer(items, many=True).data,
-        total_teacher_payment=sum(
-            (item.calculate_teacher_payment() for item in items), Decimal('0.00')
-        ),
-    )
+    # Atomic + row lock: concurrent rejects must not write duplicate snapshots.
+    from django.db import transaction
+    with transaction.atomic():
+        batch = MonthlyInvoiceBatch.objects.select_for_update().get(pk=batch.pk)
+        if batch.status != 'submitted':
+            return Response(
+                {'error': 'Batch must be in submitted status'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-    # Set batch back to draft so teacher can edit and resubmit
-    batch.status = 'draft'
-    batch.reviewed_by = request.user
-    batch.reviewed_at = timezone.now()
-    batch.rejection_reason = rejection_reason
-    batch.save()
+        items = list(batch.lesson_items.select_related('student').all())
+        BatchRejectionSnapshot.objects.create(
+            batch=batch,
+            school=batch.school,
+            rejected_by=request.user,
+            rejection_reason=rejection_reason,
+            items=BatchLessonItemSerializer(items, many=True).data,
+            total_teacher_payment=sum(
+                (item.calculate_teacher_payment() for item in items), Decimal('0.00')
+            ),
+        )
+
+        # Set batch back to draft so teacher can edit and resubmit
+        batch.status = 'draft'
+        batch.reviewed_by = request.user
+        batch.reviewed_at = timezone.now()
+        batch.rejection_reason = rejection_reason
+        batch.save()
 
     # TODO: Send email notification to teacher (future phase)
 
@@ -2051,7 +2061,7 @@ def management_batch_rejection_snapshots(request, batch_id):
         return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
 
     serializer = BatchRejectionSnapshotSerializer(
-        batch.rejection_snapshots.all(), many=True
+        batch.rejection_snapshots.select_related('rejected_by'), many=True
     )
     return Response(serializer.data)
 

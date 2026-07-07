@@ -746,7 +746,7 @@ def batch_lesson_item(request, batch_id, item_id):
         # MAP-101: past the waive limit a teacher's "waived" becomes forfeited
         # (student charged). Management edits bypass this — that's the override.
         update_data, waive_usage, waive_converted = apply_waive_limit(
-            update_data, item.student, request.user.school, exclude_item_id=item.id
+            update_data, item.student, request.user.school, item=item
         )
 
         serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
@@ -876,7 +876,7 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
     # MAP-101: past the waive limit a teacher's "waived" becomes forfeited
     # (student charged). Management edits bypass this — that's the override.
     update_data, waive_usage, waive_converted = apply_waive_limit(
-        update_data, item.student, request.user.school, exclude_item_id=item.id
+        update_data, item.student, request.user.school, item=item
     )
     # D-03 still holds for the converted status: a future lesson cannot be
     # forfeited, so a future waive past the limit is refused outright.
@@ -1016,4 +1016,15 @@ def student_waive_usage(request, student_id):
     if student is None:
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    return Response(get_waive_usage(student, request.user.school))
+    on_date = None
+    date_param = request.query_params.get('date')
+    if date_param:
+        try:
+            on_date = date.fromisoformat(date_param)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Invalid date format. Use YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    return Response(get_waive_usage(student, request.user.school, on_date=on_date))

@@ -259,9 +259,10 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
         }
 
 class BatchRejectionSnapshotSerializer(serializers.ModelSerializer):
-    rejected_by_name = serializers.CharField(
-        source='rejected_by.get_full_name', read_only=True
-    )
+    rejected_by_name = serializers.SerializerMethodField()
+
+    def get_rejected_by_name(self, obj):
+        return obj.rejected_by.get_full_name() if obj.rejected_by else None
 
     class Meta:
         model = BatchRejectionSnapshot
@@ -299,6 +300,14 @@ class WaivePolicySerializer(serializers.ModelSerializer):
             if start and end and end < start:
                 raise serializers.ValidationError(
                     {'waive_period_end': 'End date must be on or after the start date.'}
+                )
+            recurring = attrs.get(
+                'waive_period_recurring',
+                getattr(self.instance, 'waive_period_recurring', True),
+            )
+            if recurring and start and end and (end - start).days > 366:
+                raise serializers.ValidationError(
+                    {'waive_period_end': 'A yearly-repeating period cannot be longer than one year.'}
                 )
         months = attrs.get('waive_period_months', getattr(self.instance, 'waive_period_months', 4))
         if period_type == 'rolling' and (not months or months < 1):

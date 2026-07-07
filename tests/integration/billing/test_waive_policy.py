@@ -138,6 +138,166 @@ class TestWaiveUsageCounting:
         usage = get_waive_usage(student_user, teacher_user.school)
         assert usage['used'] == 1
 
+    def test_adjustment_window_waive_counts_via_item(
+        self, policy_on, teacher_user, student_user, draft_batch
+    ):
+        # Item waived AFTER approval: linked Lesson still says 'confirmed' —
+        # the item row is the waive's only record and must count (audit #2).
+        lesson = Lesson.objects.create(
+            school=teacher_user.school,
+            teacher=teacher_user,
+            student=student_user,
+            scheduled_date=timezone.now() - timedelta(days=7),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='confirmed',
+        )
+        item = make_item(draft_batch, student_user, day_offset=-7, status='waived')
+        item.created_lesson = lesson
+        item.save(update_fields=['created_lesson'])
+
+        usage = get_waive_usage(student_user, teacher_user.school)
+        assert usage['used'] == 1
+
+    def test_reasserting_approved_waive_does_not_self_convert(
+        self, policy_on, teacher_user, student_user, teacher_client
+    ):
+        # Approved-waived item re-saved as 'waived' must exclude its own
+        # linked waived Lesson from the count (audit #3) — otherwise a
+        # granted waive silently flips to forfeited at the limit.
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user,
+            school=teacher_user.school,
+            month=TODAY.month,
+            year=TODAY.year,
+            status='approved',
+        )
+        lesson = Lesson.objects.create(
+            school=teacher_user.school,
+            teacher=teacher_user,
+            student=student_user,
+            scheduled_date=timezone.now() - timedelta(days=7),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='waived',
+        )
+        item = make_item(batch, student_user, day_offset=-7, status='waived')
+        item.created_lesson = lesson
+        item.save(update_fields=['created_lesson'])
+        # One more waive elsewhere puts the student AT the limit of 2
+        Lesson.objects.create(
+            school=teacher_user.school,
+            teacher=teacher_user,
+            student=student_user,
+            scheduled_date=timezone.now() - timedelta(days=14),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='waived',
+        )
+
+        url = reverse(
+            'teacher_batch_adjustment_item',
+            kwargs={'batch_id': batch.id, 'item_id': item.id},
+        )
+        response = teacher_client.patch(
+            url, {'status': 'waived', 'cancellation_reason': 'edited note'}, format='json'
+        )
+        assert response.status_code == status.HTTP_200_OK
+        item.refresh_from_db()
+        assert item.status == 'waived'  # NOT forfeited
+
+    def test_fixed_window_anchored_to_lesson_date_not_today(
+        self, school, teacher_user, student_user, teacher_client
+    ):
+        # December lesson adjusted in January must be judged against the
+        # window CONTAINING the lesson, not today's window (audit #4).
+        settings = SchoolSettings.get_settings_for_school(school)
+        settings.waive_limit_enabled = True
+        settings.waive_limit = 1
+        settings.waive_period_type = 'fixed'
+        # Recurring term ending ~2 months ago; lesson falls inside it
+        term_end = TODAY - timedelta(days=60)
+        term_start = term_end - timedelta(days=120)
+        settings.waive_period_start = term_start
+        settings.waive_period_end = term_end
+        settings.waive_period_recurring = True
+        settings.save()
+
+        in_term_date = term_end - timedelta(days=10)
+        # Student already used their 1 waive inside that term
+        Lesson.objects.create(
+            school=school,
+            teacher=teacher_user,
+            student=student_user,
+            scheduled_date=timezone.now() - timedelta(days=70),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='waived',
+        )
+
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user,
+            school=school,
+            month=in_term_date.month,
+            year=in_term_date.year,
+            status='approved',
+        )
+        item = BatchLessonItem.objects.create(
+            batch=batch,
+            student=student_user,
+            scheduled_date=in_term_date,
+            start_time=time(15, 0),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='confirmed',
+        )
+        url = reverse(
+            'teacher_batch_adjustment_item',
+            kwargs={'batch_id': batch.id, 'item_id': item.id},
+        )
+        response = teacher_client.patch(url, {'status': 'waived'}, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        item.refresh_from_db()
+        # Judged against the lesson's term (limit already spent) → forfeited
+        assert item.status == 'forfeited'
+
+    def test_feb29_policy_dates_do_not_crash(self, school, teacher_user, student_user, db):
+        settings = SchoolSettings.get_settings_for_school(school)
+        settings.waive_limit_enabled = True
+        settings.waive_period_type = 'fixed'
+        settings.waive_period_start = date(2024, 2, 29)
+        settings.waive_period_end = date(2024, 6, 30)
+        settings.waive_period_recurring = True
+        settings.save()
+        # Must not raise in non-leap years (Feb 29 clamps to Feb 28)
+        usage = get_waive_usage(student_user, school, on_date=date(2026, 3, 15))
+        assert usage['enabled'] is True
+
+    def test_recurring_window_longer_than_year_rejected(self, management_client):
+        url = reverse('waive_policy_settings')
+        response = management_client.put(
+            url,
+            {
+                'waive_limit_enabled': True,
+                'waive_period_type': 'fixed',
+                'waive_period_start': '2025-06-01',
+                'waive_period_end': '2026-08-31',
+                'waive_period_recurring': True,
+            },
+            format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
     def test_disabled_policy_reports_unlimited(self, teacher_user, student_user, db):
         usage = get_waive_usage(student_user, teacher_user.school)
         assert usage['enabled'] is False
