@@ -100,6 +100,8 @@ INSTALLED_APPS = [
 
     # In-app notifications (bell dropdown) — full path so ready() connects signals
     'notifications.apps.NotificationsConfig',
+    # Dashboard analytics (read-only aggregation + side-table capture models)
+    'analytics',
 ]
 
 MIDDLEWARE = [
