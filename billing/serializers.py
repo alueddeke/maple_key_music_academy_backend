@@ -4,7 +4,8 @@ from django.db.models import Count, Sum, Q
 from .models import (
     Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings,
     InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
-    School, SchoolSettings, RecurringLessonsSchedule, MonthlyInvoiceBatch, BatchLessonItem
+    School, SchoolSettings, RecurringLessonsSchedule, MonthlyInvoiceBatch, BatchLessonItem,
+    BatchRejectionSnapshot
 )
 
 User = get_user_model()
@@ -256,6 +257,19 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
             'reference_number': inv.reference_number,
             'total_amount': str(inv.total_amount),
         }
+
+class BatchRejectionSnapshotSerializer(serializers.ModelSerializer):
+    rejected_by_name = serializers.CharField(
+        source='rejected_by.get_full_name', read_only=True
+    )
+
+    class Meta:
+        model = BatchRejectionSnapshot
+        fields = [
+            'id', 'batch', 'rejected_at', 'rejected_by', 'rejected_by_name',
+            'rejection_reason', 'items', 'total_teacher_payment',
+        ]
+
 
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):

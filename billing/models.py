@@ -939,6 +939,42 @@ class BatchLessonItem(models.Model):
         super().save(*args, **kwargs)
 
 
+class BatchRejectionSnapshot(models.Model):
+    """Frozen copy of a batch's line items at the moment management rejected it.
+
+    Rejection flips the batch back to 'draft' so the teacher can edit and
+    resubmit — the live batch keeps evolving (including schedule re-sync).
+    This snapshot is the record-keeping artifact: what the teacher actually
+    submitted and management actually rejected (MAP-99). A batch rejected
+    multiple times gets one snapshot per rejection.
+    """
+    batch = models.ForeignKey(
+        MonthlyInvoiceBatch,
+        on_delete=models.CASCADE,
+        related_name='rejection_snapshots',
+    )
+    school = models.ForeignKey('School', on_delete=models.PROTECT, related_name='+')
+    rejected_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='+',
+        limit_choices_to={'user_type': 'management'},
+    )
+    rejected_at = models.DateTimeField(auto_now_add=True)
+    rejection_reason = models.TextField()
+    # Serialized BatchLessonItem rows as submitted (student_name, scheduled_date,
+    # start_time, duration, lesson_type, rates, status, notes, ...)
+    items = models.JSONField(default=list)
+    total_teacher_payment = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    class Meta:
+        ordering = ['-rejected_at']
+
+    def __str__(self):
+        return f"Rejection snapshot of {self.batch.batch_number} at {self.rejected_at:%Y-%m-%d %H:%M}"
+
+
 class StudentInvoice(models.Model):
     """
     Student invoice generated when management approves a batch.

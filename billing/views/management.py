@@ -6,11 +6,12 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
+from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, BatchRejectionSnapshot, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
-    MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer
+    MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
+    BatchRejectionSnapshotSerializer
 )
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
@@ -1989,6 +1990,21 @@ def management_reject_batch(request, batch_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Freeze what was actually rejected BEFORE the batch goes back to draft —
+    # the live batch keeps evolving (teacher edits, schedule re-sync), so this
+    # snapshot is the only record of what the teacher submitted (MAP-99).
+    items = list(batch.lesson_items.all())
+    BatchRejectionSnapshot.objects.create(
+        batch=batch,
+        school=batch.school,
+        rejected_by=request.user,
+        rejection_reason=rejection_reason,
+        items=BatchLessonItemSerializer(items, many=True).data,
+        total_teacher_payment=sum(
+            (item.calculate_teacher_payment() for item in items), Decimal('0.00')
+        ),
+    )
+
     # Set batch back to draft so teacher can edit and resubmit
     batch.status = 'draft'
     batch.reviewed_by = request.user
@@ -1999,6 +2015,25 @@ def management_reject_batch(request, batch_id):
     # TODO: Send email notification to teacher (future phase)
 
     serializer = MonthlyInvoiceBatchSerializer(batch)
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_batch_rejection_snapshots(request, batch_id):
+    """All rejection snapshots for a batch, newest first (MAP-99 record keeping)."""
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = BatchRejectionSnapshotSerializer(
+        batch.rejection_snapshots.all(), many=True
+    )
     return Response(serializer.data)
 
 
