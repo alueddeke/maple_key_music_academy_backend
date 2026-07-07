@@ -51,6 +51,8 @@ urlpatterns = [
     # Management endpoints for system settings
     path('management/settings/', views.get_system_settings, name='get_system_settings'),
     path('management/settings/update/', views.update_system_settings, name='update_system_settings'),
+    path('management/waive-policy/', views.waive_policy_settings, name='waive_policy_settings'),
+    path('students/<int:student_id>/waive-usage/', views.student_waive_usage, name='student_waive_usage'),
 
     # Management endpoints for invoice recipient emails
     path('management/invoice-recipients/', views.list_invoice_recipients, name='list_invoice_recipients'),

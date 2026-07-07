@@ -92,6 +92,41 @@ class SchoolSettings(models.Model):
     payment_terms = models.CharField(max_length=50, default="Due in 15 days", help_text="Default payment terms for student invoices")
     management_notification_email = models.EmailField(blank=True, help_text="Email for management notifications (future use)")
 
+    # Waived-cancellation policy (MAP-101): cap free (waived) cancellations per
+    # period; past the cap a teacher's "waived" is recorded as forfeited
+    # (student charged). Disabled until management turns it on in Settings.
+    WAIVE_PERIOD_TYPES = [
+        ('rolling', 'Rolling window (last N months)'),
+        ('fixed', 'Fixed dates'),
+    ]
+    waive_limit_enabled = models.BooleanField(
+        default=False,
+        help_text="Enforce the waived-cancellation limit",
+    )
+    waive_limit = models.PositiveIntegerField(
+        default=3,
+        help_text="Waived cancellations allowed per period",
+    )
+    waive_period_type = models.CharField(
+        max_length=10, choices=WAIVE_PERIOD_TYPES, default='rolling'
+    )
+    waive_period_months = models.PositiveIntegerField(
+        default=4,
+        help_text="Rolling window length in months (rolling type)",
+    )
+    waive_period_start = models.DateField(
+        null=True, blank=True,
+        help_text="Fixed period start (fixed type)",
+    )
+    waive_period_end = models.DateField(
+        null=True, blank=True,
+        help_text="Fixed period end (fixed type)",
+    )
+    waive_period_recurring = models.BooleanField(
+        default=True,
+        help_text="Fixed period repeats every year (month/day match)",
+    )
+
     # tracking
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='school_settings_updates')

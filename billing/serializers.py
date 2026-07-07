@@ -271,6 +271,43 @@ class BatchRejectionSnapshotSerializer(serializers.ModelSerializer):
         ]
 
 
+class WaivePolicySerializer(serializers.ModelSerializer):
+    """Waived-cancellation policy fields on SchoolSettings (MAP-101)."""
+
+    class Meta:
+        model = SchoolSettings
+        fields = [
+            'waive_limit_enabled', 'waive_limit', 'waive_period_type',
+            'waive_period_months', 'waive_period_start', 'waive_period_end',
+            'waive_period_recurring', 'updated_at',
+        ]
+        read_only_fields = ['updated_at']
+
+    def validate(self, attrs):
+        period_type = attrs.get(
+            'waive_period_type',
+            getattr(self.instance, 'waive_period_type', 'rolling'),
+        )
+        if period_type == 'fixed':
+            start = attrs.get('waive_period_start', getattr(self.instance, 'waive_period_start', None))
+            end = attrs.get('waive_period_end', getattr(self.instance, 'waive_period_end', None))
+            enabled = attrs.get('waive_limit_enabled', getattr(self.instance, 'waive_limit_enabled', False))
+            if enabled and (not start or not end):
+                raise serializers.ValidationError(
+                    {'waive_period_start': 'Fixed period requires both start and end dates.'}
+                )
+            if start and end and end < start:
+                raise serializers.ValidationError(
+                    {'waive_period_end': 'End date must be on or after the start date.'}
+                )
+        months = attrs.get('waive_period_months', getattr(self.instance, 'waive_period_months', 4))
+        if period_type == 'rolling' and (not months or months < 1):
+            raise serializers.ValidationError(
+                {'waive_period_months': 'Rolling window must be at least 1 month.'}
+            )
+        return attrs
+
+
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)

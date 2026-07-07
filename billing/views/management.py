@@ -532,6 +532,25 @@ def update_system_settings(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@api_view(['GET', 'PUT'])
+@management_required
+def waive_policy_settings(request):
+    """School waived-cancellation policy (MAP-101). Management-only."""
+    from ..models import SchoolSettings
+    from ..serializers import WaivePolicySerializer
+
+    settings = SchoolSettings.get_settings_for_school(request.user.school)
+
+    if request.method == 'GET':
+        return Response(WaivePolicySerializer(settings).data)
+
+    serializer = WaivePolicySerializer(settings, data=request.data, partial=True)
+    if serializer.is_valid():
+        serializer.save(updated_by=request.user)
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 @api_view(['GET'])
 @management_required
 def list_invoice_recipients(request):
