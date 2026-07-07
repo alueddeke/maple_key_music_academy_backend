@@ -1,6 +1,11 @@
 from django.contrib import admin
 
-from .models import TeacherAvailability, TeacherInstrument, TeacherProfile
+from .models import (
+    SchoolInstrument,
+    TeacherAvailability,
+    TeacherInstrument,
+    TeacherProfile,
+)
 
 
 class TeacherInstrumentInline(admin.TabularInline):
@@ -31,3 +36,10 @@ class TeacherInstrumentAdmin(admin.ModelAdmin):
 class TeacherAvailabilityAdmin(admin.ModelAdmin):
     list_display = ('profile', 'day_of_week', 'start_time', 'end_time')
     list_filter = ('day_of_week',)
+
+
+@admin.register(SchoolInstrument)
+class SchoolInstrumentAdmin(admin.ModelAdmin):
+    list_display = ('name', 'school', 'updated_at')
+    list_filter = ('school',)
+    search_fields = ('name',)

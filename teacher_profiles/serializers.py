@@ -1,6 +1,11 @@
 from rest_framework import serializers
 
-from .models import TeacherAvailability, TeacherInstrument, TeacherProfile
+from .models import (
+    SchoolInstrument,
+    TeacherAvailability,
+    TeacherInstrument,
+    TeacherProfile,
+)
 
 
 class TeacherInstrumentSerializer(serializers.ModelSerializer):
@@ -113,3 +118,29 @@ class TeacherProfileSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'teacher', 'updated_at']
+
+
+class SchoolInstrumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SchoolInstrument
+        fields = ['id', 'name']
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Instrument name cannot be blank.")
+        return value
+
+    def validate(self, attrs):
+        # Case-insensitive uniqueness per school (DB constraint is case-sensitive)
+        school = self.context.get('school') or getattr(self.instance, 'school', None)
+        name = attrs.get('name') or getattr(self.instance, 'name', None)
+        if school and name:
+            qs = SchoolInstrument.objects.filter(school=school, name__iexact=name)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {'name': 'This instrument is already on the list.'}
+                )
+        return attrs

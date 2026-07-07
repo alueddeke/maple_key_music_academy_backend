@@ -158,3 +158,33 @@ class TeacherAvailability(models.Model):
             f"{self.profile.teacher.get_full_name()} — {self.get_day_of_week_display()} "
             f"{self.start_time:%H:%M}–{self.end_time:%H:%M}"
         )
+
+
+class SchoolInstrument(models.Model):
+    """A management-curated instrument the school offers.
+
+    Source of the instrument dropdowns on teacher profiles and student
+    schedules — free-text entry caused typos and unapproved instruments.
+    Management edits this list; teachers only pick from it.
+    """
+    school = models.ForeignKey(
+        'billing.School',
+        on_delete=models.CASCADE,
+        related_name='school_instruments',
+    )
+    name = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['school', 'name'],
+                name='unique_instrument_per_school',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.school})"

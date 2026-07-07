@@ -5,8 +5,14 @@ from rest_framework.response import Response
 
 from custom_auth.decorators import teacher_or_management_required
 
-from .models import TeacherAvailability, TeacherInstrument, TeacherProfile
+from .models import (
+    SchoolInstrument,
+    TeacherAvailability,
+    TeacherInstrument,
+    TeacherProfile,
+)
 from .serializers import (
+    SchoolInstrumentSerializer,
     TeacherAvailabilitySerializer,
     TeacherInstrumentSerializer,
     TeacherProfileSerializer,
@@ -150,6 +156,71 @@ def teacher_availability_detail(request, teacher_id, slot_id):
 
     serializer = TeacherAvailabilitySerializer(
         slot, data=request.data, partial=True, context={'profile': profile}
+    )
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'POST'])
+@teacher_or_management_required
+def school_instrument_list(request):
+    """The school's approved instrument list.
+
+    GET: any teacher/management user — feeds the instrument dropdowns.
+    POST: management only.
+    """
+    school = request.user.school
+
+    if request.method == 'GET':
+        serializer = SchoolInstrumentSerializer(
+            SchoolInstrument.objects.filter(school=school), many=True
+        )
+        return Response(serializer.data)
+
+    if request.user.user_type != 'management':
+        return Response(
+            {'error': 'Only management can edit the instrument list'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    serializer = SchoolInstrumentSerializer(
+        data=request.data, context={'school': school}
+    )
+    if serializer.is_valid():
+        serializer.save(school=school)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['PUT', 'DELETE'])
+@teacher_or_management_required
+def school_instrument_detail(request, instrument_id):
+    """Rename or remove an instrument from the school list. Management only."""
+    if request.user.user_type != 'management':
+        return Response(
+            {'error': 'Only management can edit the instrument list'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    instrument = SchoolInstrument.objects.filter(
+        pk=instrument_id, school=request.user.school
+    ).first()
+    if instrument is None:
+        return Response(
+            {'error': 'Instrument not found'}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == 'DELETE':
+        instrument.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    serializer = SchoolInstrumentSerializer(
+        instrument,
+        data=request.data,
+        partial=True,
+        context={'school': request.user.school},
     )
     if serializer.is_valid():
         serializer.save()
