@@ -94,10 +94,31 @@ INSTALLED_APPS = [
 
     # Custom authentication app
     'custom_auth',  # Your custom auth app for OAuth views and JWT handling
+
+    # Teacher professional profiles (instruments, availability, location)
+    'teacher_profiles',
+
+    # In-app notifications (bell dropdown) — full path so ready() connects signals
+    'notifications.apps.NotificationsConfig',
+    # Dashboard analytics (read-only aggregation + side-table capture models)
+    'analytics',
+
+    # Observability
+    # Prometheus metrics - exposes /metrics endpoint for Prometheus scraping
+    'django_prometheus',
+    # Health checks - exposes /health/ endpoint for container orchestration
+    'health_check',                     # Core health check
+    'health_check.db',                  # Database connectivity check
+    'health_check.cache',               # Cache backend check
+    'health_check.storage',             # Storage backend check
+    'health_check.contrib.migrations',  # Pending migrations check
+    'health_check.contrib.psutil',      # System resources (CPU, memory, disk)
 ]
 
 MIDDLEWARE = [
-	'corsheaders.middleware.CorsMiddleware',
+    # Prometheus middleware (must be first to capture all requests)
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -106,6 +127,8 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "simple_history.middleware.HistoryRequestMiddleware",  # Tracks user for audit logging
+    # Prometheus middleware (must be last to capture response metrics)
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
 ]
 
 ROOT_URLCONF = "maple_key_backend.urls"
@@ -322,13 +345,35 @@ HELCIM_TERMINAL_ID = config('HELCIM_TERMINAL_ID', default=None)
 HELCIM_WEBHOOK_SECRET = config('HELCIM_WEBHOOK_SECRET', default=None)
 HELCIM_SUBDOMAIN = config('HELCIM_SUBDOMAIN', default=None)
 
-# Structured logging — JSON format for production, console for local dev
+# --- Health checks (django-health-check) ---
+# Endpoints for container orchestration — /health/ (HTML) or /health/?format=json
+HEALTH_CHECK = {
+    # Disk usage threshold - warn if disk is more than 90% full
+    'DISK_USAGE_MAX': 90,
+    # Minimum free memory in MB
+    'MEMORY_MIN': 100,
+}
+
+# --- Prometheus metrics (django-prometheus) ---
+# Exposes /metrics for Prometheus scraping: request counts, latencies,
+# database queries, cache hits, etc.
+PROMETHEUS_EXPORT_MIGRATIONS = False  # Disable migration metrics to reduce noise
+
+# Structured logging — JSON lines to stdout on every environment so Promtail
+# can ship them to Loki and filter by level, logger name, etc. without regex.
 # File handler built conditionally: RotatingFileHandler requires /var/log/maple-key/
 # to exist and must not be instantiated in local dev or CI (DEBUG=True).
+_log_formatters = {
+    'json': {
+        '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
+        'format': '%(asctime)s %(levelname)s %(name)s %(message)s %(pathname)s %(lineno)d',
+    },
+}
+
 _log_handlers = {
     'console': {
         'class': 'logging.StreamHandler',
-        'formatter': 'console',
+        'formatter': 'json',
     },
 }
 if not DEBUG:
@@ -340,17 +385,6 @@ if not DEBUG:
         'formatter': 'json',
     }
 
-_log_formatters = {
-    'console': {
-        'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s',
-    },
-}
-if not DEBUG:
-    _log_formatters['json'] = {
-        '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
-        'format': '%(asctime)s %(levelname)s %(name)s %(message)s',
-    }
-
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -359,10 +393,15 @@ LOGGING = {
     'loggers': {
         'django': {
             'handlers': ['console'] if DEBUG else ['console', 'file'],
-            'level': 'WARNING',
+            'level': 'INFO',
             'propagate': False,
         },
         'django.request': {
+            'handlers': ['console'] if DEBUG else ['console', 'file'],
+            'level': 'WARNING',  # Avoid double-logging successful requests (Prometheus already tracks these)
+            'propagate': False,
+        },
+        'django.security': {
             'handlers': ['console'] if DEBUG else ['console', 'file'],
             'level': 'WARNING',
             'propagate': False,
@@ -370,6 +409,6 @@ LOGGING = {
     },
     'root': {
         'handlers': ['console'] if DEBUG else ['console', 'file'],
-        'level': 'WARNING',
+        'level': 'INFO',
     },
 }

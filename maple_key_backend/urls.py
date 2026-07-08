@@ -21,4 +21,15 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/billing/", include('billing.urls')),
     path("api/auth/", include('custom_auth.urls')),
+    path("api/teacher-profiles/", include('teacher_profiles.urls')),
+    path("api/notifications/", include('notifications.urls')),
+    path("api/analytics/", include('analytics.urls')),
+
+    # Observability endpoints
+    # Health check - use for container liveness/readiness probes
+    # GET /health/             - HTML status page
+    # GET /health/?format=json - JSON response for programmatic access
+    path("health/", include('health_check.urls')),
+    # Prometheus metrics - GET /metrics (request counts, latencies, etc.)
+    path("", include('django_prometheus.urls')),
 ]

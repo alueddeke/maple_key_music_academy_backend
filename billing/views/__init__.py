@@ -49,6 +49,8 @@ from .management import (
     management_approve_batch,
     management_batch_csv,
     management_reject_batch,
+    management_batch_rejection_snapshots,
+    waive_policy_settings,
     management_delete_rejected_batch,
     # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
     management_dashboard_batches,
@@ -77,6 +79,7 @@ from .teacher import (
     download_paystub,
     # Phase 22: Month-End Adjustments
     teacher_batch_adjustment_item,
+    student_waive_usage,
 )
 
 from .lessons import (

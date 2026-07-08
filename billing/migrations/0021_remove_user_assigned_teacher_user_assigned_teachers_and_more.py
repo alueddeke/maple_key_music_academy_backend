@@ -5,6 +5,29 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def create_billablecontact_if_missing(apps, schema_editor):
+    """The legacy prod database already had billing_billablecontact (created
+    outside Django migrations), so this migration registers the model
+    state-only. Fresh databases (CI, new installs) have no such table — create
+    it from the migration state so later migrations can alter it."""
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name = 'billing_billablecontact'
+            );
+        """)
+        if cursor.fetchone()[0]:
+            return
+    model = apps.get_model('billing', 'BillableContact')
+    schema_editor.create_model(model)
+
+
+def noop_reverse(apps, schema_editor):
+    pass
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -61,6 +84,9 @@ class Migration(migrations.Migration):
             ],
             database_operations=[],  # No database operations - table already exists
         ),
+        # Fresh databases (CI, new installs) don't have the pre-Django legacy
+        # table — create it from state so 0025+ can alter it.
+        migrations.RunPython(create_billablecontact_if_missing, noop_reverse),
         # Register User.assigned_teachers many-to-many field with Django's state
         migrations.SeparateDatabaseAndState(
             state_operations=[

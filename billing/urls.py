@@ -51,6 +51,8 @@ urlpatterns = [
     # Management endpoints for system settings
     path('management/settings/', views.get_system_settings, name='get_system_settings'),
     path('management/settings/update/', views.update_system_settings, name='update_system_settings'),
+    path('management/waive-policy/', views.waive_policy_settings, name='waive_policy_settings'),
+    path('students/<int:student_id>/waive-usage/', views.student_waive_usage, name='student_waive_usage'),
 
     # Management endpoints for invoice recipient emails
     path('management/invoice-recipients/', views.list_invoice_recipients, name='list_invoice_recipients'),
@@ -115,6 +117,7 @@ urlpatterns = [
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
     path('management/batches/<int:batch_id>/csv/', views.management_batch_csv, name='management_batch_csv'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
+    path('management/batches/<int:batch_id>/rejection-snapshots/', views.management_batch_rejection_snapshots, name='management_batch_rejection_snapshots'),
     path('management/batches/<int:batch_id>/delete/', views.management_delete_rejected_batch, name='management_delete_rejected_batch'),
     path('management/batches/<int:batch_id>/generate-teacher-invoice/', views.management_generate_teacher_invoice, name='management_generate_teacher_invoice'),
 

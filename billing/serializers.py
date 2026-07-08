@@ -4,7 +4,8 @@ from django.db.models import Count, Sum, Q
 from .models import (
     Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings,
     InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
-    School, SchoolSettings, RecurringLessonsSchedule, MonthlyInvoiceBatch, BatchLessonItem
+    School, SchoolSettings, RecurringLessonsSchedule, MonthlyInvoiceBatch, BatchLessonItem,
+    BatchRejectionSnapshot
 )
 
 User = get_user_model()
@@ -256,6 +257,65 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
             'reference_number': inv.reference_number,
             'total_amount': str(inv.total_amount),
         }
+
+class BatchRejectionSnapshotSerializer(serializers.ModelSerializer):
+    rejected_by_name = serializers.SerializerMethodField()
+
+    def get_rejected_by_name(self, obj):
+        return obj.rejected_by.get_full_name() if obj.rejected_by else None
+
+    class Meta:
+        model = BatchRejectionSnapshot
+        fields = [
+            'id', 'batch', 'rejected_at', 'rejected_by', 'rejected_by_name',
+            'rejection_reason', 'items', 'total_teacher_payment',
+        ]
+
+
+class WaivePolicySerializer(serializers.ModelSerializer):
+    """Waived-cancellation policy fields on SchoolSettings (MAP-101)."""
+
+    class Meta:
+        model = SchoolSettings
+        fields = [
+            'waive_limit_enabled', 'waive_limit', 'waive_period_type',
+            'waive_period_months', 'waive_period_start', 'waive_period_end',
+            'waive_period_recurring', 'updated_at',
+        ]
+        read_only_fields = ['updated_at']
+
+    def validate(self, attrs):
+        period_type = attrs.get(
+            'waive_period_type',
+            getattr(self.instance, 'waive_period_type', 'rolling'),
+        )
+        if period_type == 'fixed':
+            start = attrs.get('waive_period_start', getattr(self.instance, 'waive_period_start', None))
+            end = attrs.get('waive_period_end', getattr(self.instance, 'waive_period_end', None))
+            enabled = attrs.get('waive_limit_enabled', getattr(self.instance, 'waive_limit_enabled', False))
+            if enabled and (not start or not end):
+                raise serializers.ValidationError(
+                    {'waive_period_start': 'Fixed period requires both start and end dates.'}
+                )
+            if start and end and end < start:
+                raise serializers.ValidationError(
+                    {'waive_period_end': 'End date must be on or after the start date.'}
+                )
+            recurring = attrs.get(
+                'waive_period_recurring',
+                getattr(self.instance, 'waive_period_recurring', True),
+            )
+            if recurring and start and end and (end - start).days > 366:
+                raise serializers.ValidationError(
+                    {'waive_period_end': 'A yearly-repeating period cannot be longer than one year.'}
+                )
+        months = attrs.get('waive_period_months', getattr(self.instance, 'waive_period_months', 4))
+        if period_type == 'rolling' and (not months or months < 1):
+            raise serializers.ValidationError(
+                {'waive_period_months': 'Rolling window must be at least 1 month.'}
+            )
+        return attrs
+
 
 # Management serializers for new approval system
 class ApprovedEmailSerializer(serializers.ModelSerializer):

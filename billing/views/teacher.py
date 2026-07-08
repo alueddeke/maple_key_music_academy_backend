@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, GlobalRateSettings
+from ..waive_policy import apply_waive_limit, get_waive_usage
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer
@@ -742,10 +743,20 @@ def batch_lesson_item(request, batch_id, item_id):
             allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
+        # MAP-101: past the waive limit a teacher's "waived" becomes forfeited
+        # (student charged). Management edits bypass this — that's the override.
+        update_data, waive_usage, waive_converted = apply_waive_limit(
+            update_data, item.student, request.user.school, item=item
+        )
+
         serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data)
+            data = dict(serializer.data)
+            if waive_converted:
+                data['waive_converted_to_forfeited'] = True
+                data['waive_usage'] = waive_usage
+            return Response(data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'DELETE':
@@ -862,10 +873,34 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
         else:
             update_data['teacher_notes'] = audit_line
 
+    # MAP-101: past the waive limit a teacher's "waived" becomes forfeited
+    # (student charged). Management edits bypass this — that's the override.
+    update_data, waive_usage, waive_converted = apply_waive_limit(
+        update_data, item.student, request.user.school, item=item
+    )
+    # D-03 still holds for the converted status: a future lesson cannot be
+    # forfeited, so a future waive past the limit is refused outright.
+    if waive_converted and item.scheduled_date > today:
+        return Response(
+            {
+                'error': (
+                    'Waive limit reached — this cancellation would be charged '
+                    '(forfeited), and future lessons cannot be forfeited. '
+                    'Wait until the lesson date or ask management.'
+                ),
+                'waive_usage': waive_usage,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
     if serializer.is_valid():
         serializer.save()
-        return Response(serializer.data)
+        data = dict(serializer.data)
+        if waive_converted:
+            data['waive_converted_to_forfeited'] = True
+            data['waive_usage'] = waive_usage
+        return Response(data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -965,3 +1000,31 @@ def download_paystub(request, batch_id):
             {'error': f'Failed to generate paystub: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@api_view(['GET'])
+@teacher_or_management_required
+def student_waive_usage(request, student_id):
+    """Waived-cancellation usage for a student in the current policy period.
+
+    Feeds the cancellation modal so teachers see remaining waives (and the
+    at-limit warning) BEFORE choosing waived vs forfeited (MAP-101).
+    """
+    student = User.objects.filter(
+        pk=student_id, user_type='student', school=request.user.school
+    ).first()
+    if student is None:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    on_date = None
+    date_param = request.query_params.get('date')
+    if date_param:
+        try:
+            on_date = date.fromisoformat(date_param)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Invalid date format. Use YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    return Response(get_waive_usage(student, request.user.school, on_date=on_date))

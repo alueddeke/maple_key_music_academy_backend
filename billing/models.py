@@ -92,6 +92,41 @@ class SchoolSettings(models.Model):
     payment_terms = models.CharField(max_length=50, default="Due in 15 days", help_text="Default payment terms for student invoices")
     management_notification_email = models.EmailField(blank=True, help_text="Email for management notifications (future use)")
 
+    # Waived-cancellation policy (MAP-101): cap free (waived) cancellations per
+    # period; past the cap a teacher's "waived" is recorded as forfeited
+    # (student charged). Disabled until management turns it on in Settings.
+    WAIVE_PERIOD_TYPES = [
+        ('rolling', 'Rolling window (last N months)'),
+        ('fixed', 'Fixed dates'),
+    ]
+    waive_limit_enabled = models.BooleanField(
+        default=False,
+        help_text="Enforce the waived-cancellation limit",
+    )
+    waive_limit = models.PositiveIntegerField(
+        default=3,
+        help_text="Waived cancellations allowed per period",
+    )
+    waive_period_type = models.CharField(
+        max_length=10, choices=WAIVE_PERIOD_TYPES, default='rolling'
+    )
+    waive_period_months = models.PositiveIntegerField(
+        default=4,
+        help_text="Rolling window length in months (rolling type)",
+    )
+    waive_period_start = models.DateField(
+        null=True, blank=True,
+        help_text="Fixed period start (fixed type)",
+    )
+    waive_period_end = models.DateField(
+        null=True, blank=True,
+        help_text="Fixed period end (fixed type)",
+    )
+    waive_period_recurring = models.BooleanField(
+        default=True,
+        help_text="Fixed period repeats every year (month/day match)",
+    )
+
     # tracking
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='school_settings_updates')
@@ -937,6 +972,42 @@ class BatchLessonItem(models.Model):
             if prior_lesson_count == 0 and prior_batch_count == 0:
                 self.status = 'trial'
         super().save(*args, **kwargs)
+
+
+class BatchRejectionSnapshot(models.Model):
+    """Frozen copy of a batch's line items at the moment management rejected it.
+
+    Rejection flips the batch back to 'draft' so the teacher can edit and
+    resubmit — the live batch keeps evolving (including schedule re-sync).
+    This snapshot is the record-keeping artifact: what the teacher actually
+    submitted and management actually rejected (MAP-99). A batch rejected
+    multiple times gets one snapshot per rejection.
+    """
+    batch = models.ForeignKey(
+        MonthlyInvoiceBatch,
+        on_delete=models.CASCADE,
+        related_name='rejection_snapshots',
+    )
+    school = models.ForeignKey('School', on_delete=models.PROTECT, related_name='+')
+    rejected_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='+',
+        limit_choices_to={'user_type': 'management'},
+    )
+    rejected_at = models.DateTimeField(auto_now_add=True)
+    rejection_reason = models.TextField()
+    # Serialized BatchLessonItem rows as submitted (student_name, scheduled_date,
+    # start_time, duration, lesson_type, rates, status, notes, ...)
+    items = models.JSONField(default=list)
+    total_teacher_payment = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    class Meta:
+        ordering = ['-rejected_at']
+
+    def __str__(self):
+        return f"Rejection snapshot of {self.batch.batch_number} at {self.rejected_at:%Y-%m-%d %H:%M}"
 
 
 class StudentInvoice(models.Model):
