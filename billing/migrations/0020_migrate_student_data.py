@@ -116,6 +116,19 @@ def migrate_students_to_users(apps, schema_editor):
 def migrate_billable_contacts(apps, schema_editor):
     """Transform BillableContact schema and update student references"""
     with schema_editor.connection.cursor() as cursor:
+        # Fresh databases (CI, new installs) never had the legacy table — the
+        # modern billing_billablecontact is created by a later migration.
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name = 'billing_billablecontact'
+            );
+        """)
+        if not cursor.fetchone()[0]:
+            print("billing_billablecontact table doesn't exist, skipping transform")
+            return
+
         print("Transforming BillableContact schema...")
 
         # Drop old foreign key first (before any data changes)
