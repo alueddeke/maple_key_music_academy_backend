@@ -21,6 +21,11 @@ gunicorn
 resend
 python-json-logger==2.0.7
 
+# Observability dependencies
+django-health-check==3.18.3
+django-prometheus==2.3.1
+psutil==6.1.1  # Required for health_check.contrib.psutil (CPU, memory, disk metrics)
+
 # Testing dependencies
 pytest==8.3.4
 pytest-django==4.9.0
