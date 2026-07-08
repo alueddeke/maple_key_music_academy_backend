@@ -12,8 +12,9 @@ Covers:
 - Teacher/unauthenticated callers rejected (T-26-01)
 """
 
+import calendar
 import pytest
-from datetime import date, time
+from datetime import date, time, timedelta
 from decimal import Decimal
 from django.urls import reverse
 from rest_framework.test import APIClient
@@ -301,12 +302,45 @@ def _make_batch(teacher, school, student, sched, month, year, status_value, date
     return batch
 
 
+def _shift_month(year, month, delta):
+    """Return (year, month) shifted forward by ``delta`` months."""
+    m = month + delta - 1
+    return year + m // 12, m % 12 + 1
+
+
+def _future_month_wednesdays(months_ahead=1):
+    """(year, month, [first_wed, second_wed]) of a month ``months_ahead``
+    months after the real current month.
+
+    The reconcile boundary is ``scheduled_date > date.today()`` (real clock),
+    so these tests must use dates that are strictly future on ANY run date.
+    The first Wednesday of a month falls on the 7th at the latest, so both
+    returned Wednesdays are always within the month.
+    """
+    today = date.today()
+    year, month = _shift_month(today.year, today.month, months_ahead)
+    first = date(year, month, 1)
+    w1 = first + timedelta(days=(2 - first.weekday()) % 7)  # day_of_week=2 (Wed)
+    return year, month, [w1, w1 + timedelta(days=7)]
+
+
+def _month_bounds_iso(year, month):
+    """('YYYY-MM-01', 'YYYY-MM-<last>') pause window covering a whole month."""
+    last = calendar.monthrange(year, month)[1]
+    return (
+        date(year, month, 1).isoformat(),
+        date(year, month, last).isoformat(),
+    )
+
+
 @pytest.mark.django_db
 class TestPauseCascadeToOpenBatches:
     """Pausing a student removes future in-window lessons from open teacher batches.
 
-    today is 2026-06-25, so all July dates are future. Boundaries: only
-    draft/submitted batches, only future schedule-sourced items (T-26-10).
+    ``reconcile_open_batches_for_student`` only touches items strictly after
+    the real ``date.today()``, so all batch dates here are computed relative
+    to the run date (next month's Wednesdays) instead of hardcoded. Boundaries:
+    only draft/submitted batches, only future schedule-sourced items (T-26-10).
     """
 
     def _url(self, student_id):
@@ -322,80 +356,93 @@ class TestPauseCascadeToOpenBatches:
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
-        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'draft',
-                            [date(2026, 7, 8), date(2026, 7, 15)])
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'draft', weds)
+        pause_start, pause_end = _month_bounds_iso(year, month)
         resp = authenticated_management_client.post(
             self._url(student.id),
-            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+            {'pause_start': pause_start, 'pause_end': pause_end}, format='json')
         assert resp.status_code == status.HTTP_200_OK
-        assert self._dates(batch, student) == set()  # both future July items removed
+        assert self._dates(batch, student) == set()  # both future items removed
 
     def test_pause_keeps_items_outside_window(
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
-        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'draft',
-                            [date(2026, 7, 8)])
-        # Pause August only -> July 8 is outside the window, must stay.
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'draft',
+                            [weds[0]])
+        # Pause the FOLLOWING month only -> the batch item is outside the
+        # window, must stay.
+        next_year, next_month = _shift_month(year, month, 1)
+        pause_start, pause_end = _month_bounds_iso(next_year, next_month)
         resp = authenticated_management_client.post(
             self._url(student.id),
-            {'pause_start': '2026-08-01', 'pause_end': '2026-08-31'}, format='json')
+            {'pause_start': pause_start, 'pause_end': pause_end}, format='json')
         assert resp.status_code == status.HTTP_200_OK
-        assert date(2026, 7, 8) in self._dates(batch, student)
+        assert weds[0] in self._dates(batch, student)
 
     def test_pause_keeps_past_items(
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
-        # Past-dated item (before today 2026-06-25), inside an open-ended pause.
-        batch = _make_batch(teacher_user, school, student, sched, 6, 2026, 'draft',
-                            [date(2026, 6, 10)])
+        # Past-dated item (two weeks before the real today), inside an
+        # open-ended pause starting at that month's first day.
+        past = date.today() - timedelta(days=14)
+        batch = _make_batch(teacher_user, school, student, sched,
+                            past.month, past.year, 'draft', [past])
+        pause_start, _ = _month_bounds_iso(past.year, past.month)
         resp = authenticated_management_client.post(
             self._url(student.id),
-            {'pause_start': '2026-06-01', 'pause_end': None}, format='json')
+            {'pause_start': pause_start, 'pause_end': None}, format='json')
         assert resp.status_code == status.HTTP_200_OK
-        assert date(2026, 6, 10) in self._dates(batch, student)  # already happened -> kept
+        assert past in self._dates(batch, student)  # already happened -> kept
 
     def test_pause_does_not_touch_approved_batch(
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
-        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'approved',
-                            [date(2026, 7, 8)])
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'approved',
+                            [weds[0]])
+        pause_start, pause_end = _month_bounds_iso(year, month)
         resp = authenticated_management_client.post(
             self._url(student.id),
-            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+            {'pause_start': pause_start, 'pause_end': pause_end}, format='json')
         assert resp.status_code == status.HTTP_200_OK
-        assert date(2026, 7, 8) in self._dates(batch, student)  # locked -> unchanged
+        assert weds[0] in self._dates(batch, student)  # locked -> unchanged
 
     def test_pause_cleans_submitted_batch(
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
-        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'submitted',
-                            [date(2026, 7, 8)])
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'submitted',
+                            [weds[0]])
+        pause_start, pause_end = _month_bounds_iso(year, month)
         resp = authenticated_management_client.post(
             self._url(student.id),
-            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+            {'pause_start': pause_start, 'pause_end': pause_end}, format='json')
         assert resp.status_code == status.HTTP_200_OK
-        assert date(2026, 7, 8) not in self._dates(batch, student)
+        assert weds[0] not in self._dates(batch, student)
 
     def test_resume_readds_future_items_to_open_batch(
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
-        batch = _make_batch(teacher_user, school, student, sched, 7, 2026, 'draft',
-                            [date(2026, 7, 8), date(2026, 7, 15)])
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'draft', weds)
+        pause_start, pause_end = _month_bounds_iso(year, month)
         # Pause removes them...
         authenticated_management_client.post(
             self._url(student.id),
-            {'pause_start': '2026-07-01', 'pause_end': '2026-07-31'}, format='json')
+            {'pause_start': pause_start, 'pause_end': pause_end}, format='json')
         assert self._dates(batch, student) == set()
-        # ...resume restores the future July Wednesdays the schedule projects.
+        # ...resume restores the future Wednesdays the schedule projects.
         resp = authenticated_management_client.post(
             self._url(student.id),
             {'pause_start': None, 'pause_end': None}, format='json')
         assert resp.status_code == status.HTTP_200_OK
         restored = self._dates(batch, student)
-        assert date(2026, 7, 8) in restored
-        assert date(2026, 7, 15) in restored
+        assert weds[0] in restored
+        assert weds[1] in restored
