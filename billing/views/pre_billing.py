@@ -198,6 +198,8 @@ def _send_single_invoice(invoice, school):
 
     line_items = [
         {
+            # Helcim requires a sku for line items to appear on the invoice.
+            'sku': f'LESSON-{l.pk}',
             'description': (
                 f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
                 if l.scheduled_date is not None
@@ -679,6 +681,8 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     # Step 7: Build replacement line items from remaining lessons (post-removal)
     line_items = [
         {
+            # Helcim requires a sku for line items to appear on the invoice.
+            'sku': f'LESSON-{l.pk}',
             'description': (
                 f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
                 if l.scheduled_date is not None
