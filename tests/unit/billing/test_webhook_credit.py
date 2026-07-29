@@ -63,13 +63,14 @@ def make_helcim_signed_request(
     signature = base64.b64encode(digest).decode("utf-8")
 
     url = reverse("payment_callback")
+    # Real Helcim header format: "v1,<base64sig>" (SVix-style versioned list).
     return api_client.post(
         url,
         data=raw_body,
         content_type="application/json",
         HTTP_WEBHOOK_ID=webhook_id,
         HTTP_WEBHOOK_TIMESTAMP=webhook_timestamp,
-        HTTP_WEBHOOK_SIGNATURE=signature,
+        HTTP_WEBHOOK_SIGNATURE=f"v1,{signature}",
     )
 
 
@@ -96,7 +97,7 @@ def test_webhook_credit_happy_path_creates_credit_transaction_and_increments_bal
         amount=Decimal('60.00'),
         period_start='2026-06-01',
         period_end='2026-06-30',
-        helcim_invoice_id='INV-2026-06-S1-0001',
+        helcim_invoice_number='INV-2026-06-S1-0001',
     )
 
     # Create StudentCreditAccount with zero balance
@@ -184,7 +185,7 @@ def test_webhook_credit_missing_student_credit_account_returns_200_no_credit(
         amount=Decimal('60.00'),
         period_start='2026-06-01',
         period_end='2026-06-30',
-        helcim_invoice_id='INV-2026-06-S1-0002',
+        helcim_invoice_number='INV-2026-06-S1-0002',
     )
 
     body_dict = {"id": "tx-noaccount-001", "type": "cardTransaction"}
@@ -273,7 +274,7 @@ def test_webhook_credit_duplicate_post_does_not_double_apply(
         amount=Decimal('60.00'),
         period_start='2026-06-01',
         period_end='2026-06-30',
-        helcim_invoice_id='INV-2026-06-S1-0003',
+        helcim_invoice_number='INV-2026-06-S1-0003',
     )
     account = StudentCreditAccount.objects.create(
         student=student_user,

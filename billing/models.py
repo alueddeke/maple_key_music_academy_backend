@@ -1564,6 +1564,15 @@ class PreBillingInvoice(models.Model):
         blank=True,
         help_text="Helcim invoice ID — populated after send (BILL-07). PCI-safe: no card data.",
     )
+    helcim_invoice_number = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Helcim invoiceNumber (e.g. INV1791) from create_invoice response. "
+            "Payment/webhook responses reference invoiceNumber, not invoiceId — "
+            "this is the field webhook reconciliation matches on."
+        ),
+    )
     payment_token = models.CharField(
         max_length=255,
         blank=True,

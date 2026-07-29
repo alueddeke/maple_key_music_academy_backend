@@ -227,6 +227,9 @@ def _send_single_invoice(invoice, school):
     # Minimal atomic block ONLY for the DB write
     with transaction.atomic():
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        # Payment/webhook responses reference invoiceNumber, not invoiceId —
+        # webhook reconciliation matches on this field.
+        invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
         invoice.payment_token = helcim_response['token']
         invoice.status = 'sent'
         invoice.save()
@@ -742,6 +745,7 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     with transaction.atomic():
         invoice.lessons.remove(lesson)
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
         invoice.payment_token = helcim_response['token']
         invoice.status = 'adjusted'
         invoice.amount = amount

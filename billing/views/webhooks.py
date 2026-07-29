@@ -48,8 +48,13 @@ def verify_helcim_signature(
     Expected: base64-encoded HMAC-SHA256 digest.
     Comparison: hmac.compare_digest() — timing-safe.
 
-    Empty webhook_signature goes through compare_digest; no early return on
-    empty string (that would create a timing oracle).
+    Header format (SVix-style): space-delimited list of "v<N>,<base64sig>"
+    entries, most commonly length one — e.g. "v1,CsvqmJB7...". The version
+    prefix must be stripped before comparison; comparing against the raw
+    header value fails 100% of the time.
+
+    Empty webhook_signature still goes through compare_digest; no early
+    return on empty string (that would create a timing oracle).
     """
     signed_content = f"{webhook_id}.{webhook_timestamp}.{raw_body.decode('utf-8')}"
     # T-18-C10: base64-decode the env var before use as HMAC key (Pitfall 5)
@@ -57,7 +62,11 @@ def verify_helcim_signature(
     expected = base64.b64encode(
         hmac.new(secret_bytes, signed_content.encode('utf-8'), hashlib.sha256).digest()
     ).decode('utf-8')
-    return hmac.compare_digest(expected, webhook_signature)
+    for candidate in webhook_signature.split(' '):
+        _version, _sep, signature = candidate.partition(',')
+        if hmac.compare_digest(expected, signature):
+            return True
+    return False
 
 
 @csrf_exempt
@@ -96,9 +105,20 @@ def payment_callback(request):
     except json.JSONDecodeError:
         return Response({'error': 'Invalid JSON'}, status=400)
 
+    # Non-cardTransaction events (e.g. terminalCancel — nested {data, type},
+    # no top-level id) must be acknowledged with 200: Helcim retries any
+    # non-2xx on a backoff schedule up to ~10h, so a 400 here becomes a
+    # retry loop hammering the endpoint.
+    event_type = str(payload.get('type', ''))
+    if event_type != 'cardTransaction':
+        logger.info('Ignoring Helcim webhook type=%s', event_type)
+        return Response({'status': 'ignored'}, status=200)
+
     tx_id = str(payload.get('id', ''))
     if not tx_id:
-        return Response({'error': 'Missing transaction id'}, status=400)
+        # Same payload gets retried verbatim — a 400 can never succeed later.
+        logger.warning('Helcim cardTransaction webhook missing id — ignoring')
+        return Response({'status': 'ignored'}, status=200)
 
     # D-12 / HELM-04: idempotency guard via unique constraint on helcim_transaction_id.
     # school=None: no school context from unauthenticated webhook (Phase 20 sets it).
@@ -144,12 +164,14 @@ def payment_callback(request):
         try:
             with transaction.atomic():
                 # Use filter().order_by('-id').first() instead of .get() to guard against
-                # MultipleObjectsReturned — helcim_invoice_id has no unique constraint on
-                # the model, so a duplicate ID would crash the webhook with 500 and cause
+                # MultipleObjectsReturned — helcim_invoice_number has no unique constraint
+                # on the model, so a duplicate would crash the webhook with 500 and cause
                 # Helcim to retry indefinitely. None is handled identically to DoesNotExist.
+                # Match on helcim_invoice_number: card-transaction payloads carry
+                # invoiceNumber (e.g. INV1791), never the numeric invoiceId.
                 invoice = (
                     PreBillingInvoice.objects
-                    .filter(helcim_invoice_id=event.invoice_id)
+                    .filter(helcim_invoice_number=event.invoice_id)
                     .order_by('-id')
                     .first()
                 )
