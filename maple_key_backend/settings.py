@@ -345,6 +345,19 @@ HELCIM_TERMINAL_ID = config('HELCIM_TERMINAL_ID', default=None)
 HELCIM_WEBHOOK_SECRET = config('HELCIM_WEBHOOK_SECRET', default=None)
 HELCIM_SUBDOMAIN = config('HELCIM_SUBDOMAIN', default=None)
 
+# --- Test-data filtering (MAP-113) ---
+# When ANALYTICS_EXCLUDE_TEST_DATA is true (production), analytics aggregations
+# exclude rows tied to accounts whose email ends with one of these domains.
+# Off by default so dev/UAT can watch test data populate the dashboard.
+ANALYTICS_EXCLUDE_TEST_DATA = config(
+    'ANALYTICS_EXCLUDE_TEST_DATA', default=False, cast=bool
+)
+TEST_ACCOUNT_EMAIL_DOMAINS = [
+    d.strip().lstrip('@')
+    for d in config('TEST_ACCOUNT_EMAIL_DOMAINS', default='maplekeytest.com').split(',')
+    if d.strip()
+]
+
 # --- Health checks (django-health-check) ---
 # Endpoints for container orchestration — /health/ (HTML) or /health/?format=json
 HEALTH_CHECK = {
