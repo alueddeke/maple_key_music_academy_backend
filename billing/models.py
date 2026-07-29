@@ -785,6 +785,15 @@ class MonthlyInvoiceBatch(models.Model):
         help_text="Date when payment was processed"
     )
 
+    # MAP-103: month-end archiving. Archived batches disappear from the
+    # Payroll working lists but keep every record (lesson items, rejection
+    # snapshots, history) — nothing is deleted.
+    archived_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When this batch was archived off the Payroll lists. Null = active.",
+    )
+
     # tracking
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

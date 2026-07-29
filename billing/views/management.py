@@ -5,6 +5,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, BatchRejectionSnapshot, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
 from ..serializers import (
@@ -1344,7 +1345,8 @@ def management_approved_batches(request):
     """List all approved batches"""
     batches = MonthlyInvoiceBatch.objects.filter(
         status='approved',
-        school=request.user.school
+        school=request.user.school,
+        archived_at__isnull=True,
     ).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
@@ -1364,6 +1366,7 @@ def management_month_end_queue(request):
         status='approved',
         invoice__isnull=True,
         school=request.user.school,
+        archived_at__isnull=True,
     ).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
@@ -1535,6 +1538,7 @@ def management_rejected_batches(request):
     batches = MonthlyInvoiceBatch.objects.filter(
         status='draft',
         school=request.user.school,
+        archived_at__isnull=True,
     ).exclude(rejection_reason='').exclude(rejection_reason__isnull=True).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
@@ -2093,6 +2097,94 @@ def management_delete_rejected_batch(request, batch_id):
 
     batch.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ============================================================================
+# MAP-103: Monthly batch archive
+# ============================================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_archive_month(request):
+    """
+    Archive all finished batches (approved, or rejected drafts) for one month.
+
+    POST body: {"month": 7, "year": 2026}
+
+    Archiving only sets archived_at — nothing is deleted. Lesson items,
+    BatchRejectionSnapshot records (MAP-99), linked invoices, and history all
+    survive; the batches just leave the Payroll working lists. Submitted and
+    clean-draft batches are never archived (still in flight).
+    """
+    try:
+        month = int(request.data.get('month'))
+        year = int(request.data.get('year'))
+        if not 1 <= month <= 12 or year < 2020:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response(
+            {'error': 'month (1-12) and year are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    finished = (
+        MonthlyInvoiceBatch.objects.filter(
+            school=request.user.school,
+            month=month,
+            year=year,
+            archived_at__isnull=True,
+        )
+        .filter(
+            Q(status='approved')
+            | (Q(status='draft') & ~Q(rejection_reason=''))
+        )
+    )
+    archived = finished.update(archived_at=timezone.now())
+    return Response({'archived': archived, 'month': month, 'year': year})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_archived_batches(request):
+    """List archived batches, newest archive first. Optional ?month=&year= filter."""
+    batches = MonthlyInvoiceBatch.objects.filter(
+        school=request.user.school,
+        archived_at__isnull=False,
+    ).order_by('-archived_at')
+    month = request.query_params.get('month')
+    year = request.query_params.get('year')
+    if month and year:
+        try:
+            batches = batches.filter(month=int(month), year=int(year))
+        except ValueError:
+            return Response(
+                {'error': 'month and year must be integers'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_unarchive_batch(request, batch_id):
+    """Return a single archived batch to the Payroll working lists."""
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id, school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+    if batch.archived_at is None:
+        return Response(
+            {'error': 'Batch is not archived'}, status=status.HTTP_400_BAD_REQUEST
+        )
+    batch.archived_at = None
+    batch.save(update_fields=['archived_at', 'updated_at'])
+    return Response(MonthlyInvoiceBatchSerializer(batch).data)
 
 
 # ============================================================================

@@ -213,7 +213,7 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
             'rejection_reason', 'invoice', 'invoice_detail',
             'payment_method', 'payment_method_display', 'payment_date',
             'lesson_items', 'total_teacher_payment', 'total_student_charges',
-            'lesson_count', 'paystub_url', 'created_at', 'updated_at'
+            'lesson_count', 'paystub_url', 'archived_at', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'batch_number', 'submitted_at', 'reviewed_by', 'reviewed_at',
