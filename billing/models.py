@@ -54,6 +54,25 @@ class School(models.Model):
         validators=[MinValueValidator(1), MaxValueValidator(31)],
         help_text="Day of the month (1-31)"
     )
+
+    # Per-school Helcim credentials (multi-school). Blank → fall back to the
+    # HELCIM_* environment settings, which serve the first/default school.
+    helcim_api_token = models.CharField(
+        max_length=255, blank=True,
+        help_text="Helcim API token for this school. Blank = use HELCIM_API_TOKEN env setting.",
+    )
+    helcim_terminal_id = models.CharField(
+        max_length=50, blank=True,
+        help_text="Helcim terminal ID. Blank = use HELCIM_TERMINAL_ID env setting.",
+    )
+    helcim_subdomain = models.CharField(
+        max_length=100, blank=True,
+        help_text="Helcim account subdomain for hosted payment URLs. Blank = use HELCIM_SUBDOMAIN env setting.",
+    )
+    helcim_webhook_secret = models.CharField(
+        max_length=255, blank=True,
+        help_text="Base64 webhook verifier token. Blank = use HELCIM_WEBHOOK_SECRET env setting.",
+    )
     payment_terms_days = models.PositiveIntegerField(default=7)
     cancellation_notice_hours = models.PositiveIntegerField(default=24)
 
@@ -1288,6 +1307,40 @@ class HelcimWebhookEvent(models.Model):
         default=Decimal('0.00'),
         help_text="Payment amount. Always use Decimal(str(value)) when converting from Helcim JSON.",
     )
+    # Gating fields from the secondary GET /v2/card-transactions/{id} call.
+    # Credit is applied ONLY for status=APPROVED, type=purchase/capture.
+    transaction_status = models.CharField(
+        max_length=30, blank=True,
+        help_text="Helcim transaction status (e.g. APPROVED, DECLINED).",
+    )
+    transaction_type = models.CharField(
+        max_length=30, blank=True,
+        help_text="Helcim transaction type (e.g. purchase, refund, reverse).",
+    )
+    PROCESSING_STATUS_CHOICES = [
+        ('pending', 'Pending'),                    # stored, not yet processed
+        ('credited', 'Credited'),                  # credit applied, invoice paid
+        ('credited_partial', 'Credited (partial)'),  # credit applied, amount < invoice amount
+        ('not_approved', 'Not approved'),          # declined/failed — no credit
+        ('non_purchase', 'Non-purchase'),          # refund/reverse/verify — no credit, needs manual review
+        ('no_invoice', 'No matching invoice'),     # retryable
+        ('no_account', 'No credit account'),       # retryable
+        ('enrichment_failed', 'Enrichment failed'),  # secondary GET failed — retryable
+    ]
+    processing_status = models.CharField(
+        max_length=30,
+        choices=PROCESSING_STATUS_CHOICES,
+        default='pending',
+        help_text="Outcome of credit reconciliation. Retryable states are re-attempted on webhook retry or via retry_webhook_events.",
+    )
+    last_error = models.TextField(
+        blank=True,
+        help_text="Last processing error detail, for admin review.",
+    )
+    processed_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When credit reconciliation last completed (any terminal outcome).",
+    )
     received_at = models.DateTimeField(auto_now_add=True)
 
     history = HistoricalRecords()
@@ -1498,7 +1551,7 @@ class InvoiceRecipientEmail(models.Model):
         related_name='invoice_recipient_emails',
         help_text="School this invoice recipient belongs to"
     )
-    email = models.EmailField(unique=True, help_text='Recipient email address for invoice PDFs')
+    email = models.EmailField(help_text='Recipient email address for invoice PDFs')
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
         User,
@@ -1515,6 +1568,9 @@ class InvoiceRecipientEmail(models.Model):
         verbose_name = 'Invoice Recipient Email'
         verbose_name_plural = 'Invoice Recipient Emails'
         ordering = ['created_at']
+        # Same address may receive invoices for two different schools;
+        # uniqueness is per school, not global.
+        unique_together = [['school', 'email']]
 
     def __str__(self):
         return self.email
@@ -1535,6 +1591,7 @@ class PreBillingInvoice(models.Model):
 
     STATUS_CHOICES = [
         ('draft', 'Draft'),
+        ('sending', 'Sending'),  # transient claim state — guards against concurrent double-send
         ('sent', 'Sent'),
         ('adjusted', 'Adjusted'),
         ('paid', 'Paid'),
@@ -1586,6 +1643,14 @@ class PreBillingInvoice(models.Model):
         max_length=255,
         blank=True,
         help_text="Raw Helcim hosted-payment token (not the full URL). URL built as: https://{HELCIM_SUBDOMAIN}.myhelcim.com/order/?token={payment_token}",
+    )
+    email_sent = models.BooleanField(
+        default=False,
+        help_text="True once the payment-request email was delivered to Resend without error.",
+    )
+    email_error = models.TextField(
+        blank=True,
+        help_text="Last email delivery error. Cleared on successful send/resend.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
