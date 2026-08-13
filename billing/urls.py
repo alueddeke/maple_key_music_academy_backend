@@ -135,6 +135,7 @@ urlpatterns = [
     path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
     path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),
     path('management/pre-billing/<int:invoice_id>/remove-lesson/', views.management_pre_billing_remove_lesson, name='management_pre_billing_remove_lesson'),
+    path('management/pre-billing/<int:invoice_id>/resend-email/', views.management_pre_billing_resend_email, name='management_pre_billing_resend_email'),
 
     # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
     # NOTE: management/invoices/<int:pk>/ (PATCH) is separate from the existing

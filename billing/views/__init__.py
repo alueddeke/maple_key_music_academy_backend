@@ -113,4 +113,5 @@ from .pre_billing import (
     management_pre_billing_send,
     management_pre_billing_send_all,
     management_pre_billing_remove_lesson,
+    management_pre_billing_resend_email,
 )

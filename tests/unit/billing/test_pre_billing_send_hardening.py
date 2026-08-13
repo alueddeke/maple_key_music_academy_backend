@@ -1,0 +1,243 @@
+"""
+Unit tests for pre-billing send hardening:
+
+  - Wallet credit rides as a Helcim invoice-level discount so the hosted
+    payment page charges exactly invoice.amount (net), never gross
+  - Double-send guard: concurrent/second send returns 409, no duplicate
+    Helcim invoice
+  - Helcim failure releases the 'sending' claim back to draft
+  - Email failure is recorded on the invoice (email_sent/email_error)
+    and recoverable via the resend-email endpoint
+"""
+
+from datetime import date
+from decimal import Decimal
+from unittest import mock
+
+import pytest
+from django.urls import reverse
+from rest_framework.test import APIClient
+
+from billing.models import (
+    PreBillingInvoice,
+    BillableContact,
+    Lesson,
+    StudentCreditAccount,
+)
+from billing.services.helcim_client import HelcimAPIError
+
+HELCIM_RESPONSE = {'invoiceId': 111, 'invoiceNumber': 'INV900', 'token': 'tok-abc'}
+
+
+@pytest.fixture
+def management_client(management_user):
+    client = APIClient()
+    client.force_authenticate(user=management_user)
+    return client
+
+
+def _student_with_contact(school, tag='send'):
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    student = User.objects.create_user(
+        email=f'student_{tag}@prebilling.test',
+        password='testpass123',
+        user_type='student',
+        first_name='Send',
+        last_name='Hardening',
+        school=school,
+        is_approved=True,
+    )
+    BillableContact.objects.create(
+        student=student,
+        school=school,
+        is_primary=True,
+        first_name='Parent',
+        last_name='Hardening',
+        email=f'contact_{tag}@prebilling.test',
+        phone='555-0100',
+        street_address='123 Test St',
+        city='Toronto',
+        province='ON',
+        postal_code='M5H 2N2',
+        helcim_customer_id='cust-1',
+    )
+    return student
+
+
+def _sendable_invoice(school, teacher_user, student, amount, lesson_prices=('60.00', '60.00')):
+    """Invoice with real lessons; amount may be below gross (credit applied)."""
+    invoice = PreBillingInvoice.objects.create(
+        student=student,
+        school=school,
+        status='draft',
+        amount=Decimal(amount),
+        period_start=date(2026, 8, 1),
+        period_end=date(2026, 8, 31),
+    )
+    for i, price in enumerate(lesson_prices):
+        lesson = Lesson.objects.create(
+            teacher=teacher_user,
+            student=student,
+            school=school,
+            lesson_type='online',
+            teacher_rate=Decimal('45.00'),
+            student_rate=Decimal(price),
+            scheduled_date=date(2026, 8, 3 + 7 * i),
+            duration=1.0,
+            status='confirmed',
+        )
+        # Lesson.save() auto-marks a student's first lesson as trial and zeroes
+        # student_rate — bypass via queryset update to keep sentinel rates.
+        Lesson.objects.filter(pk=lesson.pk).update(
+            is_trial=False, student_rate=Decimal(price)
+        )
+        invoice.lessons.add(lesson)
+    return invoice
+
+
+@pytest.mark.django_db
+def test_send_passes_credit_as_helcim_discount(management_client, school, teacher_user):
+    """gross 120, amount 75 → Helcim invoice gets discount 45 so amountDue == 75."""
+    student = _student_with_contact(school, 'discount')
+    invoice = _sendable_invoice(school, teacher_user, student, '75.00')
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        response = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 200
+    _, kwargs = MockClient.return_value.create_invoice.call_args
+    assert kwargs['discount'] == {'amount': 45.0, 'details': 'Account credit applied'}
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+
+
+@pytest.mark.django_db
+def test_send_without_credit_passes_no_discount(management_client, school, teacher_user):
+    """amount == gross → discount is None."""
+    student = _student_with_contact(school, 'nodiscount')
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        response = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 200
+    _, kwargs = MockClient.return_value.create_invoice.call_args
+    assert kwargs['discount'] is None
+
+
+@pytest.mark.django_db
+def test_second_send_returns_409_no_duplicate_helcim_invoice(
+    management_client, school, teacher_user
+):
+    """Second send of the same invoice → 409, create_invoice called exactly once."""
+    student = _student_with_contact(school, 'conflict')
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+    url = reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        r1 = management_client.post(url)
+        r2 = management_client.post(url)
+
+    assert r1.status_code == 200
+    # Second attempt fails the draft-status guard (400) — and even a request
+    # racing past that guard hits the atomic claim (409). Either way: no call.
+    assert r2.status_code in (400, 409)
+    assert MockClient.return_value.create_invoice.call_count == 1
+
+
+@pytest.mark.django_db
+def test_helcim_failure_releases_claim_back_to_draft(management_client, school, teacher_user):
+    """create_invoice raises → invoice back to draft (not stuck in 'sending')."""
+    student = _student_with_contact(school, 'release')
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.side_effect = HelcimAPIError('boom', status_code=500)
+        response = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 400
+    invoice.refresh_from_db()
+    assert invoice.status == 'draft'
+
+
+@pytest.mark.django_db
+def test_email_failure_recorded_and_recoverable_via_resend(
+    management_client, school, teacher_user
+):
+    """Email fails after Helcim send → email_sent=False + error stored; resend recovers."""
+    student = _student_with_contact(school, 'emailfail')
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient, \
+         mock.patch(
+             'billing.views.pre_billing.PreBillingEmailService.send_payment_request',
+             return_value=(False, 'Failed to send email: Resend down'),
+         ):
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        response = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 200  # Helcim invoice exists — send succeeded
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.email_sent is False
+    assert 'Resend down' in invoice.email_error
+
+    with mock.patch(
+        'billing.views.pre_billing.PreBillingEmailService.send_payment_request',
+        return_value=(True, 'Email sent successfully'),
+    ) as mock_send:
+        response = management_client.post(
+            reverse('management_pre_billing_resend_email', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 200
+    invoice.refresh_from_db()
+    assert invoice.email_sent is True
+    assert invoice.email_error == ''
+    # Resend reuses the stored payment token — same hosted-payment URL
+    assert 'tok-abc' in mock_send.call_args[0][6]
+
+
+@pytest.mark.django_db
+def test_resend_email_rejects_draft_invoice(management_client, school, teacher_user):
+    """Draft invoices have no payment link — resend must 400."""
+    student = _student_with_contact(school, 'resenddraft')
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+
+    response = management_client.post(
+        reverse('management_pre_billing_resend_email', kwargs={'invoice_id': invoice.id})
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_serializer_exposes_payment_url_and_email_state(management_client, school, teacher_user):
+    """Detail endpoint returns payment_url built from the stored token."""
+    student = _student_with_contact(school, 'serialize')
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    response = management_client.get(
+        reverse('management_pre_billing_detail', kwargs={'invoice_id': invoice.id})
+    )
+    assert response.status_code == 200
+    assert response.data['payment_url'].endswith('/order/?token=tok-abc')
+    assert 'email_sent' in response.data
+    assert 'email_error' in response.data
