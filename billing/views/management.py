@@ -501,38 +501,6 @@ def management_reject_invoice(request, pk):
         return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
-# SYSTEM SETTINGS ENDPOINTS
-
-@api_view(['GET'])
-@management_required
-def get_system_settings(request):
-    """Get system settings (management only)"""
-    from ..models import SystemSettings
-    from ..serializers import SystemSettingsSerializer
-
-    settings = SystemSettings.get_settings()
-    serializer = SystemSettingsSerializer(settings)
-    return Response(serializer.data)
-
-
-@api_view(['PUT'])
-@management_required
-def update_system_settings(request):
-    """Update system settings (management only)"""
-    from ..models import SystemSettings
-    from ..serializers import SystemSettingsSerializer
-
-    settings = SystemSettings.get_settings()
-    serializer = SystemSettingsSerializer(settings, data=request.data, partial=True)
-
-    if serializer.is_valid():
-        # Set the updated_by field to the current user
-        serializer.save(updated_by=request.user)
-        return Response(serializer.data)
-
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
 @api_view(['GET', 'PUT'])
 @management_required
 def waive_policy_settings(request):

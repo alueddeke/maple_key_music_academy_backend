@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Sum, Q
 from .models import (
-    Lesson, Invoice, ApprovedEmail, UserRegistrationRequest, SystemSettings,
+    Lesson, Invoice, ApprovedEmail, UserRegistrationRequest,
     InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
     School, SchoolSettings, RecurringLessonsSchedule, MonthlyInvoiceBatch, BatchLessonItem,
     BatchRejectionSnapshot
@@ -395,16 +395,6 @@ class DetailedInvoiceSerializer(serializers.ModelSerializer):
 
     def get_can_be_edited(self, obj):
         return obj.can_be_edited()
-
-
-class SystemSettingsSerializer(serializers.ModelSerializer):
-    """Serializer for system settings"""
-    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
-
-    class Meta:
-        model = SystemSettings
-        fields = ['id', 'invoice_recipient_email', 'updated_at', 'updated_by', 'updated_by_name']
-        read_only_fields = ['id', 'updated_at', 'updated_by', 'updated_by_name']
 
 
 class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
