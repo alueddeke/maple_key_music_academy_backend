@@ -133,19 +133,13 @@ class TestBatchSubmitApprovePaystubCreated:
         response = teacher_client.post(url, format='json')
         assert response.status_code == status.HTTP_200_OK
 
-        # Step 5: Management approves — returns JSON (HELM-05: CSV served by GET /csv/ separately)
+        # Step 5: Management approves — returns JSON (HELM-05)
         url = reverse('management_approve_batch', kwargs={'batch_id': batch_id})
         response = management_client.post(url, format='json')
         assert response.status_code == 200
         assert response['Content-Type'].startswith('application/json')
         assert response.json()['status'] == 'approved'
         assert response.json()['batch_id'] == batch_id
-
-        # Step 5b: CSV is available via GET /csv/ after approval (HELM-05)
-        csv_url = reverse('management_batch_csv', kwargs={'batch_id': batch_id})
-        csv_response = management_client.get(csv_url)
-        assert csv_response.status_code == 200
-        assert 'text/csv' in csv_response.get('Content-Type', '')
 
         # Step 6: Assert records created after approval
         # trial item -> Lesson record created (is_trial=True, status='trial')

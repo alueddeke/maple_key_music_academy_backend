@@ -47,7 +47,6 @@ from .management import (
     management_batch_detail,
     management_edit_lesson_notes,
     management_approve_batch,
-    management_batch_csv,
     management_reject_batch,
     management_batch_rejection_snapshots,
     waive_policy_settings,
