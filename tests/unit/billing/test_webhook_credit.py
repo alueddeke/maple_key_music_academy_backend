@@ -108,10 +108,10 @@ def test_webhook_credit_happy_path_creates_credit_transaction_and_increments_bal
     )
 
     body_dict = {"id": "tx-credit-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0001", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0001", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-credit-001")
@@ -149,10 +149,10 @@ def test_webhook_credit_unresolved_invoice_id_returns_200_no_credit(
     is performed at all).
     """
     body_dict = {"id": "tx-unresolved-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-DOES-NOT-EXIST", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-DOES-NOT-EXIST", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-unresolved-001")
@@ -189,10 +189,10 @@ def test_webhook_credit_missing_student_credit_account_returns_200_no_credit(
     )
 
     body_dict = {"id": "tx-noaccount-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0002", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0002", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-noaccount-001")
@@ -218,7 +218,7 @@ def test_webhook_credit_zero_amount_event_skips_credit_block(api_client, school)
     body_dict = {"id": "tx-zeroamt-001", "type": "cardTransaction"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         side_effect=HelcimAPIError("API down", status_code=503),
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-zeroamt-001")
@@ -241,10 +241,10 @@ def test_webhook_credit_blank_invoice_id_skips_credit_block(api_client, school):
     RED until Plan 03 implements the `if event.invoice_id and ...` guard.
     """
     body_dict = {"id": "tx-blankinv-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-blankinv-001")
@@ -283,10 +283,10 @@ def test_webhook_credit_duplicate_post_does_not_double_apply(
     )
 
     body_dict = {"id": "tx-idempotent-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0003", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0003", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         r1 = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-idempotent-001")

@@ -28,23 +28,47 @@ class HelcimAPIError(Exception):
         self.raw_response = raw_response
 
 
+def helcim_subdomain_for(school=None):
+    """
+    Resolve the Helcim account subdomain used to build hosted-payment URLs.
+
+    Per-school credentials (School.helcim_subdomain) win when set; blank falls
+    back to the HELCIM_SUBDOMAIN env setting (the first/default school).
+    Duck-typed: accepts any object with a helcim_subdomain attribute (D-01 —
+    no model imports in this module).
+    """
+    if school is not None and getattr(school, 'helcim_subdomain', ''):
+        return school.helcim_subdomain
+    return settings.HELCIM_SUBDOMAIN
+
+
+def payment_page_url(token, school=None):
+    """Build the hosted-payment URL for a Helcim invoice payment token."""
+    return f"https://{helcim_subdomain_for(school)}.myhelcim.com/order/?token={token}"
+
+
 class HelcimClient:
     """
     Thin HTTP client for the Helcim v2 REST API.
 
-    Credentials are read from Django settings at instantiation time.
+    Credentials resolve per school when the School has its own Helcim fields
+    set (multi-school); blank school fields fall back to Django settings.
     Settings.HELCIM_API_TOKEN and settings.HELCIM_TERMINAL_ID are validated
     at startup by billing/apps.py:BillingConfig.ready() (Plan 02).
 
     Usage:
-        client = HelcimClient()
+        client = HelcimClient(school=invoice.school)
         invoice = client.create_invoice('CAD', [{'description': 'Lesson', 'quantity': 1.0, 'price': 60.00}])
     """
 
-    def __init__(self):
-        # Credentials loaded at instantiation — settings validated at startup in apps.py:ready()
-        self.api_token = settings.HELCIM_API_TOKEN
-        self.terminal_id = settings.HELCIM_TERMINAL_ID  # stored but NOT sent in invoice request body
+    def __init__(self, school=None):
+        # Duck-typed school (D-01: no model imports). None → env settings.
+        if school is not None and getattr(school, 'helcim_api_token', ''):
+            self.api_token = school.helcim_api_token
+            self.terminal_id = school.helcim_terminal_id or settings.HELCIM_TERMINAL_ID
+        else:
+            self.api_token = settings.HELCIM_API_TOKEN
+            self.terminal_id = settings.HELCIM_TERMINAL_ID  # stored but NOT sent in invoice request body
 
     def _headers(self):
         """Return standard Helcim API request headers."""
@@ -53,7 +77,7 @@ class HelcimClient:
             'Content-Type': 'application/json',
         }
 
-    def create_invoice(self, currency, line_items, customer_id=None):
+    def create_invoice(self, currency, line_items, customer_id=None, discount=None):
         """
         POST /v2/invoices
 
@@ -61,6 +85,10 @@ class HelcimClient:
             currency: ISO 4217 currency code, e.g. 'CAD'
             line_items: list of dicts with keys 'description', 'quantity', 'price'
             customer_id: optional Helcim customer ID integer
+            discount: optional dict {'amount': float, 'details': str} — Helcim
+                subtracts it from the invoice total (amountDue = lineItems − discount).
+                Line-item prices must be non-negative; a negative "credit" line
+                item is rejected by the API, so credit rides here instead.
 
         Returns:
             dict with invoiceId, invoiceNumber, token (for hosted payment page), etc.
@@ -74,6 +102,8 @@ class HelcimClient:
         }
         if customer_id is not None:
             payload['customerId'] = customer_id
+        if discount is not None:
+            payload['discount'] = discount
 
         try:
             response = requests.post(

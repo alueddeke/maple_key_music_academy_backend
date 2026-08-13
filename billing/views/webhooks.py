@@ -10,17 +10,21 @@ Security constraints enforced:
   - Raw body bytes read as FIRST statement before any field parsing (Pitfall 3).
   - No DB transactions around HTTP calls (STATE.md architectural constraint).
   - Money amounts stored via Decimal(str(value)), never via float casting (CONVENTIONS.md).
-  - School FK never defaulted to first() — stays None until Phase 20 (multi-school constraint).
   - Signature value is never logged (T-18-C5).
-  - Phase 20 (D-03): inline credit application after event.save() — wrapped in
-    transaction.atomic() with select_for_update() on StudentCreditAccount.
+  - Signature is verified against the env HELCIM_WEBHOOK_SECRET and every
+    School with its own helcim_webhook_secret; a per-school match pins the
+    event's school so enrichment uses that school's API token (multi-school).
+
+Credit reconciliation lives in billing/services/webhook_processing.py —
+shared with the retry_webhook_events command and the admin retry action.
+Credit is gated on status=APPROVED + type=purchase/capture there; declines
+and refunds are recorded but never increase a wallet.
 """
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.views.decorators.csrf import csrf_exempt
-from django.db import transaction
 import hmac
 import hashlib
 import base64
@@ -28,37 +32,30 @@ import json
 import logging
 from decimal import Decimal
 from django.conf import settings
-from ..models import HelcimWebhookEvent, PreBillingInvoice, StudentCreditAccount, CreditTransaction
-from ..services.helcim_client import HelcimClient, HelcimAPIError
+from ..models import HelcimWebhookEvent, School
+from ..services.webhook_processing import process_webhook_event, RETRYABLE_STATES
 
 logger = logging.getLogger(__name__)
 
 
-def verify_helcim_signature(
-    raw_body: bytes,
-    webhook_id: str,
-    webhook_timestamp: str,
-    webhook_signature: str,
-) -> bool:
+def _signature_matches(secret_b64, raw_body, webhook_id, webhook_timestamp, webhook_signature):
     """
-    Verify Helcim SVix-style HMAC-SHA256 webhook signature.
+    Check one SVix-style HMAC-SHA256 signature against one base64 secret.
 
     Signed content: "{webhook_id}.{webhook_timestamp}.{raw_body_string}"
-    Key: base64-decoded HELCIM_WEBHOOK_SECRET (env var is base64-encoded).
-    Expected: base64-encoded HMAC-SHA256 digest.
-    Comparison: hmac.compare_digest() — timing-safe.
-
-    Header format (SVix-style): space-delimited list of "v<N>,<base64sig>"
-    entries, most commonly length one — e.g. "v1,CsvqmJB7...". The version
-    prefix must be stripped before comparison; comparing against the raw
-    header value fails 100% of the time.
+    Header format: space-delimited "v<N>,<base64sig>" entries — the version
+    prefix must be stripped before comparison; comparing the raw header value
+    fails 100% of the time.
 
     Empty webhook_signature still goes through compare_digest; no early
     return on empty string (that would create a timing oracle).
     """
     signed_content = f"{webhook_id}.{webhook_timestamp}.{raw_body.decode('utf-8')}"
-    # T-18-C10: base64-decode the env var before use as HMAC key (Pitfall 5)
-    secret_bytes = base64.b64decode(settings.HELCIM_WEBHOOK_SECRET)
+    try:
+        # T-18-C10: base64-decode the secret before use as HMAC key (Pitfall 5)
+        secret_bytes = base64.b64decode(secret_b64)
+    except Exception:
+        return False
     expected = base64.b64encode(
         hmac.new(secret_bytes, signed_content.encode('utf-8'), hashlib.sha256).digest()
     ).decode('utf-8')
@@ -69,6 +66,27 @@ def verify_helcim_signature(
     return False
 
 
+def verify_helcim_signature(raw_body, webhook_id, webhook_timestamp, webhook_signature):
+    """
+    Verify the webhook signature against all known verifier tokens.
+
+    Returns (verified: bool, school: School | None). school is set when a
+    school-specific secret matched — the event is then pinned to that school
+    so enrichment uses its API token. The env secret matches with school=None
+    (default/first school).
+    """
+    if settings.HELCIM_WEBHOOK_SECRET and _signature_matches(
+        settings.HELCIM_WEBHOOK_SECRET, raw_body, webhook_id, webhook_timestamp, webhook_signature
+    ):
+        return True, None
+    for school in School.objects.exclude(helcim_webhook_secret=''):
+        if _signature_matches(
+            school.helcim_webhook_secret, raw_body, webhook_id, webhook_timestamp, webhook_signature
+        ):
+            return True, school
+    return False, None
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -76,17 +94,22 @@ def payment_callback(request):
     """
     POST /api/billing/payment-callback/
 
-    Receives Helcim cardTransaction webhook, verifies HMAC signature, deduplicates
-    via get_or_create, then performs a secondary GET to retrieve invoiceNumber + amount
-    (the webhook payload only contains id + type per D-13).
+    Receives Helcim cardTransaction webhook, verifies HMAC signature,
+    deduplicates via get_or_create, then hands off to process_webhook_event
+    for enrichment (secondary GET) + gated credit application.
 
     Returns:
-        200 {"status": "ok"}        — new event stored with invoiceNumber + amount.
-        200 {"status": "duplicate"} — event already recorded (idempotent retry).
-        403 {"error": "Invalid signature"} — HMAC mismatch.
-        400 {"error": ...}          — malformed body or missing transaction id.
+        200 {"status": "ok"}        — event stored/processed.
+        200 {"status": "duplicate"} — event already in a terminal state.
+        200 {"status": "ignored"}   — non-cardTransaction or id-less payload
+                                      (non-2xx would trigger ~10h of retries).
+        403 {"error": "Invalid signature"} — HMAC mismatch on every secret.
+        400 {"error": ...}          — malformed JSON body.
 
-    school FK is None at receipt — Phase 20 sets it during credit reconciliation.
+    Helcim redelivers on non-2xx AND on its own retry schedule — a duplicate
+    whose prior processing landed in a retryable state (enrichment_failed,
+    no_invoice, no_account) is re-processed here instead of being dropped,
+    so a transient API failure self-heals on the next redelivery.
     """
     # Pitfall 3: raw bytes read as first statement — must come before any field parsing.
     raw_body = request.body
@@ -95,7 +118,10 @@ def payment_callback(request):
     webhook_timestamp = request.headers.get('webhook-timestamp', '')
     webhook_signature = request.headers.get('webhook-signature', '')
 
-    if not verify_helcim_signature(raw_body, webhook_id, webhook_timestamp, webhook_signature):
+    verified, matched_school = verify_helcim_signature(
+        raw_body, webhook_id, webhook_timestamp, webhook_signature
+    )
+    if not verified:
         # T-18-C5: log webhook-id only, never the signature value or secret.
         logger.warning('Helcim webhook HMAC verification failed for webhook-id=%s', webhook_id)
         return Response({'error': 'Invalid signature'}, status=403)
@@ -121,91 +147,19 @@ def payment_callback(request):
         return Response({'status': 'ignored'}, status=200)
 
     # D-12 / HELM-04: idempotency guard via unique constraint on helcim_transaction_id.
-    # school=None: no school context from unauthenticated webhook (Phase 20 sets it).
+    # school is the signature-matched school (None for the env/default secret);
+    # process_webhook_event overwrites it with the invoice's school on credit.
     event, created = HelcimWebhookEvent.objects.get_or_create(
         helcim_transaction_id=tx_id,
         defaults={
             'raw_payload': payload,
             'invoice_id': '',
             'amount': Decimal('0.00'),
-            'school': None,
+            'school': matched_school,
         },
     )
-    if not created:
+    if not created and event.processing_status not in RETRYABLE_STATES:
         return Response({'status': 'duplicate'}, status=200)
 
-    # D-13: secondary GET — webhook payload is minimal ({id, type} only); invoiceNumber
-    # and amount require a separate card-transactions API call.
-    # NOT wrapped in any DB transaction — HTTP calls outside DB is the project pattern.
-    client = HelcimClient()
-    try:
-        tx_details = client.get_card_transaction(tx_id)
-        invoice_number = str(tx_details.get('invoiceNumber', ''))
-        # T-18-C7: Decimal(str(...)) — never float() for money (CONVENTIONS.md)
-        amount = Decimal(str(tx_details.get('amount', '0')))
-    except HelcimAPIError as e:
-        logger.error(
-            'Helcim secondary GET failed for transaction %s: %s',
-            tx_id,
-            str(e),
-        )
-        # Preserve row with blank invoice_id and 0.00 — Phase 20 can retry.
-        invoice_number = ''
-        amount = Decimal('0.00')
-
-    event.invoice_id = invoice_number
-    event.amount = amount
-    event.save()
-
-    # Phase 20 (D-03, D-04, D-05): inline credit application — DB-only, safe inside atomic.
-    # Guard: skip if invoice_id is blank or amount is 0.00 (Pitfall 1 — CreditTransaction
-    # has a DB CHECK amount__gt=0 that would raise IntegrityError on zero-amount write).
-    if event.invoice_id and event.amount > Decimal('0.00'):
-        try:
-            with transaction.atomic():
-                # Use filter().order_by('-id').first() instead of .get() to guard against
-                # MultipleObjectsReturned — helcim_invoice_number has no unique constraint
-                # on the model, so a duplicate would crash the webhook with 500 and cause
-                # Helcim to retry indefinitely. None is handled identically to DoesNotExist.
-                # Match on helcim_invoice_number: card-transaction payloads carry
-                # invoiceNumber (e.g. INV1791), never the numeric invoiceId.
-                invoice = (
-                    PreBillingInvoice.objects
-                    .filter(helcim_invoice_number=event.invoice_id)
-                    .order_by('-id')
-                    .first()
-                )
-                if invoice is None:
-                    logger.warning(
-                        'Phase 20: credit not applied for webhook event %s — '
-                        'no PreBillingInvoice found for invoice_id=%s',
-                        event.helcim_transaction_id,
-                        event.invoice_id,
-                    )
-                    # Return without raising so the outer try/except stays clean;
-                    # transaction.atomic() exits normally with no writes.
-                else:
-                    account = StudentCreditAccount.objects.select_for_update().get(
-                        student=invoice.student,
-                        school=invoice.school,
-                    )
-                    CreditTransaction.objects.create(
-                        account=account,
-                        school=invoice.school,
-                        type='pre_billing_payment',
-                        amount=event.amount,
-                    )
-                    account.balance += event.amount
-                    account.save()
-                    event.school = invoice.school
-                    event.save(update_fields=['school'])
-                    invoice.status = 'paid'
-                    invoice.save(update_fields=['status', 'updated_at'])
-        except StudentCreditAccount.DoesNotExist as exc:
-            logger.warning(
-                'Phase 20: credit not applied for webhook event %s — %s',
-                event.helcim_transaction_id,
-                exc,
-            )
-
-    return Response({'status': 'ok'}, status=200)
+    process_webhook_event(event)
+    return Response({'status': 'ok' if created else 'duplicate'}, status=200)
