@@ -232,6 +232,45 @@ class HelcimClient:
 
         return response.json()
 
+    def list_card_transactions(self, limit=50):
+        """
+        GET /v2/card-transactions?limit={limit}
+
+        Used by sync_helcim_payments to reconcile payments whose webhooks
+        never arrived (endpoint down longer than Helcim's ~10h retry window,
+        or dev tunnel offline). Returns the raw list of transaction dicts.
+
+        Raises:
+            HelcimAPIError: on non-2xx response or timeout
+        """
+        try:
+            response = requests.get(
+                f'{HELCIM_API_BASE}/card-transactions',
+                params={'limit': limit},
+                headers=self._headers(),
+                timeout=HELCIM_TIMEOUT,
+            )
+        except requests.Timeout:
+            logger.error('Helcim %s timeout after %ds', 'list_card_transactions', HELCIM_TIMEOUT)
+            raise HelcimAPIError('Helcim list_card_transactions timeout', status_code=None)
+
+        if not response.ok:
+            logger.error(
+                'Helcim %s failed: status=%s body=%s',
+                'list_card_transactions',
+                response.status_code,
+                response.text,
+            )
+            raise HelcimAPIError(
+                f'Helcim list_card_transactions failed: {response.status_code}',
+                status_code=response.status_code,
+                raw_response=response.text,
+            )
+
+        data = response.json()
+        # Helcim returns either a bare list or an object wrapping one.
+        return data if isinstance(data, list) else data.get('data', [])
+
     def get_card_transaction(self, transaction_id):
         """
         GET /v2/card-transactions/{transactionId}
