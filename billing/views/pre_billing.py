@@ -116,6 +116,7 @@ def _projected_items(invoice):
     derive dates from the schedule projection instead.
     """
     items = []
+    excluded = set(invoice.excluded_dates or [])
     schedules = RecurringLessonsSchedule.objects.filter(
         student=invoice.student,
         school=invoice.school,
@@ -125,6 +126,8 @@ def _projected_items(invoice):
         for d in sched.generate_lessons_for_month(
             invoice.period_start.year, invoice.period_start.month
         ):
+            if d.isoformat() in excluded:
+                continue
             items.append({
                 'date': d,
                 'rate': Decimal(str(sched.student_rate)),
@@ -145,7 +148,8 @@ def _serialize_invoice(invoice):
     # synthetic negative ids — they are not removable Lesson rows.
     projected = _projected_items(invoice) if not lessons else []
     return {
-        'is_projected': bool(projected),
+        'is_projected': bool(projected) or (not lessons and bool(invoice.excluded_dates)),
+        'excluded_dates': sorted(invoice.excluded_dates or []),
         'id': invoice.id,
         'status': invoice.status,
         'amount': str(invoice.amount),
@@ -531,6 +535,15 @@ def management_pre_billing_generate(request):
                 generated += 1
             elif invoice.status == 'draft':
                 # D-10: refresh existing DRAFT to current schedule amount + lessons.
+                # Management-skipped dates survive the refresh: recompute from
+                # the filtered projection instead of the raw schedule gross.
+                if is_future and invoice.excluded_dates:
+                    filtered_gross = sum(
+                        (item['rate'] * item['duration']
+                         for item in _projected_items(invoice)),
+                        Decimal('0.00'),
+                    )
+                    amount = max(Decimal('0.00'), filtered_gross - credit)
                 invoice.amount = amount
                 invoice.period_end = period_end
                 invoice.save(update_fields=['amount', 'period_end'])
@@ -991,3 +1004,95 @@ def management_pre_billing_resend_email(request, invoice_id):
             status=status.HTTP_502_BAD_GATEWAY,
         )
     return Response(_serialize_invoice(invoice))
+
+
+def _toggle_projected_date(request, invoice_id, skip):
+    """
+    Shared body for skip-date / restore-date.
+
+    Draft, schedule-projected invoices only — one-off date exclusions for a
+    known absence. The schedule itself is untouched; recurring changes belong
+    on the schedule (or a pause), not here. Amount is recomputed from the
+    filtered projection minus current credit, mirroring generate.
+    """
+    try:
+        invoice = PreBillingInvoice.objects.get(
+            id=invoice_id,
+            school=request.user.school,
+        )
+    except PreBillingInvoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if invoice.status != 'draft':
+        return Response(
+            {'error': 'Dates can only be skipped on draft invoices'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if invoice.lessons.exists():
+        return Response(
+            {'error': 'This invoice bills actual lessons — use Remove Lesson instead'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    raw_date = str(request.data.get('date', ''))
+    try:
+        target = date.fromisoformat(raw_date)
+    except ValueError:
+        return Response(
+            {'error': 'date must be YYYY-MM-DD'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    excluded = set(invoice.excluded_dates or [])
+    if skip:
+        # Must be a real projected date (and not already skipped)
+        projectable = {item['date'].isoformat() for item in _projected_items(invoice)}
+        if target.isoformat() not in projectable:
+            return Response(
+                {'error': 'Date is not on this invoice'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        excluded.add(target.isoformat())
+    else:
+        if target.isoformat() not in excluded:
+            return Response(
+                {'error': 'Date is not skipped'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        excluded.discard(target.isoformat())
+
+    invoice.excluded_dates = sorted(excluded)
+
+    # Recompute amount from the filtered projection − current credit
+    remaining = sum(
+        (item['rate'] * item['duration'] for item in _projected_items(invoice)),
+        Decimal('0.00'),
+    ).quantize(Decimal('0.01'))
+    try:
+        credit = StudentCreditAccount.objects.get(
+            student=invoice.student, school=invoice.school
+        ).balance
+    except StudentCreditAccount.DoesNotExist:
+        credit = Decimal('0.00')
+    invoice.amount = max(Decimal('0.00'), remaining - credit)
+
+    with transaction.atomic():
+        invoice.save(update_fields=['excluded_dates', 'amount', 'updated_at'])
+
+    return Response(_serialize_invoice(invoice))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_skip_date(request, invoice_id):
+    """POST /api/billing/management/pre-billing/<invoice_id>/skip-date/  {date: YYYY-MM-DD}"""
+    return _toggle_projected_date(request, invoice_id, skip=True)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_restore_date(request, invoice_id):
+    """POST /api/billing/management/pre-billing/<invoice_id>/restore-date/  {date: YYYY-MM-DD}"""
+    return _toggle_projected_date(request, invoice_id, skip=False)

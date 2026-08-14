@@ -316,6 +316,93 @@ def test_projected_invoice_detail_lists_projected_dates(management_client, schoo
 
 
 @pytest.mark.django_db
+def test_skip_date_recomputes_amount_and_send_omits_it(management_client, school, teacher_user):
+    """
+    Skipping a projected date drops it from amount, line items, and restores
+    cleanly. Oct 2026 Mondays: 5, 12, 19, 26 @ $60 → gross 240.
+    """
+    student = _student_with_contact(school, 'skipdate')
+    invoice = _projected_invoice(school, teacher_user, student, '240.00')
+    skip_url = reverse('management_pre_billing_skip_date', kwargs={'invoice_id': invoice.id})
+
+    # Skip Oct 12 → amount 180, date listed in excluded_dates
+    response = management_client.post(skip_url, {'date': '2026-10-12'}, format='json')
+    assert response.status_code == 200
+    assert response.data['amount'] == '180.00'
+    assert response.data['excluded_dates'] == ['2026-10-12']
+    dates = [l['scheduled_date'] for l in response.data['lessons']]
+    assert '2026-10-12' not in dates and len(dates) == 3
+
+    # Send: line items must omit the skipped date
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        send = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+    assert send.status_code == 200
+    _, kwargs = MockClient.return_value.create_invoice.call_args
+    assert len(kwargs['line_items']) == 3
+    assert all('2026-10-12' not in li['description'] for li in kwargs['line_items'])
+    invoice.refresh_from_db()
+    assert invoice.amount == Decimal('180.00')
+
+
+@pytest.mark.django_db
+def test_restore_date_and_guards(management_client, school, teacher_user):
+    """Restore brings the date back; guards reject bad dates and non-drafts."""
+    student = _student_with_contact(school, 'restoredate')
+    invoice = _projected_invoice(school, teacher_user, student, '240.00')
+    skip_url = reverse('management_pre_billing_skip_date', kwargs={'invoice_id': invoice.id})
+    restore_url = reverse('management_pre_billing_restore_date', kwargs={'invoice_id': invoice.id})
+
+    # Not a projected date → 400
+    assert management_client.post(
+        skip_url, {'date': '2026-10-06'}, format='json'
+    ).status_code == 400
+    # Garbage date → 400
+    assert management_client.post(
+        skip_url, {'date': 'next tuesday'}, format='json'
+    ).status_code == 400
+
+    management_client.post(skip_url, {'date': '2026-10-05'}, format='json')
+    response = management_client.post(restore_url, {'date': '2026-10-05'}, format='json')
+    assert response.status_code == 200
+    assert response.data['excluded_dates'] == []
+    assert response.data['amount'] == '240.00'
+
+    # Restoring a date that isn't skipped → 400
+    assert management_client.post(
+        restore_url, {'date': '2026-10-05'}, format='json'
+    ).status_code == 400
+
+    # Non-draft guard
+    PreBillingInvoice.objects.filter(pk=invoice.pk).update(status='sent')
+    assert management_client.post(
+        skip_url, {'date': '2026-10-05'}, format='json'
+    ).status_code == 400
+
+
+@pytest.mark.django_db
+def test_generate_refresh_preserves_skipped_dates(management_client, school, teacher_user):
+    """Re-running Generate must not resurrect a skipped date's amount."""
+    student = _student_with_contact(school, 'skiprefresh')
+    invoice = _projected_invoice(school, teacher_user, student, '240.00')
+    management_client.post(
+        reverse('management_pre_billing_skip_date', kwargs={'invoice_id': invoice.id}),
+        {'date': '2026-10-12'}, format='json',
+    )
+
+    response = management_client.post(
+        reverse('management_pre_billing_generate'),
+        {'month': 10, 'year': 2026}, format='json',
+    )
+    assert response.status_code == 200
+    invoice.refresh_from_db()
+    assert invoice.amount == Decimal('180.00')
+    assert invoice.excluded_dates == ['2026-10-12']
+
+
+@pytest.mark.django_db
 def test_no_lessons_and_no_schedule_still_rejected(management_client, school, teacher_user):
     """Empty M2M and no active schedule → clear 'no lesson dates' error."""
     student = _student_with_contact(school, 'projempty')

@@ -1613,6 +1613,16 @@ class PreBillingInvoice(models.Model):
         blank=True,
         help_text="Raw Helcim hosted-payment token (not the full URL). URL built as: https://{HELCIM_SUBDOMAIN}.myhelcim.com/order/?token={payment_token}",
     )
+    excluded_dates = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "ISO dates management skipped on this bill-ahead draft (e.g. a "
+            "family's known absence). Applies only to schedule-projected "
+            "invoices; skipped dates drop out of the projection, amount, "
+            "line items, and email. One-off — does not touch the schedule."
+        ),
+    )
     email_sent = models.BooleanField(
         default=False,
         help_text="True once the payment-request email was delivered to Resend without error.",
