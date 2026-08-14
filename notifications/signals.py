@@ -12,7 +12,11 @@ from django.dispatch import receiver
 
 from billing.models import Invoice, MonthlyInvoiceBatch
 
-from .services import notify_batch_rejected, notify_invoice_rejected
+from .services import (
+    notify_batch_rejected,
+    notify_batch_submitted,
+    notify_invoice_rejected,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +45,28 @@ def _on_batch_saved(sender, instance, created, **kwargs):
         and instance.status == 'draft'
         and bool((instance.rejection_reason or '').strip())
     )
-    if not is_rejection:
-        return
-    try:
-        notify_batch_rejected(instance)
-    except Exception:
-        logger.exception(
-            "Failed to create rejection notification for batch %s", instance.pk
-        )
+    # Submit flow sets draft -> submitted (billing/views/teacher.py
+    # batch_submit) — that transition is the "invoice submitted" event.
+    # A resubmit after rejection is the same draft -> submitted transition,
+    # so it fires again by construction.
+    is_submission = (
+        old_status in ('draft', None)
+        and instance.status == 'submitted'
+    )
+    if is_rejection:
+        try:
+            notify_batch_rejected(instance)
+        except Exception:
+            logger.exception(
+                "Failed to create rejection notification for batch %s", instance.pk
+            )
+    elif is_submission:
+        try:
+            notify_batch_submitted(instance)
+        except Exception:
+            logger.exception(
+                "Failed to create submission notification for batch %s", instance.pk
+            )
 
 
 @receiver(pre_save, sender=Invoice, dispatch_uid='notifications_invoice_pre_save')

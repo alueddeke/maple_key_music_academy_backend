@@ -17,6 +17,8 @@ class Notification(models.Model):
     TYPE_CHOICES = [
         ('invoice_rejected', 'Invoice Rejected'),
         ('invoice_reminder', 'Invoice Submission Reminder'),
+        ('batch_submitted', 'Invoice Submitted'),
+        ('exception_marked', 'Exception Marked'),
         ('general', 'General'),
     ]
 

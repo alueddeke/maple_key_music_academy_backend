@@ -7,6 +7,7 @@ backed by Resend (billing.resend_backend.ResendEmailBackend); no new mail
 library is used.
 """
 
+import calendar
 import logging
 
 from django.conf import settings
@@ -100,6 +101,79 @@ def notify_invoice_rejected(invoice):
         notification_type='invoice_rejected',
         link_url='/invoice',
     )
+
+
+def _batch_month_label(batch):
+    """Human month label for a monthly batch, e.g. 'August 2026'."""
+    return f"{calendar.month_name[batch.month]} {batch.year}"
+
+
+def _management_users(school):
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    return User.objects.filter(
+        user_type='management', school=school, is_active=True
+    )
+
+
+def notify_batch_submitted(batch):
+    """Notify every active management user that a teacher submitted a batch."""
+    message = (
+        f"{batch.teacher.get_full_name()} submitted their "
+        f"{_batch_month_label(batch)} invoice for review."
+    )
+    link_url = f"/management/payroll/{batch.id}"
+    created = []
+    for manager in _management_users(batch.school):
+        created.append(
+            notify(
+                manager,
+                message,
+                notification_type='batch_submitted',
+                link_url=link_url,
+            )
+        )
+    return created
+
+
+def notify_exception_marked(batch, description=''):
+    """Notify management that a teacher logged exceptions on an approved batch.
+
+    Spam guard: a marking session touches many lesson items in quick
+    succession, so per manager we skip if they already have an UNREAD
+    exception notification deep-linking to the same batch. `description`
+    is the specific change (for logs only — the bell message stays generic).
+    """
+    message = (
+        f"{batch.teacher.get_full_name()} logged exceptions on their "
+        f"{_batch_month_label(batch)} batch."
+    )
+    link_url = f"/management/payroll/{batch.id}"
+    created = []
+    for manager in _management_users(batch.school):
+        already_pending = Notification.objects.filter(
+            user=manager,
+            type='exception_marked',
+            link_url=link_url,
+            read_status=False,
+        ).exists()
+        if already_pending:
+            logger.debug(
+                "Exception notification for batch %s suppressed for %s "
+                "(unread one pending); change: %s",
+                batch.pk, manager.email, description,
+            )
+            continue
+        created.append(
+            notify(
+                manager,
+                message,
+                notification_type='exception_marked',
+                link_url=link_url,
+            )
+        )
+    return created
 
 
 def send_invoice_reminders(today=None):
