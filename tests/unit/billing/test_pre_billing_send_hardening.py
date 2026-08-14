@@ -18,11 +18,14 @@ import pytest
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from datetime import time
+
 from billing.models import (
     PreBillingInvoice,
     BillableContact,
     Lesson,
     StudentCreditAccount,
+    RecurringLessonsSchedule,
 )
 from billing.services.helcim_client import HelcimAPIError
 
@@ -220,6 +223,118 @@ def test_resend_email_rejects_draft_invoice(management_client, school, teacher_u
         reverse('management_pre_billing_resend_email', kwargs={'invoice_id': invoice.id})
     )
     assert response.status_code == 400
+
+
+def _projected_invoice(school, teacher_user, student, amount='0.00'):
+    """Bill-ahead invoice: empty lessons M2M + an active weekly schedule."""
+    RecurringLessonsSchedule.objects.create(
+        teacher=teacher_user,
+        student=student,
+        school=school,
+        day_of_week=0,  # Mondays
+        start_time=time(15, 0),
+        duration=Decimal('1.00'),
+        lesson_type='online',
+        teacher_rate=Decimal('45.00'),
+        student_rate=Decimal('60.00'),
+        is_active=True,
+        start_date=date(2020, 1, 1),
+    )
+    return PreBillingInvoice.objects.create(
+        student=student,
+        school=school,
+        status='draft',
+        amount=Decimal(amount),
+        period_start=date(2026, 10, 1),
+        period_end=date(2026, 10, 31),
+    )
+
+
+@pytest.mark.django_db
+def test_projected_invoice_sends_with_schedule_line_items(management_client, school, teacher_user):
+    """
+    Bill-ahead invoices have an empty M2M — send must project line items from
+    the recurring schedule instead of rejecting with 'no lesson dates'.
+    October 2026 has 4 Mondays → 4 line items × $60, amount recomputed to 240.
+    """
+    student = _student_with_contact(school, 'projected')
+    invoice = _projected_invoice(school, teacher_user, student, '0.00')  # stale amount
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        response = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 200
+    _, kwargs = MockClient.return_value.create_invoice.call_args
+    line_items = kwargs['line_items']
+    assert len(line_items) == 4  # Mondays in Oct 2026: 5, 12, 19, 26
+    assert all(li['price'] == 60.0 for li in line_items)
+    assert all(li['sku'].startswith('LESSON-P') for li in line_items)
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.amount == Decimal('240.00')  # recomputed from projection
+
+
+@pytest.mark.django_db
+def test_projected_invoice_send_applies_current_credit(management_client, school, teacher_user):
+    """Recompute at send uses live credit: gross 240 − 45 credit → amount 195, discount 45."""
+    student = _student_with_contact(school, 'projcredit')
+    invoice = _projected_invoice(school, teacher_user, student, '240.00')
+    StudentCreditAccount.objects.create(
+        student=student, school=school, balance=Decimal('45.00')
+    )
+
+    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        response = management_client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+        )
+
+    assert response.status_code == 200
+    _, kwargs = MockClient.return_value.create_invoice.call_args
+    assert kwargs['discount'] == {'amount': 45.0, 'details': 'Account credit applied'}
+    invoice.refresh_from_db()
+    assert invoice.amount == Decimal('195.00')
+
+
+@pytest.mark.django_db
+def test_projected_invoice_detail_lists_projected_dates(management_client, school, teacher_user):
+    """Detail endpoint shows the projected schedule dates, flagged is_projected."""
+    student = _student_with_contact(school, 'projdetail')
+    invoice = _projected_invoice(school, teacher_user, student, '240.00')
+
+    response = management_client.get(
+        reverse('management_pre_billing_detail', kwargs={'invoice_id': invoice.id})
+    )
+    assert response.status_code == 200
+    assert response.data['is_projected'] is True
+    dates = [l['scheduled_date'] for l in response.data['lessons']]
+    assert dates == ['2026-10-05', '2026-10-12', '2026-10-19', '2026-10-26']
+    assert all(l['id'] < 0 for l in response.data['lessons'])
+
+
+@pytest.mark.django_db
+def test_no_lessons_and_no_schedule_still_rejected(management_client, school, teacher_user):
+    """Empty M2M and no active schedule → clear 'no lesson dates' error."""
+    student = _student_with_contact(school, 'projempty')
+    invoice = PreBillingInvoice.objects.create(
+        student=student,
+        school=school,
+        status='draft',
+        amount=Decimal('100.00'),
+        period_start=date(2026, 10, 1),
+        period_end=date(2026, 10, 31),
+    )
+
+    response = management_client.post(
+        reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
+    )
+    assert response.status_code == 400
+    assert 'no lesson dates' in response.data['error']
+    invoice.refresh_from_db()
+    assert invoice.status == 'draft'
 
 
 @pytest.mark.django_db
