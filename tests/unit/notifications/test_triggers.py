@@ -70,7 +70,9 @@ class TestBatchRejectionSignal:
         )
         assert 'rejected' in notification.message
         assert 'Missing lesson dates' in notification.message
-        assert notification.link_url == '/invoice'
+        assert notification.link_url == (
+            f'/invoice?month={submitted_batch.month}&year={submitted_batch.year}'
+        )
         assert notification.read_status is False
 
     def test_plain_draft_transition_does_not_fire(self, submitted_batch, teacher_user):
@@ -271,7 +273,9 @@ class TestInvoiceReminders:
         assert len(created) == 1
         assert created[0].user == teacher_user
         assert created[0].type == 'invoice_reminder'
-        assert created[0].link_url == '/invoice'
+        assert created[0].link_url == (
+            f'/invoice?month={self.REMINDER_DATE.month}&year={self.REMINDER_DATE.year}'
+        )
 
     def test_no_reminder_before_reminder_day(self, teacher_user):
         created = send_invoice_reminders(

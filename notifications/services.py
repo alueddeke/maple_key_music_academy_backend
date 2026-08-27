@@ -85,7 +85,9 @@ def notify_batch_rejected(batch):
         batch.teacher,
         message[:500],
         notification_type='invoice_rejected',
-        link_url='/invoice',
+        # Deep-link to the batch's own period — the /invoice page defaults to
+        # the current month, which is wrong for a prior-month rejection.
+        link_url=f'/invoice?month={batch.month}&year={batch.year}',
     )
 
 
@@ -225,7 +227,7 @@ def send_invoice_reminders(today=None):
                     f"Please review and submit it before month end."
                 ),
                 notification_type='invoice_reminder',
-                link_url='/invoice',
+                link_url=f'/invoice?month={today.month}&year={today.year}',
             )
         )
     return created
