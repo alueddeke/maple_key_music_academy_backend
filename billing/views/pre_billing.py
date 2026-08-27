@@ -674,7 +674,10 @@ def management_pre_billing_send_all(request):
     """
     POST /api/billing/management/pre-billing/send-all/
 
-    Process all draft invoices for request.user.school sequentially.
+    Process draft invoices for request.user.school sequentially. When month/year
+    are supplied in the body, only that billing period's drafts are sent — the UI
+    is period-scoped, so an unscoped send would fire every draft in the school
+    (all months at once). Omitting month/year keeps the legacy school-wide sweep.
     Per-student failures are caught and accumulated in response.failed[].
     One failure does not abort the batch (T-19-03-09).
     """
@@ -683,6 +686,17 @@ def management_pre_billing_send_all(request):
         .filter(school=request.user.school, status='draft')
         .select_related('student')
     )
+    month = request.data.get('month')
+    year = request.data.get('year')
+    if month and year:
+        try:
+            period_start = date(int(year), int(month), 1)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'Invalid month/year'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        drafts = drafts.filter(period_start=period_start)
 
     sent = 0
     failed = []
