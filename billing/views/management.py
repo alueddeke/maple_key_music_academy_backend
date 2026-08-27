@@ -1362,8 +1362,11 @@ def management_generate_teacher_invoice(request, batch_id):
       1. Creates Invoice(invoice_type='teacher_payment') with total_amount =
          Σ calculate_teacher_payment() over all BatchLessonItems.
       2. Links batch.invoice = invoice (signals batch lock for teacher adjustments, ADJ-07).
-      3. Writes CreditTransaction(waived_rollover) per waived item (D-05 — deferred from
-         approval): refunds the approval-time charge as next-month student credit.
+      3. Writes CreditTransaction(waived_rollover) per waived item that was CHARGED at
+         approval (D-05 — deferred from approval): refunds the approval-time charge as
+         next-month student credit. Charged-at-approval is determined by membership in a
+         StudentInvoice.lesson_items M2M — an item waived while the batch was still a
+         draft was excluded from the invoice (never charged), so it gets no rollover.
       4. Writes CreditTransaction(forfeited) per forfeited item as the audit record for the
          no-show charge. The student's balance was already decremented at approval (the
          lesson counted as a 'confirmed' charge then), so balance is NOT touched here —
@@ -1424,8 +1427,14 @@ def management_generate_teacher_invoice(request, batch_id):
         batch.invoice = invoice
         batch.save(update_fields=['invoice'])
 
-        # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval)
-        waived_items = list(batch.lesson_items.filter(status='waived'))
+        # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval).
+        # Only items charged at approval get the refund: the StudentInvoice.lesson_items
+        # M2M is the approval-time record of what was billed. A lesson waived while the
+        # batch was still a draft was excluded from the invoice — crediting it anyway
+        # would gift the parent a free lesson credit (verified live 2026-08-27).
+        waived_items = list(
+            batch.lesson_items.filter(status='waived', student_invoice__isnull=False)
+        )
         for item in waived_items:
             lesson_rate = item.student_rate * item.duration
             if lesson_rate > Decimal('0.00'):

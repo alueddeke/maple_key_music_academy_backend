@@ -30,6 +30,7 @@ from billing.models import (
     StudentCreditAccount,
     CreditTransaction,
     BillableContact,
+    StudentInvoice,
 )
 
 User = get_user_model()
@@ -84,6 +85,31 @@ def _make_item(batch, student, scheduled_date=None, status='completed',
         student_rate=student_rate,
         status=status,
     )
+
+
+def _make_student_invoice(batch, student, school, items):
+    """Create the approval-time StudentInvoice containing `items` (the charged set).
+
+    Membership in StudentInvoice.lesson_items is what marks an item as charged at
+    approval — generation only writes waived_rollover credits for member items.
+    """
+    si = StudentInvoice.objects.create(
+        batch=batch,
+        student=student,
+        school=school,
+        amount=Decimal('0.00'),
+        billing_contact_name='Test Contact',
+        billing_email='contact@example.com',
+        billing_phone='555-0100',
+        billing_street_address='1 Test St',
+        billing_city='Toronto',
+        billing_province='ON',
+        billing_postal_code='M1M1M1',
+    )
+    si.lesson_items.set(items)
+    si.amount = si.calculate_amount()
+    si.save(update_fields=['amount'])
+    return si
 
 
 def _make_invoice(school, teacher, total_amount=Decimal('0.00'), management_user=None):
@@ -253,11 +279,10 @@ class TestGenerateTeacherInvoiceEndpoint:
         self, management_client, teacher_user, student_user, school, school_settings, management_user
     ):
         """
-        ADJ-06: POST on an approved batch with waived items writes
+        ADJ-06: POST on an approved batch with waived items that were CHARGED at
+        approval (member of StudentInvoice.lesson_items) writes
         CreditTransaction(type='waived_rollover') per waived item and increments
         StudentCreditAccount.balance by lesson_rate (student_rate * duration) per waived item.
-
-        RED: NoReverseMatch until Plan 02 adds the URL + view.
         """
         StudentCreditAccount.objects.create(
             student=student_user, school=school, balance=Decimal('0.00')
@@ -265,13 +290,16 @@ class TestGenerateTeacherInvoiceEndpoint:
         batch = _make_approved_batch(teacher_user, school)
 
         # 1 completed (for the batch to have something billable)
-        _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed',
-                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
-        # 2 waived items -- each should generate a waived_rollover CreditTransaction
-        _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='waived',
-                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
-        _make_item(batch, student_user, scheduled_date=date(2026, 6, 15), status='waived',
-                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        completed = _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed',
+                               teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # 2 waived items charged at approval (post-approval waives) -- each should
+        # generate a waived_rollover CreditTransaction
+        waived_a = _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='waived',
+                              teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        waived_b = _make_item(batch, student_user, scheduled_date=date(2026, 6, 15), status='waived',
+                              teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # Approval-time invoice included all three (the waives happened after approval)
+        _make_student_invoice(batch, student_user, school, [completed, waived_a, waived_b])
 
         url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
 
@@ -288,6 +316,44 @@ class TestGenerateTeacherInvoiceEndpoint:
 
         # Response includes waived_credits_written count
         assert response.data['waived_credits_written'] == 2
+
+    def test_generate_skips_rollover_for_draft_time_waives(
+        self, management_client, teacher_user, student_user, school, school_settings, management_user
+    ):
+        """
+        Regression (2026-08-27): a lesson waived while the batch was still a DRAFT is
+        excluded from the approval-time StudentInvoice — the parent was never charged
+        for it, so generation must NOT write a waived_rollover credit (that would gift
+        a free lesson credit / under-bill the next invoice by one lesson rate).
+
+        Draft-time waive = status 'waived' but NOT a member of StudentInvoice.lesson_items.
+        """
+        StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('0.00')
+        )
+        batch = _make_approved_batch(teacher_user, school)
+
+        completed = _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed',
+                               teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # Waived before approval: never invoiced
+        _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='waived',
+                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # Waived after approval: was invoiced, deserves the refund
+        waived_charged = _make_item(batch, student_user, scheduled_date=date(2026, 6, 15), status='waived',
+                                    teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # Approval-time invoice excluded the draft-time waive
+        _make_student_invoice(batch, student_user, school, [completed, waived_charged])
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+
+        # Only the charged waive is refunded
+        assert CreditTransaction.objects.filter(type='waived_rollover').count() == 1
+        account = StudentCreditAccount.objects.get(student=student_user, school=school)
+        assert account.balance == Decimal('60.00')
+        assert response.data['waived_credits_written'] == 1
 
     def test_generate_pays_teacher_for_confirmed_lessons(
         self, management_client, teacher_user, student_user, school, school_settings, management_user
