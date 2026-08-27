@@ -166,16 +166,15 @@ def test_webhook_credit_unresolved_invoice_id_returns_200_no_credit(
 
 
 @pytest.mark.django_db
-def test_webhook_credit_missing_student_credit_account_returns_200_no_credit(
+def test_webhook_credit_missing_student_credit_account_creates_account_and_credits(
     api_client, school, student_user
 ):
     """
-    PreBillingInvoice exists but no StudentCreditAccount for this student
-    → 200, no CreditTransaction, invoice.status NOT changed to 'paid' (D-04).
-
-    RED until Plan 03 implements credit resolution. If Plan 03 adopts lazy
-    account creation for the webhook path this test body will be updated then
-    — leave assertion as-is to drive that decision.
+    PreBillingInvoice exists but no StudentCreditAccount for this student —
+    the webhook path lazily creates the wallet and credits it (decision made
+    2026-08-27 after a live first-time payment stranded in no_account: a
+    parent's first payment is exactly when the wallet should come into
+    existence).
     """
     # Invoice exists but NO StudentCreditAccount created
     invoice = PreBillingInvoice.objects.create(
@@ -198,10 +197,18 @@ def test_webhook_credit_missing_student_credit_account_returns_200_no_credit(
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-noaccount-001")
 
     assert response.status_code == 200
-    assert CreditTransaction.objects.count() == 0
+
+    account = StudentCreditAccount.objects.get(student=student_user, school=school)
+    assert account.balance == Decimal('60.00')
+    assert CreditTransaction.objects.filter(
+        account=account, type='pre_billing_payment', amount=Decimal('60.00')
+    ).count() == 1
 
     invoice.refresh_from_db()
-    assert invoice.status != 'paid'
+    assert invoice.status == 'paid'
+
+    event = HelcimWebhookEvent.objects.get(helcim_transaction_id="tx-noaccount-001")
+    assert event.processing_status == 'credited'
 
 
 @pytest.mark.django_db

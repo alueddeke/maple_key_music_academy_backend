@@ -104,6 +104,16 @@ def process_webhook_event(event):
             if invoice is None:
                 return _finalize(event, 'no_invoice', f'no PreBillingInvoice for invoiceNumber={event.invoice_id}')
 
+            # A parent's first payment is exactly when the wallet should come
+            # into existence — get_or_create then re-acquire under lock
+            # (REC-02 pattern, race-safe via the unique constraint). Requiring
+            # a pre-existing account left first-time payments stranded in
+            # no_account (found live 2026-08-27, event INV001028).
+            StudentCreditAccount.objects.get_or_create(
+                student=invoice.student,
+                school=invoice.school,
+                defaults={'balance': Decimal('0.00')},
+            )
             account = StudentCreditAccount.objects.select_for_update().get(
                 student=invoice.student,
                 school=invoice.school,
