@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.apps import apps
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Max, Min, Sum
 from django.utils import timezone
@@ -37,6 +38,29 @@ WEEKS_PER_MONTH = Decimal('4.33')
 
 # Window (months) for CPA: advertising spend ÷ new enrollments
 CPA_WINDOW_MONTHS = 6
+
+
+def _test_data_filter_active():
+    """MAP-113: True when analytics should hide test-account rows (prod)."""
+    return bool(
+        getattr(settings, 'ANALYTICS_EXCLUDE_TEST_DATA', False)
+        and getattr(settings, 'TEST_ACCOUNT_EMAIL_DOMAINS', [])
+    )
+
+
+def _exclude_test(qs, email_field):
+    """
+    Exclude rows whose linked account email belongs to a test domain.
+
+    No-op unless ANALYTICS_EXCLUDE_TEST_DATA is enabled, so dev/UAT
+    dashboards still show test data. `email_field` is the ORM path to the
+    account email, e.g. 'student__email' or 'teacher__email'.
+    """
+    if not _test_data_filter_active():
+        return qs
+    for domain in settings.TEST_ACCOUNT_EMAIL_DOMAINS:
+        qs = qs.exclude(**{f'{email_field}__iendswith': f'@{domain}'})
+    return qs
 
 
 def _month_starts(today, months):
@@ -73,7 +97,7 @@ def _scheduled_hours_and_revenue(schedules, year, month):
 def _first_lesson_by_student(school):
     """{student_id: first lesson date} across all time."""
     rows = (
-        Lesson.objects.filter(school=school)
+        _exclude_test(Lesson.objects.filter(school=school), 'student__email')
         .values('student_id')
         .annotate(first=Min('scheduled_date'), last=Max('scheduled_date'))
     )
@@ -82,7 +106,9 @@ def _first_lesson_by_student(school):
 
 def _currently_churned_student_ids(school):
     """Students who are deactivated OR have zero active schedules (churn def)."""
-    students = User.objects.filter(school=school, user_type='student')
+    students = _exclude_test(
+        User.objects.filter(school=school, user_type='student'), 'email'
+    )
     with_active_schedule = set(
         RecurringLessonsSchedule.objects.filter(
             school=school, is_active=True
@@ -98,8 +124,10 @@ def compute_month_rows(school, months=6, today=None):
     """Trend table: one row per month, oldest first."""
     today = today or timezone.localdate()
     active_schedules = list(
-        RecurringLessonsSchedule.objects.filter(school=school, is_active=True)
-        .select_related('student')
+        _exclude_test(
+            RecurringLessonsSchedule.objects.filter(school=school, is_active=True),
+            'student__email',
+        ).select_related('student')
     )
     lesson_bounds = _first_lesson_by_student(school)
     churned_now = _currently_churned_student_ids(school)
@@ -111,8 +139,11 @@ def compute_month_rows(school, months=6, today=None):
 
         _, mrr = _scheduled_hours_and_revenue(active_schedules, year, month)
 
-        billed = StudentInvoice.objects.filter(
-            school=school, batch__year=year, batch__month=month
+        billed = _exclude_test(
+            StudentInvoice.objects.filter(
+                school=school, batch__year=year, batch__month=month
+            ),
+            'student__email',
         ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
 
         expenses = SchoolExpenseItem.objects.filter(
@@ -121,16 +152,22 @@ def compute_month_rows(school, months=6, today=None):
             period_start__month=month,
         ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
 
-        teacher_pay = Invoice.objects.filter(
-            school=school,
-            invoice_type='teacher_payment',
-            source_batch__year=year,
-            source_batch__month=month,
+        teacher_pay = _exclude_test(
+            Invoice.objects.filter(
+                school=school,
+                invoice_type='teacher_payment',
+                source_batch__year=year,
+                source_batch__month=month,
+            ),
+            'teacher__email',
         ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
 
         active_students = (
-            StudentInvoice.objects.filter(
-                school=school, batch__year=year, batch__month=month
+            _exclude_test(
+                StudentInvoice.objects.filter(
+                    school=school, batch__year=year, batch__month=month
+                ),
+                'student__email',
             ).values('student_id').distinct().count()
         )
 
@@ -151,18 +188,24 @@ def compute_month_rows(school, months=6, today=None):
             if prev_active_count else None
         )
 
-        cancelled_lessons = Lesson.objects.filter(
-            school=school,
-            status='cancelled',
-            scheduled_date__year=year,
-            scheduled_date__month=month,
+        cancelled_lessons = _exclude_test(
+            Lesson.objects.filter(
+                school=school,
+                status='cancelled',
+                scheduled_date__year=year,
+                scheduled_date__month=month,
+            ),
+            'student__email',
         ).count()
         credit_counts = dict(
-            CreditTransaction.objects.filter(
-                school=school,
-                created_at__year=year,
-                created_at__month=month,
-                type__in=['forfeited', 'waived_rollover'],
+            _exclude_test(
+                CreditTransaction.objects.filter(
+                    school=school,
+                    created_at__year=year,
+                    created_at__month=month,
+                    type__in=['forfeited', 'waived_rollover'],
+                ),
+                'account__student__email',
             ).values_list('type').annotate(n=Count('id'))
         )
 
@@ -212,16 +255,21 @@ def compute_current_metrics(school, today=None):
     """Point-in-time metrics for the current state of the school."""
     today = today or timezone.localdate()
     active_schedules = list(
-        RecurringLessonsSchedule.objects.filter(school=school, is_active=True)
-        .select_related('student')
+        _exclude_test(
+            RecurringLessonsSchedule.objects.filter(school=school, is_active=True),
+            'student__email',
+        ).select_related('student')
     )
 
     active_student_ids = {
         s.student_id for s in active_schedules if s.student.is_active
     }
     active_students = len(active_student_ids)
-    active_teachers = User.objects.filter(
-        school=school, user_type='teacher', is_active=True, is_approved=True
+    active_teachers = _exclude_test(
+        User.objects.filter(
+            school=school, user_type='teacher', is_active=True, is_approved=True
+        ),
+        'email',
     ).count()
 
     _, current_mrr = _scheduled_hours_and_revenue(
@@ -280,8 +328,9 @@ def compute_current_metrics(school, today=None):
 
     # Trial → enroll conversion (all-time)
     trial_students = set(
-        Lesson.objects.filter(school=school, is_trial=True)
-        .values_list('student_id', flat=True)
+        _exclude_test(
+            Lesson.objects.filter(school=school, is_trial=True), 'student__email'
+        ).values_list('student_id', flat=True)
     )
     converted = set(
         Lesson.objects.filter(
@@ -314,16 +363,20 @@ def compute_current_metrics(school, today=None):
 
     # Overdue: unpaid pre-billing invoices past period_end + payment terms
     overdue_cutoff = today - timedelta(days=school.payment_terms_days or 0)
-    overdue_qs = PreBillingInvoice.objects.filter(
-        school=school,
-        period_end__lt=overdue_cutoff,
+    overdue_qs = _exclude_test(
+        PreBillingInvoice.objects.filter(
+            school=school,
+            period_end__lt=overdue_cutoff,
+        ),
+        'student__email',
     ).exclude(status='paid')
     overdue = overdue_qs.aggregate(total=Sum('amount'), n=Count('id'))
 
     exit_reasons = [
         {'reason': r['reason'], 'count': r['n']}
-        for r in StudentExitRecord.objects.filter(school=school)
-        .values('reason').annotate(n=Count('id')).order_by('-n')
+        for r in _exclude_test(
+            StudentExitRecord.objects.filter(school=school), 'student__email'
+        ).values('reason').annotate(n=Count('id')).order_by('-n')
     ]
 
     return {

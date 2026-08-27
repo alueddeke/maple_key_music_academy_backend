@@ -14,16 +14,18 @@ class InvoiceEmailService:
                 # Single recipient provided - wrap in list
                 email_recipients = [recipient_email]
             else:
-                # Get all recipients from database
-                from billing.models import InvoiceRecipientEmail, SystemSettings
-                recipients = InvoiceRecipientEmail.objects.all()
+                # Recipients are per-school — never leak invoices across schools.
+                from billing.models import InvoiceRecipientEmail, SchoolSettings
+                school = invoice.school
+                recipients = InvoiceRecipientEmail.objects.filter(school=school)
 
                 if recipients.exists():
                     email_recipients = list(recipients.values_list('email', flat=True))
                 else:
-                    # Fallback to SystemSettings if no recipients configured
-                    system_settings = SystemSettings.get_settings()
-                    email_recipients = [system_settings.invoice_recipient_email]
+                    # Fallback: school notification email, then the school's main email
+                    school_settings = SchoolSettings.get_settings_for_school(school)
+                    fallback = school_settings.management_notification_email or school.email
+                    email_recipients = [fallback]
 
             # Count unique students
             student_count = len(student_pdfs) if student_pdfs else 0

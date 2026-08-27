@@ -386,6 +386,45 @@ def test_send_all_partial_failure(management_client, school, teacher_user, db):
     assert 'error' in failed_entry
 
 
+@pytest.mark.django_db
+def test_send_all_scoped_to_period(management_client, school, teacher_user, student_with_contact):
+    """
+    Regression (2026-08-27): POST send-all with month/year in the body sends only
+    that billing period's drafts. Unscoped, it swept every draft in the school —
+    the period-scoped UI fired invoices for months the user never looked at.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_scope_1'
+    contact.save()
+
+    june = _make_draft_invoice(student, school)  # period_start 2026-06-01
+    july = PreBillingInvoice.objects.create(
+        student=student,
+        school=school,
+        status='draft',
+        amount=Decimal('120.00'),
+        period_start=date(2026, 7, 1),
+        period_end=date(2026, 7, 31),
+    )
+    lesson = _make_confirmed_lesson(student, teacher_user, school)
+    june.lessons.add(lesson)
+    july.lessons.add(lesson)
+
+    with patch('billing.services.helcim_client.requests.post',
+               return_value=_helcim_create_invoice_ok()), \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request',
+               return_value=(True, 'sent')):
+        url = reverse('management_pre_billing_send_all')
+        response = management_client.post(url, {'month': 6, 'year': 2026}, format='json')
+
+    assert response.status_code == 200
+    assert response.data['sent'] == 1
+    june.refresh_from_db()
+    july.refresh_from_db()
+    assert june.status == 'sent'
+    assert july.status == 'draft'  # untouched — different period
+
+
 # ---------------------------------------------------------------------------
 # Tests — remove lesson / void + recreate (BILL-08, BILL-09)
 # ---------------------------------------------------------------------------

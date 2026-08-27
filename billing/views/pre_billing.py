@@ -20,7 +20,6 @@ import calendar
 from datetime import date
 from decimal import Decimal
 
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework.decorators import api_view, permission_classes
@@ -36,11 +35,15 @@ from ..models import (
     StudentCreditAccount,
     RecurringLessonsSchedule,
 )
-from ..services.helcim_client import HelcimClient, HelcimAPIError
+from ..services.helcim_client import HelcimClient, HelcimAPIError, payment_page_url
 from ..services.email_service import PreBillingEmailService
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+class InvoiceSendConflict(Exception):
+    """Raised when an invoice is not in a sendable state (double-send guard)."""
 
 
 # ---------------------------------------------------------------------------
@@ -103,20 +106,64 @@ def _resolve_period(request):
     return _period_for(year, month)
 
 
+def _projected_items(invoice):
+    """
+    Project lesson line items for a bill-ahead invoice from the student's
+    active recurring schedules — the same sourcing generate uses (D-08).
+
+    Future-period invoices have an EMPTY lessons M2M by design (Lesson rows
+    only exist after batch approval), so display, send, and email must all
+    derive dates from the schedule projection instead.
+    """
+    items = []
+    excluded = set(invoice.excluded_dates or [])
+    schedules = RecurringLessonsSchedule.objects.filter(
+        student=invoice.student,
+        school=invoice.school,
+        is_active=True,
+    ).select_related('teacher')
+    for sched in schedules:
+        for d in sched.generate_lessons_for_month(
+            invoice.period_start.year, invoice.period_start.month
+        ):
+            if d.isoformat() in excluded:
+                continue
+            items.append({
+                'date': d,
+                'rate': Decimal(str(sched.student_rate)),
+                'duration': Decimal(str(sched.duration)),
+                'teacher_name': sched.teacher.get_full_name() if sched.teacher else '',
+            })
+    items.sort(key=lambda item: item['date'])
+    return items
+
+
 def _serialize_invoice(invoice):
     """Return a dict representation of a PreBillingInvoice for API responses."""
     lessons = list(invoice.lessons.select_related('teacher').order_by('scheduled_date'))
     contact = BillableContact.objects.filter(
         student=invoice.student, is_primary=True
     ).only('email').first()
+    # Bill-ahead invoices (empty M2M) display projected schedule dates with
+    # synthetic negative ids — they are not removable Lesson rows.
+    projected = _projected_items(invoice) if not lessons else []
     return {
+        'is_projected': bool(projected) or (not lessons and bool(invoice.excluded_dates)),
+        'excluded_dates': sorted(invoice.excluded_dates or []),
         'id': invoice.id,
         'status': invoice.status,
         'amount': str(invoice.amount),
         'period_start': str(invoice.period_start),
         'period_end': str(invoice.period_end),
         'helcim_invoice_id': invoice.helcim_invoice_id,
+        'helcim_invoice_number': invoice.helcim_invoice_number,
         'payment_token': invoice.payment_token,
+        'payment_url': (
+            payment_page_url(invoice.payment_token, invoice.school)
+            if invoice.payment_token else ''
+        ),
+        'email_sent': invoice.email_sent,
+        'email_error': invoice.email_error,
         'student': {
             'id': invoice.student_id,
             'full_name': invoice.student.get_full_name(),
@@ -140,6 +187,16 @@ def _serialize_invoice(invoice):
                 'teacher_name': l.teacher.get_full_name() if l.teacher else '',
             }
             for l in lessons
+        ] + [
+            {
+                'id': -(i + 1),
+                'scheduled_date': item['date'].isoformat(),
+                'duration': str(item['duration']),
+                'student_rate': str(item['rate']),
+                'charge': str((item['rate'] * item['duration']).quantize(Decimal('0.01'))),
+                'teacher_name': item['teacher_name'],
+            }
+            for i, item in enumerate(projected)
         ],
     }
 
@@ -170,74 +227,150 @@ def _send_single_invoice(invoice, school):
         is_primary=True,
     )
 
-    # Lazy customer creation — OUTSIDE transaction (Helcim HTTP call must not be wrapped)
-    if not contact.helcim_customer_id:
-        customer_response = HelcimClient().create_customer(
-            contact_name=contact.student.get_full_name()
-        )
-        customer_id = str(customer_response['id'])
-        # Minimal atomic block only for the DB write
-        with transaction.atomic():
-            BillableContact.objects.filter(pk=contact.pk).update(
-                helcim_customer_id=customer_id
-            )
-        contact.helcim_customer_id = customer_id
-
-    # Build line items — one per lesson, price = student_rate × duration
+    # Build line items — one per lesson, price = student_rate × duration.
+    # Bill-ahead invoices have an empty M2M (Lesson rows only exist after
+    # batch approval, D-08) — project dates from the recurring schedules,
+    # exactly as generate did.
     lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    projected = _projected_items(invoice) if not lessons else []
 
-    # Guard: reject zero-lesson or zero-amount invoices before hitting Helcim
-    if not lessons:
+    # Guard: reject zero-lesson invoices before hitting Helcim
+    if not lessons and not projected:
         raise HelcimAPIError(
             'This invoice has no lesson dates. Add lessons before sending.'
         )
+
+    # Schedule-sourced drafts: schedules (or credit) may have changed since
+    # the draft was generated — recompute so stored amount, email, and the
+    # Helcim page all agree at the moment of sending. Persisted with the
+    # final save inside the claim; a failed send never writes it.
+    if projected and invoice.status == 'draft':
+        gross_projected = sum(
+            (item['rate'] * item['duration'] for item in projected),
+            Decimal('0.00'),
+        ).quantize(Decimal('0.01'))
+        try:
+            credit_balance = StudentCreditAccount.objects.get(
+                student=invoice.student, school=invoice.school
+            ).balance
+        except StudentCreditAccount.DoesNotExist:
+            credit_balance = Decimal('0.00')
+        invoice.amount = max(Decimal('0.00'), gross_projected - credit_balance)
+
     if invoice.amount is None or invoice.amount == 0:
         raise HelcimAPIError(
             'This invoice has a $0.00 balance. Only invoices with an amount owing can be sent.'
         )
 
-    line_items = [
-        {
-            'description': (
-                f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
-                if l.scheduled_date is not None
-                else 'Lesson'
-            ),
-            'quantity': 1,
-            'price': float(
-                Decimal(str(l.student_rate)) * Decimal(str(l.duration))
-            ),
-        }
-        for l in lessons
-    ]
+    # Atomically claim the invoice (draft → sending) so two concurrent send
+    # requests cannot both create Helcim invoices + emails. The conditional
+    # UPDATE is the lock; exactly one request wins.
+    claimed = PreBillingInvoice.objects.filter(
+        pk=invoice.pk, status='draft'
+    ).update(status='sending')
+    if not claimed:
+        raise InvoiceSendConflict(
+            'This invoice is already being sent or was already sent.'
+        )
 
-    # Create Helcim invoice — OUTSIDE transaction
-    helcim_response = HelcimClient().create_invoice(
-        currency='CAD',
-        line_items=line_items,
-        customer_id=contact.helcim_customer_id,
-    )
+    try:
+        # Lazy customer creation — OUTSIDE transaction (Helcim HTTP call must not be wrapped)
+        if not contact.helcim_customer_id:
+            customer_response = HelcimClient(school=school).create_customer(
+                contact_name=contact.student.get_full_name()
+            )
+            customer_id = str(customer_response['id'])
+            # Minimal atomic block only for the DB write
+            with transaction.atomic():
+                BillableContact.objects.filter(pk=contact.pk).update(
+                    helcim_customer_id=customer_id
+                )
+            contact.helcim_customer_id = customer_id
 
-    # Build payment URL from subdomain + token
-    payment_url = (
-        f"https://{settings.HELCIM_SUBDOMAIN}.myhelcim.com/order/?token="
-        f"{helcim_response['token']}"
-    )
+        if projected:
+            line_items = [
+                {
+                    # Helcim requires a sku for line items to appear on the invoice.
+                    'sku': f'LESSON-P{i + 1}',
+                    'description': f"Lesson on {item['date'].isoformat()}",
+                    'quantity': 1,
+                    'price': float(item['rate'] * item['duration']),
+                }
+                for i, item in enumerate(projected)
+            ]
+        else:
+            line_items = [
+                {
+                    'sku': f'LESSON-{l.pk}',
+                    'description': (
+                        f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
+                        if l.scheduled_date is not None
+                        else 'Lesson'
+                    ),
+                    'quantity': 1,
+                    'price': float(
+                        Decimal(str(l.student_rate)) * Decimal(str(l.duration))
+                    ),
+                }
+                for l in lessons
+            ]
+
+        # invoice.amount is net of wallet credit (generate: max(0, gross − credit)),
+        # but line items are gross — without a discount Helcim would charge the
+        # parent MORE than the emailed amount. Credit rides as an invoice-level
+        # discount (negative line-item prices are rejected by the API), keeping
+        # Helcim's amountDue == invoice.amount == emailed amount.
+        gross = sum(
+            (Decimal(str(li['price'])) for li in line_items),
+            Decimal('0.00'),
+        ).quantize(Decimal('0.01'))
+        credit_applied = gross - invoice.amount
+        discount = None
+        if credit_applied > Decimal('0.00'):
+            discount = {
+                'amount': float(credit_applied),
+                'details': 'Account credit applied',
+            }
+
+        # Create Helcim invoice — OUTSIDE transaction
+        helcim_response = HelcimClient(school=school).create_invoice(
+            currency='CAD',
+            line_items=line_items,
+            customer_id=contact.helcim_customer_id,
+            discount=discount,
+        )
+    except Exception:
+        # Release the claim so the invoice stays sendable after a failure.
+        PreBillingInvoice.objects.filter(
+            pk=invoice.pk, status='sending'
+        ).update(status='draft')
+        raise
+
+    # Build payment URL from subdomain + token (per-school subdomain wins)
+    payment_url = payment_page_url(helcim_response['token'], school)
 
     # Minimal atomic block ONLY for the DB write
     with transaction.atomic():
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        # Payment/webhook responses reference invoiceNumber, not invoiceId —
+        # webhook reconciliation matches on this field.
+        invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
         invoice.payment_token = helcim_response['token']
         invoice.status = 'sent'
         invoice.save()
 
-    # Email OUTSIDE atomic + after DB commit
-    lesson_dates = [
-        l.scheduled_date.date().strftime('%Y-%m-%d')
-        if l.scheduled_date is not None
-        else 'Unknown'
-        for l in lessons
-    ]
+    # Email OUTSIDE atomic + after DB commit. Failure is recorded on the
+    # invoice (email_sent/email_error) so management can resend or copy the
+    # payment link from the UI — a failed email is recoverable, not silent.
+    if projected:
+        lesson_dates = [item['date'].strftime('%Y-%m-%d') for item in projected]
+    else:
+        lesson_dates = [
+            l.scheduled_date.date().strftime('%Y-%m-%d')
+            if l.scheduled_date is not None
+            else 'Unknown'
+            for l in lessons
+        ]
     period_label = invoice.period_start.strftime('%B %Y')
     email_result, email_message = PreBillingEmailService.send_payment_request(
         contact.email,
@@ -248,6 +381,9 @@ def _send_single_invoice(invoice, school):
         lesson_dates,
         payment_url,
     )
+    invoice.email_sent = email_result
+    invoice.email_error = '' if email_result else email_message
+    invoice.save(update_fields=['email_sent', 'email_error', 'updated_at'])
     if not email_result:
         logger.warning(
             'Pre-billing email failed for invoice %s: %s',
@@ -399,6 +535,15 @@ def management_pre_billing_generate(request):
                 generated += 1
             elif invoice.status == 'draft':
                 # D-10: refresh existing DRAFT to current schedule amount + lessons.
+                # Management-skipped dates survive the refresh: recompute from
+                # the filtered projection instead of the raw schedule gross.
+                if is_future and invoice.excluded_dates:
+                    filtered_gross = sum(
+                        (item['rate'] * item['duration']
+                         for item in _projected_items(invoice)),
+                        Decimal('0.00'),
+                    )
+                    amount = max(Decimal('0.00'), filtered_gross - credit)
                 invoice.amount = amount
                 invoice.period_end = period_end
                 invoice.save(update_fields=['amount', 'period_end'])
@@ -497,6 +642,8 @@ def management_pre_billing_send(request, invoice_id):
 
     try:
         _send_single_invoice(invoice, request.user.school)
+    except InvoiceSendConflict as e:
+        return Response({'error': str(e)}, status=status.HTTP_409_CONFLICT)
     except HelcimAPIError as e:
         logger.error('Helcim error sending invoice %s: %s', invoice_id, e)
         return Response(
@@ -514,6 +661,8 @@ def management_pre_billing_send(request, invoice_id):
             'id': invoice.id,
             'status': invoice.status,
             'helcim_invoice_id': invoice.helcim_invoice_id,
+            'email_sent': invoice.email_sent,
+            'email_error': invoice.email_error,
         }
     )
 
@@ -525,7 +674,10 @@ def management_pre_billing_send_all(request):
     """
     POST /api/billing/management/pre-billing/send-all/
 
-    Process all draft invoices for request.user.school sequentially.
+    Process draft invoices for request.user.school sequentially. When month/year
+    are supplied in the body, only that billing period's drafts are sent — the UI
+    is period-scoped, so an unscoped send would fire every draft in the school
+    (all months at once). Omitting month/year keeps the legacy school-wide sweep.
     Per-student failures are caught and accumulated in response.failed[].
     One failure does not abort the batch (T-19-03-09).
     """
@@ -534,6 +686,17 @@ def management_pre_billing_send_all(request):
         .filter(school=request.user.school, status='draft')
         .select_related('student')
     )
+    month = request.data.get('month')
+    year = request.data.get('year')
+    if month and year:
+        try:
+            period_start = date(int(year), int(month), 1)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'Invalid month/year'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        drafts = drafts.filter(period_start=period_start)
 
     sent = 0
     failed = []
@@ -542,7 +705,8 @@ def management_pre_billing_send_all(request):
         try:
             _send_single_invoice(draft, request.user.school)
             sent += 1
-        except (HelcimAPIError, BillableContact.DoesNotExist, Exception) as e:
+        except (HelcimAPIError, BillableContact.DoesNotExist,
+                InvoiceSendConflict, Exception) as e:
             logger.error(
                 'send-all failed for invoice %s (student %s): %s',
                 draft.id,
@@ -646,7 +810,7 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     # "Cannot void" inline error rather than "Cannot remove last lesson" —
     # no DB change has occurred at this point (D-16).
     try:
-        HelcimClient().cancel_invoice(
+        HelcimClient(school=school).cancel_invoice(
             old_helcim_invoice_id,
             currency='CAD',
             line_items=original_line_items,
@@ -676,6 +840,8 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     # Step 7: Build replacement line items from remaining lessons (post-removal)
     line_items = [
         {
+            # Helcim requires a sku for line items to appear on the invoice.
+            'sku': f'LESSON-{l.pk}',
             'description': (
                 f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
                 if l.scheduled_date is not None
@@ -707,7 +873,7 @@ def management_pre_billing_remove_lesson(request, invoice_id):
 
     # Step 9: OUTSIDE transaction — create replacement Helcim invoice (T-19-04-06)
     try:
-        helcim_response = HelcimClient().create_invoice(
+        helcim_response = HelcimClient(school=school).create_invoice(
             currency='CAD',
             line_items=line_items,
             customer_id=contact.helcim_customer_id,
@@ -732,16 +898,14 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     )
     amount = max(Decimal('0.00'), gross)
 
-    # Step 11: Build payment URL from subdomain + new token
-    payment_url = (
-        f"https://{settings.HELCIM_SUBDOMAIN}.myhelcim.com/order/?token="
-        f"{helcim_response['token']}"
-    )
+    # Step 11: Build payment URL from subdomain + new token (per-school subdomain wins)
+    payment_url = payment_page_url(helcim_response['token'], school)
 
     # Step 12: Minimal transaction.atomic for ALL DB writes (T-19-04-06)
     with transaction.atomic():
         invoice.lessons.remove(lesson)
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
         invoice.payment_token = helcim_response['token']
         invoice.status = 'adjusted'
         invoice.amount = amount
@@ -764,6 +928,9 @@ def management_pre_billing_remove_lesson(request, invoice_id):
         lesson_dates,
         payment_url,
     )
+    invoice.email_sent = email_result
+    invoice.email_error = '' if email_result else email_message
+    invoice.save(update_fields=['email_sent', 'email_error', 'updated_at'])
     if not email_result:
         logger.warning(
             'Replacement pre-billing email failed for invoice %s: %s',
@@ -772,3 +939,174 @@ def management_pre_billing_remove_lesson(request, invoice_id):
         )
 
     return Response(_serialize_invoice(invoice))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_resend_email(request, invoice_id):
+    """
+    POST /api/billing/management/pre-billing/<invoice_id>/resend-email/
+
+    Re-send the payment-request email for a sent/adjusted invoice using the
+    existing Helcim payment token — no new Helcim invoice is created. This is
+    the recovery path when the original email failed (email_sent=False) or a
+    parent lost the link.
+    """
+    try:
+        invoice = (
+            PreBillingInvoice.objects
+            .select_related('student', 'school')
+            .prefetch_related('lessons')
+            .get(id=invoice_id, school=request.user.school)
+        )
+    except PreBillingInvoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if invoice.status not in ('sent', 'adjusted'):
+        return Response(
+            {'error': 'Only sent or adjusted invoices can have their email resent'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not invoice.payment_token:
+        return Response(
+            {'error': 'Invoice has no payment link — send it first'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        contact = BillableContact.objects.select_related('student').get(
+            student=invoice.student,
+            is_primary=True,
+        )
+    except BillableContact.DoesNotExist:
+        return Response(
+            {'error': 'No primary billing contact for this student'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    payment_url = payment_page_url(invoice.payment_token, invoice.school)
+    resend_lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    if resend_lessons:
+        lesson_dates = [
+            l.scheduled_date.date().strftime('%Y-%m-%d')
+            if l.scheduled_date is not None
+            else 'Unknown'
+            for l in resend_lessons
+        ]
+    else:
+        # Bill-ahead invoice — dates come from the schedule projection
+        lesson_dates = [
+            item['date'].strftime('%Y-%m-%d') for item in _projected_items(invoice)
+        ]
+    email_result, email_message = PreBillingEmailService.send_payment_request(
+        contact.email,
+        contact.student.get_full_name(),
+        invoice.school.name,
+        invoice.period_start.strftime('%B %Y'),
+        invoice.amount,
+        lesson_dates,
+        payment_url,
+    )
+    invoice.email_sent = email_result
+    invoice.email_error = '' if email_result else email_message
+    invoice.save(update_fields=['email_sent', 'email_error', 'updated_at'])
+
+    if not email_result:
+        return Response(
+            {'error': email_message, **_serialize_invoice(invoice)},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    return Response(_serialize_invoice(invoice))
+
+
+def _toggle_projected_date(request, invoice_id, skip):
+    """
+    Shared body for skip-date / restore-date.
+
+    Draft, schedule-projected invoices only — one-off date exclusions for a
+    known absence. The schedule itself is untouched; recurring changes belong
+    on the schedule (or a pause), not here. Amount is recomputed from the
+    filtered projection minus current credit, mirroring generate.
+    """
+    try:
+        invoice = PreBillingInvoice.objects.get(
+            id=invoice_id,
+            school=request.user.school,
+        )
+    except PreBillingInvoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if invoice.status != 'draft':
+        return Response(
+            {'error': 'Dates can only be skipped on draft invoices'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if invoice.lessons.exists():
+        return Response(
+            {'error': 'This invoice bills actual lessons — use Remove Lesson instead'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    raw_date = str(request.data.get('date', ''))
+    try:
+        target = date.fromisoformat(raw_date)
+    except ValueError:
+        return Response(
+            {'error': 'date must be YYYY-MM-DD'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    excluded = set(invoice.excluded_dates or [])
+    if skip:
+        # Must be a real projected date (and not already skipped)
+        projectable = {item['date'].isoformat() for item in _projected_items(invoice)}
+        if target.isoformat() not in projectable:
+            return Response(
+                {'error': 'Date is not on this invoice'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        excluded.add(target.isoformat())
+    else:
+        if target.isoformat() not in excluded:
+            return Response(
+                {'error': 'Date is not skipped'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        excluded.discard(target.isoformat())
+
+    invoice.excluded_dates = sorted(excluded)
+
+    # Recompute amount from the filtered projection − current credit
+    remaining = sum(
+        (item['rate'] * item['duration'] for item in _projected_items(invoice)),
+        Decimal('0.00'),
+    ).quantize(Decimal('0.01'))
+    try:
+        credit = StudentCreditAccount.objects.get(
+            student=invoice.student, school=invoice.school
+        ).balance
+    except StudentCreditAccount.DoesNotExist:
+        credit = Decimal('0.00')
+    invoice.amount = max(Decimal('0.00'), remaining - credit)
+
+    with transaction.atomic():
+        invoice.save(update_fields=['excluded_dates', 'amount', 'updated_at'])
+
+    return Response(_serialize_invoice(invoice))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_skip_date(request, invoice_id):
+    """POST /api/billing/management/pre-billing/<invoice_id>/skip-date/  {date: YYYY-MM-DD}"""
+    return _toggle_projected_date(request, invoice_id, skip=True)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_pre_billing_restore_date(request, invoice_id):
+    """POST /api/billing/management/pre-billing/<invoice_id>/restore-date/  {date: YYYY-MM-DD}"""
+    return _toggle_projected_date(request, invoice_id, skip=False)

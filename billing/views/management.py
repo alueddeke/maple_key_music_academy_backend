@@ -5,6 +5,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, BatchRejectionSnapshot, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
 from ..serializers import (
@@ -498,38 +499,6 @@ def management_reject_invoice(request, pk):
 
     except Invoice.DoesNotExist:
         return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
-
-
-# SYSTEM SETTINGS ENDPOINTS
-
-@api_view(['GET'])
-@management_required
-def get_system_settings(request):
-    """Get system settings (management only)"""
-    from ..models import SystemSettings
-    from ..serializers import SystemSettingsSerializer
-
-    settings = SystemSettings.get_settings()
-    serializer = SystemSettingsSerializer(settings)
-    return Response(serializer.data)
-
-
-@api_view(['PUT'])
-@management_required
-def update_system_settings(request):
-    """Update system settings (management only)"""
-    from ..models import SystemSettings
-    from ..serializers import SystemSettingsSerializer
-
-    settings = SystemSettings.get_settings()
-    serializer = SystemSettingsSerializer(settings, data=request.data, partial=True)
-
-    if serializer.is_valid():
-        # Set the updated_by field to the current user
-        serializer.save(updated_by=request.user)
-        return Response(serializer.data)
-
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['GET', 'PUT'])
@@ -1344,7 +1313,8 @@ def management_approved_batches(request):
     """List all approved batches"""
     batches = MonthlyInvoiceBatch.objects.filter(
         status='approved',
-        school=request.user.school
+        school=request.user.school,
+        archived_at__isnull=True,
     ).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
@@ -1364,6 +1334,7 @@ def management_month_end_queue(request):
         status='approved',
         invoice__isnull=True,
         school=request.user.school,
+        archived_at__isnull=True,
     ).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
@@ -1391,8 +1362,11 @@ def management_generate_teacher_invoice(request, batch_id):
       1. Creates Invoice(invoice_type='teacher_payment') with total_amount =
          Σ calculate_teacher_payment() over all BatchLessonItems.
       2. Links batch.invoice = invoice (signals batch lock for teacher adjustments, ADJ-07).
-      3. Writes CreditTransaction(waived_rollover) per waived item (D-05 — deferred from
-         approval): refunds the approval-time charge as next-month student credit.
+      3. Writes CreditTransaction(waived_rollover) per waived item that was CHARGED at
+         approval (D-05 — deferred from approval): refunds the approval-time charge as
+         next-month student credit. Charged-at-approval is determined by membership in a
+         StudentInvoice.lesson_items M2M — an item waived while the batch was still a
+         draft was excluded from the invoice (never charged), so it gets no rollover.
       4. Writes CreditTransaction(forfeited) per forfeited item as the audit record for the
          no-show charge. The student's balance was already decremented at approval (the
          lesson counted as a 'confirmed' charge then), so balance is NOT touched here —
@@ -1453,8 +1427,14 @@ def management_generate_teacher_invoice(request, batch_id):
         batch.invoice = invoice
         batch.save(update_fields=['invoice'])
 
-        # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval)
-        waived_items = list(batch.lesson_items.filter(status='waived'))
+        # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval).
+        # Only items charged at approval get the refund: the StudentInvoice.lesson_items
+        # M2M is the approval-time record of what was billed. A lesson waived while the
+        # batch was still a draft was excluded from the invoice — crediting it anyway
+        # would gift the parent a free lesson credit (verified live 2026-08-27).
+        waived_items = list(
+            batch.lesson_items.filter(status='waived', student_invoice__isnull=False)
+        )
         for item in waived_items:
             lesson_rate = item.student_rate * item.duration
             if lesson_rate > Decimal('0.00'):
@@ -1535,6 +1515,7 @@ def management_rejected_batches(request):
     batches = MonthlyInvoiceBatch.objects.filter(
         status='draft',
         school=request.user.school,
+        archived_at__isnull=True,
     ).exclude(rejection_reason='').exclude(rejection_reason__isnull=True).order_by('-reviewed_at')
 
     serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
@@ -1933,7 +1914,6 @@ def management_approve_batch(request, batch_id):
             batch.save()
 
             # Return JSON for Phase 20 credit reconciliation (HELM-05)
-            # CSV is served separately via GET /management/batches/{id}/csv/
             return Response({
                 'status': 'approved',
                 'batch_id': batch.id,
@@ -1947,40 +1927,6 @@ def management_approve_batch(request, batch_id):
             {'error': f'Approval failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-@management_required
-def management_batch_csv(request, batch_id):
-    """
-    Serve the Helcim CSV for an already-approved batch.
-
-    Returns:
-        200 HttpResponse with text/csv for approved batches.
-        400 if batch.status != 'approved' (D-21: premature download blocked).
-        404 if batch not found in user's school (T-18-D1: school isolation).
-    """
-    from ..models import StudentInvoice, SchoolSettings
-    from ..services.helcim_csv_generator import generate_helcim_csv
-
-    try:
-        batch = MonthlyInvoiceBatch.objects.get(
-            id=batch_id,
-            school=request.user.school
-        )
-    except MonthlyInvoiceBatch.DoesNotExist:
-        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
-
-    if batch.status != 'approved':
-        return Response(
-            {'error': 'Batch must be approved before downloading CSV'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    school_settings = SchoolSettings.get_settings_for_school(batch.school)
-    student_invoices = list(StudentInvoice.objects.filter(batch=batch))
-    return generate_helcim_csv(student_invoices, school_settings)
 
 
 @api_view(['POST'])
@@ -2093,6 +2039,94 @@ def management_delete_rejected_batch(request, batch_id):
 
     batch.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ============================================================================
+# MAP-103: Monthly batch archive
+# ============================================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_archive_month(request):
+    """
+    Archive all finished batches (approved, or rejected drafts) for one month.
+
+    POST body: {"month": 7, "year": 2026}
+
+    Archiving only sets archived_at — nothing is deleted. Lesson items,
+    BatchRejectionSnapshot records (MAP-99), linked invoices, and history all
+    survive; the batches just leave the Payroll working lists. Submitted and
+    clean-draft batches are never archived (still in flight).
+    """
+    try:
+        month = int(request.data.get('month'))
+        year = int(request.data.get('year'))
+        if not 1 <= month <= 12 or year < 2020:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response(
+            {'error': 'month (1-12) and year are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    finished = (
+        MonthlyInvoiceBatch.objects.filter(
+            school=request.user.school,
+            month=month,
+            year=year,
+            archived_at__isnull=True,
+        )
+        .filter(
+            Q(status='approved')
+            | (Q(status='draft') & ~Q(rejection_reason=''))
+        )
+    )
+    archived = finished.update(archived_at=timezone.now())
+    return Response({'archived': archived, 'month': month, 'year': year})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_archived_batches(request):
+    """List archived batches, newest archive first. Optional ?month=&year= filter."""
+    batches = MonthlyInvoiceBatch.objects.filter(
+        school=request.user.school,
+        archived_at__isnull=False,
+    ).order_by('-archived_at')
+    month = request.query_params.get('month')
+    year = request.query_params.get('year')
+    if month and year:
+        try:
+            batches = batches.filter(month=int(month), year=int(year))
+        except ValueError:
+            return Response(
+                {'error': 'month and year must be integers'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    serializer = MonthlyInvoiceBatchSerializer(batches, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_unarchive_batch(request, batch_id):
+    """Return a single archived batch to the Payroll working lists."""
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id, school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+    if batch.archived_at is None:
+        return Response(
+            {'error': 'Batch is not archived'}, status=status.HTTP_400_BAD_REQUEST
+        )
+    batch.archived_at = None
+    batch.save(update_fields=['archived_at', 'updated_at'])
+    return Response(MonthlyInvoiceBatchSerializer(batch).data)
 
 
 # ============================================================================

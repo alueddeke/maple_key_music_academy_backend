@@ -14,6 +14,7 @@ from ..serializers import (
 from custom_auth.decorators import (
     teacher_required, management_required, teacher_or_management_required
 )
+from notifications.services import notify_exception_marked
 import logging
 import uuid
 from datetime import date
@@ -893,9 +894,28 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    old_item_status = item.status
+    old_item_date = item.scheduled_date
     serializer = BatchLessonItemSerializer(item, data=update_data, partial=True)
     if serializer.is_valid():
         serializer.save()
+        # Notify management only when the adjustment actually changed
+        # something (status transition or in-place reschedule) — no-op
+        # PATCHes stay silent. Never let a notification failure break
+        # the adjustment itself (mirrors notifications/signals.py idiom).
+        change_bits = []
+        if item.status != old_item_status:
+            change_bits.append(f"status {old_item_status} -> {item.status}")
+        if item.scheduled_date != old_item_date:
+            change_bits.append(f"date {old_item_date} -> {item.scheduled_date}")
+        if change_bits:
+            try:
+                notify_exception_marked(batch, description='; '.join(change_bits))
+            except Exception:
+                logger.warning(
+                    "Failed to create exception notification for batch %s",
+                    batch.id,
+                )
         data = dict(serializer.data)
         if waive_converted:
             data['waive_converted_to_forfeited'] = True
@@ -934,8 +954,6 @@ def batch_submit(request, batch_id):
     # Clear rejection reason when resubmitting after rejection
     batch.rejection_reason = ''
     batch.save()
-
-    # TODO: Send email notification to management (Phase 5)
 
     serializer = MonthlyInvoiceBatchSerializer(batch)
     return Response(serializer.data)

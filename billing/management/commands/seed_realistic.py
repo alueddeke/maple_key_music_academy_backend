@@ -35,6 +35,7 @@ from billing.models import (
     Lesson,
     MonthlyInvoiceBatch,
     PreBillingInvoice,
+    RecurringLessonsSchedule,
     School,
     SchoolExpenseItem,
     SchoolMonthlyExpenses,
@@ -724,7 +725,51 @@ class Command(BaseCommand):
         # Phase 22: approved-but-not-invoiced batch for month-end queue
         self._seed_approved_no_invoice_period(school, teachers, all_records, 8, 2026, mgmt)
 
+        # Recurring schedules — sourced from the August lesson patterns so
+        # pre-billing (bill-ahead) can project future months. The last student
+        # is deliberately left without a schedule so the generate endpoint's
+        # skipped_no_schedule path stays testable (UAT E1).
+        self._seed_recurring_schedules(school, 8, 2026, mgmt)
+
         self._print_summary(all_records)
+
+    def _seed_recurring_schedules(self, school, month, year, mgmt):
+        self.stdout.write(self.style.WARNING('\nCreating recurring schedules from lesson patterns…'))
+        pairs = {}
+        for item in (
+            BatchLessonItem.objects
+            .filter(batch__school=school, batch__year=year, batch__month=month)
+            .select_related('batch')
+            .order_by('scheduled_date')
+        ):
+            pairs.setdefault((item.batch.teacher_id, item.student_id), item)
+
+        skip_student_id = max(sid for (_tid, sid) in pairs) if pairs else None
+        created = 0
+        for (teacher_id, student_id), item in sorted(pairs.items()):
+            if student_id == skip_student_id:
+                continue
+            RecurringLessonsSchedule.objects.get_or_create(
+                teacher_id=teacher_id,
+                student_id=student_id,
+                day_of_week=item.scheduled_date.weekday(),
+                start_time=item.start_time,
+                defaults=dict(
+                    school=school,
+                    duration=item.duration,
+                    lesson_type=item.lesson_type,
+                    teacher_rate=item.teacher_rate,
+                    student_rate=item.student_rate,
+                    is_active=True,
+                    start_date=datetime.date(year, month, 1),
+                    created_by=mgmt,
+                ),
+            )
+            created += 1
+        self.stdout.write(
+            f'  ✓ {created} schedules created (1 student left schedule-less for the '
+            f'pre-billing skipped_no_schedule check)'
+        )
 
     def _seed_approved_period(self, school, teachers, all_records, month, year, mgmt):
         import calendar as _cal

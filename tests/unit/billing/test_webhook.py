@@ -7,7 +7,9 @@ Coverage:
   - Idempotency saves outbound call: get_card_transaction called once across two POSTs of same event
   - Secondary GET failure still returns 200 (row preserved for Phase 20 retry)
   - Invalid JSON body → 400
-  - Missing transaction id → 400
+  - Missing transaction id → 200 ignored (avoids Helcim retry loop)
+  - terminalCancel / unknown event types → 200 ignored
+  - Signature header is versioned "v1,<sig>" list — bare digests rejected
   - Amount stored as Decimal not float (CONVENTIONS.md)
   - URL path contains no 'helcim' substring (D-10)
 
@@ -61,13 +63,14 @@ def make_helcim_signed_request(
     signature = base64.b64encode(digest).decode("utf-8")
 
     url = reverse("payment_callback")
+    # Real Helcim header format: "v1,<base64sig>" (SVix-style versioned list).
     return api_client.post(
         url,
         data=raw_body,
         content_type="application/json",
         HTTP_WEBHOOK_ID=webhook_id,
         HTTP_WEBHOOK_TIMESTAMP=webhook_timestamp,
-        HTTP_WEBHOOK_SIGNATURE=signature,
+        HTTP_WEBHOOK_SIGNATURE=f"v1,{signature}",
     )
 
 
@@ -112,10 +115,10 @@ def test_webhook_bad_signature_returns_403(api_client):
 def test_webhook_valid_signature_returns_200_and_writes_event(api_client):
     """Valid HMAC → 200 {"status": "ok"}, event row created with invoice_id + amount."""
     body_dict = {"id": "333", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "001", "amount": 60.00}
+    mock_tx = {"invoiceNumber": "001", "amount": 60.00, "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict)
@@ -133,10 +136,10 @@ def test_webhook_valid_signature_returns_200_and_writes_event(api_client):
 def test_webhook_duplicate_returns_200_no_second_write(api_client):
     """Two POSTs with same body → both 200, but second is {"status": "duplicate"}, one DB row."""
     body_dict = {"id": "444", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "002", "amount": 75.00}
+    mock_tx = {"invoiceNumber": "002", "amount": 75.00, "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         r1 = make_helcim_signed_request(api_client, body_dict)
@@ -153,10 +156,10 @@ def test_webhook_duplicate_returns_200_no_second_write(api_client):
 def test_webhook_duplicate_does_not_call_get_card_transaction(api_client):
     """get_card_transaction called exactly once across two POSTs of the same event."""
     body_dict = {"id": "555", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "003", "amount": 90.00}
+    mock_tx = {"invoiceNumber": "003", "amount": 90.00, "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ) as mock_get:
         make_helcim_signed_request(api_client, body_dict)
@@ -171,7 +174,7 @@ def test_webhook_helcim_api_error_still_returns_200(api_client):
     body_dict = {"id": "666", "type": "cardTransaction"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         side_effect=HelcimAPIError("API down", status_code=503),
     ):
         response = make_helcim_signed_request(api_client, body_dict)
@@ -201,21 +204,95 @@ def test_webhook_invalid_json_returns_400(api_client):
         content_type="application/json",
         HTTP_WEBHOOK_ID=webhook_id,
         HTTP_WEBHOOK_TIMESTAMP=webhook_timestamp,
-        HTTP_WEBHOOK_SIGNATURE=signature,
+        HTTP_WEBHOOK_SIGNATURE=f"v1,{signature}",
     )
     assert response.status_code == 400
 
 
 @pytest.mark.django_db
-def test_webhook_missing_transaction_id_returns_400(api_client):
-    """Valid JSON but no 'id' field → 400, no event written."""
+def test_webhook_missing_transaction_id_returns_200_ignored(api_client):
+    """Valid JSON but no 'id' field → 200 ignored (non-2xx would trigger Helcim's ~10h retry loop), no event written."""
     body_dict = {"type": "cardTransaction"}  # no 'id'
 
-    with mock.patch("billing.views.webhooks.HelcimClient.get_card_transaction"):
+    with mock.patch("billing.services.webhook_processing.HelcimClient.get_card_transaction"):
         response = make_helcim_signed_request(api_client, body_dict)
 
-    assert response.status_code == 400
+    assert response.status_code == 200
+    assert response.data == {"status": "ignored"}
     assert HelcimWebhookEvent.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_webhook_terminal_cancel_returns_200_ignored(api_client):
+    """terminalCancel payload (nested data, no top-level id) → 200 ignored, no event written."""
+    body_dict = {
+        "data": {
+            "cancelledAt": "2026-07-29 10:00:00",
+            "currency": "CAD",
+            "invoiceNumber": "INV1791",
+            "transactionAmount": "60.00",
+        },
+        "type": "terminalCancel",
+    }
+
+    with mock.patch("billing.services.webhook_processing.HelcimClient.get_card_transaction") as mock_get:
+        response = make_helcim_signed_request(api_client, body_dict)
+
+    assert response.status_code == 200
+    assert response.data == {"status": "ignored"}
+    assert HelcimWebhookEvent.objects.count() == 0
+    mock_get.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_webhook_signature_list_with_multiple_versions_accepted(api_client):
+    """Header may be a space-delimited list of "v<N>,<sig>" — any matching candidate passes."""
+    body_dict = {"id": "888", "type": "cardTransaction"}
+    raw_body = json.dumps(body_dict).encode("utf-8")
+    webhook_id, webhook_timestamp = "msg-multi", "1700000000"
+    signed_content = f"{webhook_id}.{webhook_timestamp}.{raw_body.decode('utf-8')}"
+    secret_bytes = base64.b64decode(settings.HELCIM_WEBHOOK_SECRET)
+    digest = hmac.new(secret_bytes, signed_content.encode("utf-8"), hashlib.sha256).digest()
+    good_sig = base64.b64encode(digest).decode("utf-8")
+
+    with mock.patch(
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
+        return_value={"invoiceNumber": "005", "amount": 10.00, "status": "APPROVED", "type": "purchase"},
+    ):
+        response = api_client.post(
+            reverse("payment_callback"),
+            data=raw_body,
+            content_type="application/json",
+            HTTP_WEBHOOK_ID=webhook_id,
+            HTTP_WEBHOOK_TIMESTAMP=webhook_timestamp,
+            HTTP_WEBHOOK_SIGNATURE=f"v2,Zm9vYmFy {f'v1,{good_sig}'}",
+        )
+
+    assert response.status_code == 200
+    assert response.data == {"status": "ok"}
+
+
+@pytest.mark.django_db
+def test_webhook_raw_signature_without_version_prefix_rejected(api_client):
+    """A bare base64 signature with no "v1," prefix does not match the versioned format → 403."""
+    body_dict = {"id": "999", "type": "cardTransaction"}
+    raw_body = json.dumps(body_dict).encode("utf-8")
+    webhook_id, webhook_timestamp = "msg-bare", "1700000000"
+    signed_content = f"{webhook_id}.{webhook_timestamp}.{raw_body.decode('utf-8')}"
+    secret_bytes = base64.b64decode(settings.HELCIM_WEBHOOK_SECRET)
+    digest = hmac.new(secret_bytes, signed_content.encode("utf-8"), hashlib.sha256).digest()
+    bare_sig = base64.b64encode(digest).decode("utf-8")
+
+    response = api_client.post(
+        reverse("payment_callback"),
+        data=raw_body,
+        content_type="application/json",
+        HTTP_WEBHOOK_ID=webhook_id,
+        HTTP_WEBHOOK_TIMESTAMP=webhook_timestamp,
+        HTTP_WEBHOOK_SIGNATURE=bare_sig,
+    )
+
+    assert response.status_code == 403
 
 
 @pytest.mark.django_db
@@ -223,10 +300,10 @@ def test_webhook_amount_stored_as_decimal_not_float(api_client):
     """Amount from Helcim API is stored as Decimal, never float (CONVENTIONS.md money rule)."""
     body_dict = {"id": "777", "type": "cardTransaction"}
     # Helcim returns amount as a float-like number with many decimal places
-    mock_tx = {"invoiceNumber": "004", "amount": 60.123456789}
+    mock_tx = {"invoiceNumber": "004", "amount": 60.123456789, "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict)

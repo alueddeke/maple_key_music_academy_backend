@@ -150,3 +150,41 @@ class TestGoals:
         rows = compute_month_rows(school, months=1, today=JUNE)
         current = compute_current_metrics(school, today=JUNE)
         assert compute_goals(school, rows, current) == []
+
+
+@pytest.mark.django_db
+class TestTestDataFilter:
+    """MAP-113: analytics exclude test-domain accounts when the prod flag is on."""
+
+    def test_filter_off_by_default_test_data_counted(self, school, active_schedule):
+        active_schedule.student.email = 'kid@maplekeytest.com'
+        active_schedule.student.save(update_fields=['email'])
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        assert rows[0]['mrr'] == '300.00'
+
+    def test_filter_on_excludes_test_domain_schedules(
+        self, school, active_schedule, settings
+    ):
+        settings.ANALYTICS_EXCLUDE_TEST_DATA = True
+        settings.TEST_ACCOUNT_EMAIL_DOMAINS = ['maplekeytest.com']
+        active_schedule.student.email = 'kid@maplekeytest.com'
+        active_schedule.student.save(update_fields=['email'])
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        assert rows[0]['mrr'] == '0.00'
+
+    def test_filter_on_keeps_real_accounts(self, school, active_schedule, settings):
+        settings.ANALYTICS_EXCLUDE_TEST_DATA = True
+        settings.TEST_ACCOUNT_EMAIL_DOMAINS = ['maplekeytest.com']
+        # student@test.com is NOT a test domain in this config
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        assert rows[0]['mrr'] == '300.00'
+
+    def test_filter_on_excludes_test_teachers_from_current(
+        self, school, teacher_user, settings
+    ):
+        settings.ANALYTICS_EXCLUDE_TEST_DATA = True
+        settings.TEST_ACCOUNT_EMAIL_DOMAINS = ['maplekeytest.com']
+        teacher_user.email = 'teach@maplekeytest.com'
+        teacher_user.save(update_fields=['email'])
+        current = compute_current_metrics(school, today=JUNE)
+        assert current['active_teachers'] == 0

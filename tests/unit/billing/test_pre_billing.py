@@ -74,13 +74,15 @@ class TestPreBillingInvoiceModel:
         from django.db import models as dj_models
         from simple_history.models import HistoricalRecords
 
-        # STATUS_CHOICES must contain exactly these four strings
+        # STATUS_CHOICES must contain exactly these five strings
+        # ('sending' is the transient double-send claim state)
         status_codes = [code for code, _ in PreBillingInvoice.STATUS_CHOICES]
         assert 'draft' in status_codes
+        assert 'sending' in status_codes
         assert 'sent' in status_codes
         assert 'adjusted' in status_codes
         assert 'paid' in status_codes
-        assert len(status_codes) == 4
+        assert len(status_codes) == 5
 
         # Default status is 'draft'
         student, _ = _make_student_with_contact(school)

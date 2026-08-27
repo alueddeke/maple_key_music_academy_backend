@@ -49,8 +49,6 @@ urlpatterns = [
     path('management/invoices/<int:pk>/reject/', views.management_reject_invoice, name='management_reject_invoice'),
 
     # Management endpoints for system settings
-    path('management/settings/', views.get_system_settings, name='get_system_settings'),
-    path('management/settings/update/', views.update_system_settings, name='update_system_settings'),
     path('management/waive-policy/', views.waive_policy_settings, name='waive_policy_settings'),
     path('students/<int:student_id>/waive-usage/', views.student_waive_usage, name='student_waive_usage'),
 
@@ -115,10 +113,12 @@ urlpatterns = [
     path('management/batches/<int:batch_id>/', views.management_batch_detail, name='management_batch_detail'),
     path('management/batches/<int:batch_id>/lessons/<int:item_id>/', views.management_edit_lesson_notes, name='management_edit_lesson_notes'),
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
-    path('management/batches/<int:batch_id>/csv/', views.management_batch_csv, name='management_batch_csv'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
     path('management/batches/<int:batch_id>/rejection-snapshots/', views.management_batch_rejection_snapshots, name='management_batch_rejection_snapshots'),
     path('management/batches/<int:batch_id>/delete/', views.management_delete_rejected_batch, name='management_delete_rejected_batch'),
+    path('management/batches/archive-month/', views.management_archive_month, name='management_archive_month'),
+    path('management/batches/archived/', views.management_archived_batches, name='management_archived_batches'),
+    path('management/batches/<int:batch_id>/unarchive/', views.management_unarchive_batch, name='management_unarchive_batch'),
     path('management/batches/<int:batch_id>/generate-teacher-invoice/', views.management_generate_teacher_invoice, name='management_generate_teacher_invoice'),
 
     # HELM-03: Helcim payment webhook — no 'helcim' in path per D-10 to prevent URL enumeration of payment processor
@@ -133,6 +133,9 @@ urlpatterns = [
     path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
     path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),
     path('management/pre-billing/<int:invoice_id>/remove-lesson/', views.management_pre_billing_remove_lesson, name='management_pre_billing_remove_lesson'),
+    path('management/pre-billing/<int:invoice_id>/resend-email/', views.management_pre_billing_resend_email, name='management_pre_billing_resend_email'),
+    path('management/pre-billing/<int:invoice_id>/skip-date/', views.management_pre_billing_skip_date, name='management_pre_billing_skip_date'),
+    path('management/pre-billing/<int:invoice_id>/restore-date/', views.management_pre_billing_restore_date, name='management_pre_billing_restore_date'),
 
     # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
     # NOTE: management/invoices/<int:pk>/ (PATCH) is separate from the existing

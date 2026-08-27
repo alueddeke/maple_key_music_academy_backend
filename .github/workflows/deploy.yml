@@ -241,7 +241,7 @@ jobs:
             docker run -d \
               --name maple-key-backend \
               --restart unless-stopped \
-              --health-cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/auth/user/ | grep -qE '^(200|301|401)$'" \
+              --health-cmd "python3 /app/healthcheck.py" \
               --health-interval 30s \
               --health-timeout 10s \
               --health-retries 3 \

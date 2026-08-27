@@ -63,13 +63,14 @@ def make_helcim_signed_request(
     signature = base64.b64encode(digest).decode("utf-8")
 
     url = reverse("payment_callback")
+    # Real Helcim header format: "v1,<base64sig>" (SVix-style versioned list).
     return api_client.post(
         url,
         data=raw_body,
         content_type="application/json",
         HTTP_WEBHOOK_ID=webhook_id,
         HTTP_WEBHOOK_TIMESTAMP=webhook_timestamp,
-        HTTP_WEBHOOK_SIGNATURE=signature,
+        HTTP_WEBHOOK_SIGNATURE=f"v1,{signature}",
     )
 
 
@@ -96,7 +97,7 @@ def test_webhook_credit_happy_path_creates_credit_transaction_and_increments_bal
         amount=Decimal('60.00'),
         period_start='2026-06-01',
         period_end='2026-06-30',
-        helcim_invoice_id='INV-2026-06-S1-0001',
+        helcim_invoice_number='INV-2026-06-S1-0001',
     )
 
     # Create StudentCreditAccount with zero balance
@@ -107,10 +108,10 @@ def test_webhook_credit_happy_path_creates_credit_transaction_and_increments_bal
     )
 
     body_dict = {"id": "tx-credit-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0001", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0001", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-credit-001")
@@ -148,10 +149,10 @@ def test_webhook_credit_unresolved_invoice_id_returns_200_no_credit(
     is performed at all).
     """
     body_dict = {"id": "tx-unresolved-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-DOES-NOT-EXIST", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-DOES-NOT-EXIST", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-unresolved-001")
@@ -165,16 +166,15 @@ def test_webhook_credit_unresolved_invoice_id_returns_200_no_credit(
 
 
 @pytest.mark.django_db
-def test_webhook_credit_missing_student_credit_account_returns_200_no_credit(
+def test_webhook_credit_missing_student_credit_account_creates_account_and_credits(
     api_client, school, student_user
 ):
     """
-    PreBillingInvoice exists but no StudentCreditAccount for this student
-    → 200, no CreditTransaction, invoice.status NOT changed to 'paid' (D-04).
-
-    RED until Plan 03 implements credit resolution. If Plan 03 adopts lazy
-    account creation for the webhook path this test body will be updated then
-    — leave assertion as-is to drive that decision.
+    PreBillingInvoice exists but no StudentCreditAccount for this student —
+    the webhook path lazily creates the wallet and credits it (decision made
+    2026-08-27 after a live first-time payment stranded in no_account: a
+    parent's first payment is exactly when the wallet should come into
+    existence).
     """
     # Invoice exists but NO StudentCreditAccount created
     invoice = PreBillingInvoice.objects.create(
@@ -184,23 +184,31 @@ def test_webhook_credit_missing_student_credit_account_returns_200_no_credit(
         amount=Decimal('60.00'),
         period_start='2026-06-01',
         period_end='2026-06-30',
-        helcim_invoice_id='INV-2026-06-S1-0002',
+        helcim_invoice_number='INV-2026-06-S1-0002',
     )
 
     body_dict = {"id": "tx-noaccount-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0002", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0002", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-noaccount-001")
 
     assert response.status_code == 200
-    assert CreditTransaction.objects.count() == 0
+
+    account = StudentCreditAccount.objects.get(student=student_user, school=school)
+    assert account.balance == Decimal('60.00')
+    assert CreditTransaction.objects.filter(
+        account=account, type='pre_billing_payment', amount=Decimal('60.00')
+    ).count() == 1
 
     invoice.refresh_from_db()
-    assert invoice.status != 'paid'
+    assert invoice.status == 'paid'
+
+    event = HelcimWebhookEvent.objects.get(helcim_transaction_id="tx-noaccount-001")
+    assert event.processing_status == 'credited'
 
 
 @pytest.mark.django_db
@@ -217,7 +225,7 @@ def test_webhook_credit_zero_amount_event_skips_credit_block(api_client, school)
     body_dict = {"id": "tx-zeroamt-001", "type": "cardTransaction"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         side_effect=HelcimAPIError("API down", status_code=503),
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-zeroamt-001")
@@ -240,10 +248,10 @@ def test_webhook_credit_blank_invoice_id_skips_credit_block(api_client, school):
     RED until Plan 03 implements the `if event.invoice_id and ...` guard.
     """
     body_dict = {"id": "tx-blankinv-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         response = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-blankinv-001")
@@ -273,7 +281,7 @@ def test_webhook_credit_duplicate_post_does_not_double_apply(
         amount=Decimal('60.00'),
         period_start='2026-06-01',
         period_end='2026-06-30',
-        helcim_invoice_id='INV-2026-06-S1-0003',
+        helcim_invoice_number='INV-2026-06-S1-0003',
     )
     account = StudentCreditAccount.objects.create(
         student=student_user,
@@ -282,10 +290,10 @@ def test_webhook_credit_duplicate_post_does_not_double_apply(
     )
 
     body_dict = {"id": "tx-idempotent-001", "type": "cardTransaction"}
-    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0003", "amount": "60.00"}
+    mock_tx = {"invoiceNumber": "INV-2026-06-S1-0003", "amount": "60.00", "status": "APPROVED", "type": "purchase"}
 
     with mock.patch(
-        "billing.views.webhooks.HelcimClient.get_card_transaction",
+        "billing.services.webhook_processing.HelcimClient.get_card_transaction",
         return_value=mock_tx,
     ):
         r1 = make_helcim_signed_request(api_client, body_dict, webhook_id="msg-idempotent-001")
