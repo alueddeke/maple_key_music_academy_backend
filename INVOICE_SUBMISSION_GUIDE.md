@@ -1,10 +1,12 @@
-# Teacher Invoice Submission Guide
+# Teacher Invoice Submission API
 
-## API Endpoint
+## Endpoint
 `POST /api/billing/invoices/teacher/submit-lessons/`
 
+Implemented in `billing/views/teacher.py` (`submit_lessons_for_invoice`). Submits a list of lessons and, in one transaction, creates the `Lesson` records, a pending `teacher_payment` invoice, and one pending `student_billing` invoice per student.
+
 ## Authentication
-Requires JWT token with `teacher` role.
+Requires a JWT with the `teacher` role (`@teacher_required`).
 
 ## Request Format
 
@@ -12,46 +14,69 @@ Requires JWT token with `teacher` role.
 {
   "lessons": [
     {
-      "student_name": "John Doe",           // Required
-      "student_email": "john@example.com",  // Optional
-      "duration": 1.5,                      // Optional (default: 1.0)
-      "rate": 80.00,                        // Optional (default: teacher's hourly_rate)
-      "scheduled_date": "2024-01-15T14:00:00Z",  // Optional (default: current time)
-      "teacher_notes": "Worked on scales"   // Optional
+      "student_name": "John Doe",                 // Required
+      "student_email": "john@example.com",        // Optional — used for student lookup
+      "duration": 1.5,                            // Optional (default: 1.0, hours)
+      "lesson_type": "in_person",                 // Optional: "in_person" (default) or "online"
+      "is_trial": false,                          // Optional — omit to auto-detect (see below)
+      "scheduled_date": "2026-01-15T14:00:00Z",   // Optional (default: current time)
+      "teacher_notes": "Worked on scales"         // Optional
     }
   ],
-  "due_date": "2024-02-15T00:00:00Z",      // Optional (default: 30 days from now)
-  "month": "January 2024"                   // Optional (for reference)
+  "due_date": "2026-02-15T00:00:00Z"              // Optional (default: 14 days from now)
 }
 ```
 
-## Field Validation
+Rates are **not** accepted from the request. They are derived server-side from `SchoolSettings` for the teacher's school:
 
-### Required Fields
-- `student_name` - Must be at least 2 characters
+- `online`: `online_teacher_rate` / `online_student_rate`
+- `in_person`: teacher's `hourly_rate` / `inperson_student_rate`
+- Trial lessons: `student_rate` forced to `0.00` (teacher still paid)
 
-### Optional Fields
-- `student_email` - If provided, will look up existing student or create new one
-  - If omitted, creates student with a UUID-based placeholder email: `noemail_{uuid12}@maplekeymusic.internal`
-  - If student already exists with that email, uses existing student record
-- `duration` - Hours taught (max: 9999.99, typically 0.25 - 100)
-- `rate` - Hourly rate (defaults to teacher's configured rate)
-- `scheduled_date` - When the lesson occurred
-- `teacher_notes` - Additional notes about the lesson
+**Trial detection:** if `is_trial` is present it is respected as-is. If omitted, the lesson is auto-marked trial when the student has no completed lessons yet.
 
-## Student Handling Logic
+## Student Handling
 
-1. **With email provided:**
-   - Searches for existing student by email
-   - If found: uses existing student
-   - If not found: creates new student with provided email
+1. **With `student_email`:** `get_or_create` by email — reuses the existing student or creates a new one in the teacher's school (auto-approved).
+2. **Without email:** a placeholder email `noemail_{uuid12}@maplekeymusic.internal` is generated, so same-name students never collide.
+3. **Newly created students** get a placeholder primary `BillableContact` with `INCOMPLETE` fields. Management must complete it in Student Management before the invoice can move forward.
 
-2. **Without email:**
-   - Generates UUID-based placeholder email: `noemail_{uuid12}@maplekeymusic.internal`
-   - Creates a new student with that placeholder (no collision on same-name students)
-   - If not found: creates new student
+## Billing-Contact Validation (400)
 
-This means you can submit multiple lessons for the same student (by name) and they'll be correctly associated!
+Before anything is created, every **existing** student in the payload is validated:
+
+- The student must have a primary `BillableContact`.
+- All contact fields must be present and real: `first_name`, `last_name`, `email`, `phone`, `street_address`, `city`, `province`, `postal_code`. Blank values or placeholders (`INCOMPLETE`, `XX`, `N/A`, `TBD`) fail validation.
+
+Brand-new students (created by this submission) skip validation — they get the placeholder contact instead.
+
+If any student fails, the whole submission is rejected with **400** and nothing is created:
+
+```json
+{
+  "error": "Cannot submit invoice - some students have incomplete billing information",
+  "details": [
+    {
+      "student": "John Doe",
+      "email": "john@example.com",
+      "missing_fields": ["phone", "postal_code"],
+      "incomplete_fields": ["province"],
+      "error": "Incomplete billing contact. Missing: phone, postal_code | Incomplete: province. Please update student information in Student Management."
+    }
+  ],
+  "message": "Please update student billing information in Student Management before submitting this invoice. All fields (name, email, phone, street address, city, province, postal code) are required."
+}
+```
+
+A student with **no** billing contact at all appears in `details` with:
+
+```json
+{
+  "student": "John Doe",
+  "email": "john@example.com",
+  "error": "No billing contact found. Please add complete billing information in Student Management."
+}
+```
 
 ## Success Response (201 Created)
 
@@ -60,76 +85,55 @@ This means you can submit multiple lessons for the same student (by name) and th
   "message": "Lessons submitted and invoice created successfully",
   "invoice": {
     "id": 1,
-    "teacher_name": "Jane Teacher",
+    "invoice_number": "INV-2026-01-0001",
     "invoice_type": "teacher_payment",
+    "teacher_name": "Jane Teacher",
+    "school_name": "Maple Key Music Academy",
     "payment_balance": "120.00",
+    "total_amount": "120.00",
     "status": "pending",
-    "due_date": "2024-02-15T00:00:00Z",
-    "created_at": "2024-01-15T10:00:00Z",
+    "due_date": "2026-02-15T00:00:00Z",
     "lessons": [1, 2]
   },
-  "lessons_created": 2
+  "lessons_created": 2,
+  "student_invoices_created": 1
 }
 ```
 
-## Error Responses
+`invoice` is the full `InvoiceSerializer` payload (all `Invoice` model fields plus `teacher_name`, `student_name`, `school_name`, `created_by_name`, `approved_by_name`). Lessons are created with status `completed`. One `student_billing` invoice (status `pending`, 14-day term) is also created per distinct student, totalled at `student_rate`.
 
-### 400 Bad Request - No Lessons Provided
+## Other Error Responses
+
+### 400 — No lessons provided
 ```json
-{
-  "error": "No lessons provided"
-}
+{ "error": "No lessons provided" }
 ```
 
-### 500 Internal Server Error - Validation Failed
+### 500 — Creation failed
 ```json
 {
   "error": "Failed to create invoice",
-  "details": "numeric field overflow\nDETAIL:  A field with precision 4, scale 2 must round to an absolute value less than 10^2.\n"
+  "details": "<exception message>"
 }
 ```
 
-**Common causes:**
-- **Duration too large**: Entered hours > 9999.99
-  - Frontend should validate duration is reasonable (typically 0.25-100)
-- **Database constraint violation**: Data doesn't meet model requirements
-
-## Frontend Error Handling
-
-The frontend now provides user-friendly error messages:
-
-| Backend Error | User sees |
-|--------------|-----------|
-| `numeric field overflow` | "Hours value is too large. Please enter a value less than 100 hours." |
-| `duplicate key ... email` | "A student with email 'X' already exists. This lesson has been added to the existing student's record." |
-| Generic constraint error | "A student with this information already exists in the system." |
-
-## Recent Improvements (October 2025)
-
-1. **Duplicate student handling**: Now reuses existing students instead of failing
-2. **Optional scheduled_date**: No longer required, defaults to current time
-3. **Increased duration limit**: From 99.99 to 9999.99 hours
-4. **Better error logging**: Server logs include full traceback for debugging
-5. **User-friendly errors**: Frontend displays helpful messages instead of raw database errors
+Common cause: a numeric overflow from an unreasonable `duration` (the field allows up to 9999.99; the frontend should validate that hours are realistic). The server logs the full traceback.
 
 ## Testing
 
 ```bash
-# Test with minimal data
-curl -X POST https://api.maplekeymusic.com/api/billing/invoices/teacher/submit-lessons/ \
+# Minimal
+curl -X POST "https://api.maplekeymusic.com/api/billing/invoices/teacher/submit-lessons/" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "lessons": [
-      {
-        "student_name": "Test Student",
-        "duration": 1.0
-      }
+      { "student_name": "Test Student", "duration": 1.0 }
     ]
   }'
 
-# Test with full data
-curl -X POST https://api.maplekeymusic.com/api/billing/invoices/teacher/submit-lessons/ \
+# Full
+curl -X POST "https://api.maplekeymusic.com/api/billing/invoices/teacher/submit-lessons/" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -138,25 +142,20 @@ curl -X POST https://api.maplekeymusic.com/api/billing/invoices/teacher/submit-l
         "student_name": "John Doe",
         "student_email": "john@example.com",
         "duration": 1.5,
-        "rate": 85.00,
-        "scheduled_date": "2024-01-15T14:00:00Z",
+        "lesson_type": "in_person",
+        "scheduled_date": "2026-01-15T14:00:00Z",
         "teacher_notes": "Great progress on scales"
       }
     ],
-    "due_date": "2024-02-15T00:00:00Z",
-    "month": "January 2024"
+    "due_date": "2026-02-15T00:00:00Z"
   }'
 ```
 
 ## Workflow
 
-1. Teacher fills out invoice form with student names and hours
-2. Frontend validates input (name length, reasonable hours)
-3. Frontend submits to API
-4. Backend:
-   - Creates or finds student records
-   - Creates lesson records (marked as "completed")
-   - Creates invoice (status: "pending")
-   - Calculates total payment
-5. Invoice awaits management approval
-6. Once approved, payment can be processed
+1. Teacher submits lesson details.
+2. Backend validates billing contacts for all existing students (400 with per-student details on failure).
+3. In one transaction: students found/created, `Lesson` records created (`completed`), teacher invoice created (`pending`), per-student billing invoices created (`pending`).
+4. Teacher invoice awaits management approval via `POST /api/billing/invoices/teacher/{id}/approve/`.
+
+> Note: the primary teacher payroll flow is now the monthly batch workflow (`MonthlyInvoiceBatch` — see `billing/README.md`). This endpoint is the direct lessons-to-invoice submission path.

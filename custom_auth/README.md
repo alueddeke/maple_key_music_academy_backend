@@ -2,103 +2,86 @@
 
 The Custom Auth app handles authentication, authorization, and user session management for the Maple Key Music Academy backend.
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
-This app provides **mixed authentication** supporting both:
-- **OAuth Authentication** - Google OAuth for easy teacher registration
-- **JWT Token Authentication** - Email/password login with JWT tokens
-- **Role-Based Authorization** - Decorators for different user permission levels
+This app provides:
+- **Google OAuth with PKCE** — SPA-driven OAuth 2.0 (RFC 7636); backend exchanges the authorization code, never handles a redirect
+- **JWT Token Authentication** — email/password login with SimpleJWT access/refresh tokens
+- **Registration + approval workflow** — new users submit a registration request; management approves before any login works
+- **Password reset** — token-based email reset flow
+- **Role-Based Authorization** — decorators for teacher/management/student permission levels
 
-## 🔐 Authentication Methods
+Views live in the `custom_auth/views/` package: `oauth.py`, `jwt_auth.py`, `registration.py`, `password_reset.py`, `profile.py`.
 
-### 1. Google OAuth Flow
+## Endpoints
+
+All routes are mounted under `/api/auth/` (see `custom_auth/urls.py`):
+
+| Method | Endpoint | View | Purpose |
+|--------|----------|------|---------|
+| POST | `/api/auth/google/exchange/` | `google_exchange` | PKCE code exchange → JWT pair |
+| POST | `/api/auth/register/` | `register_with_email` | Submit registration request (no password) |
+| POST | `/api/auth/token/` | `get_jwt_token` | Email/password login → JWT pair |
+| POST | `/api/auth/token/refresh/` | `refresh_jwt_token` | Refresh access token |
+| GET | `/api/auth/user/` | `user_profile` | Current user profile (requires Bearer token) |
+| POST | `/api/auth/logout/` | `logout` | Blacklist refresh token |
+| POST | `/api/auth/password-reset/` | `password_reset_request` | Send reset email |
+| POST | `/api/auth/password-reset/validate/` | `password_reset_validate_token` | Validate reset token before showing form |
+| POST | `/api/auth/password-reset/confirm/` | `password_reset_confirm` | Set new password |
+
+## Google OAuth (PKCE)
+
+The old redirect-based flow (`google/`, `google/callback/`) and django-allauth are gone. The current flow is frontend-driven PKCE — tokens never appear in URLs (SEC-01). Full rationale: `.planning/codebase/SECURITY.md`.
+
 ```
-1. User clicks "Login with Google"
-2. Redirects to Google OAuth
-3. Google returns authorization code
-4. Backend exchanges code for user info
-5. Creates/finds user in database
-6. Returns JWT tokens
-```
-
-**Endpoints:**
-- `GET /api/auth/google/` - Initiate Google OAuth
-- `GET /api/auth/google/callback/` - Handle OAuth callback
-
-### 2. JWT Token Authentication
-```
-1. User provides email/password
-2. Backend validates credentials
-3. Returns access_token and refresh_token
-4. Frontend uses access_token for API calls
-5. Refresh token when access_token expires
-```
-
-**Endpoints:**
-- `POST /api/auth/token/` - Get JWT tokens (email/password)
-- `POST /api/auth/token/refresh/` - Refresh access token
-- `POST /api/auth/logout/` - Blacklist refresh token
-
-## 🛡️ Authorization System
-
-### Permission Decorators
-
-#### `@role_required(*allowed_roles)`
-```python
-@role_required('teacher', 'management')
-def some_endpoint(request):
-    # Only teachers and management can access
+1. Frontend generates code_verifier (sessionStorage: pkce_code_verifier)
+   and state (sessionStorage: pkce_oauth_state)
+2. Frontend sends code_challenge = SHA-256(code_verifier) to Google
+3. Google redirects back to the SPA with an authorization code (safe to log)
+4. Frontend POSTs { code, code_verifier } to /api/auth/google/exchange/
+5. Backend exchanges the code with Google (server-to-server, timeout=10s),
+   fetches userinfo, finds/creates the user
+6. Backend returns { access_token, refresh_token, user } in the JSON body
 ```
 
-#### `@teacher_required`
-```python
-@teacher_required
-def teacher_only_endpoint(request):
-    # Only teachers can access
+### `POST /api/auth/google/exchange/`
+
+**Request body:**
+```json
+{
+    "code": "<authorization code from Google>",
+    "code_verifier": "<PKCE verifier from sessionStorage>",
+    "school_id": 1,                    // optional — attaches school to new registration requests
+    "invitation_token": "abc123..."    // optional — invitation fast path
+}
 ```
 
-#### `@management_required`
-```python
-@management_required
-def management_only_endpoint(request):
-    # Only management can access
+**Responses:**
+
+| Status | Meaning |
+|--------|---------|
+| 200 | `{ access_token, refresh_token, user }` — user found/created and approved |
+| 202 | `error_code: approval_pending` or `new_registration` — a `UserRegistrationRequest` exists or was just created; awaiting management approval |
+| 400 | Missing `code`/`code_verifier`, Google exchange failed, or invalid/expired/mismatched invitation token |
+| 403 | `error_code: approval_pending` (existing unapproved user) or `registration_rejected` |
+| 504 | Google API timed out |
+
+**User resolution order:** existing `User` by email → `ApprovedEmail` (create approved user) → `UserRegistrationRequest` (approved: create user; rejected: 403; pending: 202) → create new pending `UserRegistrationRequest` (202). School is always derived from request context or the approver's school — `School.objects.first()` is banned (SEC-05).
+
+**Invitation fast path:** when `invitation_token` is passed, the token must be valid, unused, and match the Google account email; the user is created pre-approved and the token is marked used.
+
+## Registration
+
+`POST /api/auth/register/` creates a `UserRegistrationRequest` — no password is collected. Management approves the request; approved users complete setup via an invitation link. Required fields: `email`, `first_name`, `last_name`; `user_type` (`teacher` or `student`, default `teacher`) and `school_id` are optional. Returns 202 on success; 400/403 if the email already has an account, pre-approval, or an existing request.
+
+## JWT Token Authentication
+
+### Login
 ```
-
-#### `@teacher_or_management_required`
-```python
-@teacher_or_management_required
-def teacher_or_management_endpoint(request):
-    # Teachers or management can access
+POST /api/auth/token/
+{ "email": "user@example.com", "password": "..." }
 ```
-
-#### `@owns_resource_or_management(resource_field)`
-```python
-@owns_resource_or_management('teacher')
-def teacher_resource_endpoint(request):
-    # Teachers can access their own resources, management can access all
-```
-
-### Permission Logic
-
-**Authentication Check:**
-- Verifies JWT token is valid
-- Ensures user is authenticated
-
-**Role Check:**
-- Verifies user has one of the required roles
-- Returns 403 if role doesn't match
-
-**Approval Check:**
-- Management users are auto-approved
-- Teachers/Students must be approved by management
-- Returns 403 if account is pending approval
-
-**Resource Ownership:**
-- Teachers can only access their own resources
-- Students can only access their own resources
-- Management can access all resources
-
-## 🔑 JWT Token System
+Returns `{ access_token, refresh_token, user }`. Users with `is_approved=False` get 403 — the approval gate before JWT issuance is a locked security decision (LOCK-01). Users with only a pending/rejected registration request get a descriptive 403.
 
 ### Token Configuration
 ```python
@@ -108,299 +91,79 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': False,
     'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': 'HS256',
-    'AUTH_HEADER_TYPES': ('Bearer',),
 }
 ```
 
-### Token Usage
-```javascript
-// Include in API requests
-headers: {
-    'Authorization': 'Bearer <access_token>',
-    'Content-Type': 'application/json'
-}
+### Usage and refresh
 ```
+Authorization: Bearer <access_token>
 
-### Token Refresh Flow
-```javascript
-// When access token expires
 POST /api/auth/token/refresh/
-{
-    "refresh": "<refresh_token>"
-}
-
-// Response
-{
-    "access_token": "<new_access_token>",
-    "refresh_token": "<refresh_token>"
-}
+{ "refresh": "<refresh_token>" }
+→ { "access_token": "...", "refresh_token": "..." }
 ```
 
-## 👤 User Profile Management
+### Logout
+```
+POST /api/auth/logout/
+{ "refresh": "<refresh_token>" }
+```
+Blacklists the refresh token. The access token remains valid until it expires (max 1 hour).
 
-### Get Current User Profile
+## Password Reset
+
+1. `POST /api/auth/password-reset/` with `{ email }` — always returns a generic success message (does not reveal account existence); emails a link `{FRONTEND_URL}/reset-password?uid=...&token=...`
+2. `POST /api/auth/password-reset/validate/` with `{ uid, token }` — returns `{ valid, email }` before showing the form
+3. `POST /api/auth/password-reset/confirm/` with `{ uid, token, password, confirm_password }` — validates password strength and sets it
+
+## Authorization System
+
+### Permission Decorators (`custom_auth/decorators.py`)
+
 ```python
+@role_required('teacher', 'management')   # any listed role
+@teacher_required                          # teachers only
+@management_required                       # management only
+@teacher_or_management_required            # either
+@owns_resource_or_management('teacher')    # own resource, or management
+```
+
+### Permission Logic
+
+- **Authentication:** valid JWT required (401 otherwise)
+- **Role:** user must hold one of the required roles (403 otherwise)
+- **Approval:** management is auto-approved; teachers/students must be approved (403 while pending)
+- **Ownership:** teachers/students access only their own resources; management accesses all — but always scoped to `request.user.school` (multi-tenant isolation, SEC-04)
+
+## User Profile
+
+```
 GET /api/auth/user/
 Authorization: Bearer <access_token>
 ```
 
-**Response:**
-```json
-{
-    "user": {
-        "email": "teacher@example.com",
-        "name": "John Teacher",
-        "user_id": 123,
-        "user_type": "teacher",
-        "is_approved": true,
-        "first_name": "John",
-        "last_name": "Teacher",
-        "phone_number": "555-1234",
-        "address": "123 Music St",
-        "bio": "Piano teacher with 10 years experience",
-        "instruments": "Piano, Guitar",
-        "hourly_rate": 80.00
-    }
-}
-```
+Returns `user` with `email`, `name`, `user_id`, `user_type`, `is_approved`, `first_name`, `last_name`, `phone_number`, `address`, `bio`, `instruments`, `hourly_rate`.
 
-## 🔄 OAuth Integration
+## Configuration
 
-### Google OAuth Setup
-1. **Google Cloud Console**: Create OAuth 2.0 credentials
-2. **Django Admin**: Configure Social App with client ID/secret
-3. **Environment Variables**: Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
-
-### OAuth User Creation
-```python
-# When user completes OAuth
-user, created = User.objects.get_or_create(
-    email=user_data.get('email'),
-    defaults={
-        'username': user_data.get('email'),
-        'first_name': user_data.get('given_name', ''),
-        'last_name': user_data.get('family_name', ''),
-        'user_type': 'teacher',  # Default to teacher for OAuth
-        'oauth_provider': 'google',
-        'oauth_id': user_data.get('id'),
-        'is_approved': False,  # Requires management approval
-    }
-)
-```
-
-## 🚫 Logout System
-
-### Token Blacklisting
-```python
-POST /api/auth/logout/
-{
-    "refresh": "<refresh_token>"
-}
-```
-
-**What happens:**
-- Refresh token is blacklisted
-- User must re-authenticate to get new tokens
-- Access token remains valid until expiration
-
-## 🔧 Configuration
-
-### Settings Requirements
-```python
-# Required in settings.py
-AUTH_USER_MODEL = 'billing.User'
-INSTALLED_APPS = [
-    'rest_framework_simplejwt',
-    'rest_framework_simplejwt.token_blacklist',
-    'allauth',
-    'allauth.account',
-    'allauth.socialaccount',
-    'allauth.socialaccount.providers.google',
-    'custom_auth',
-]
-```
-
-### Environment Variables
 ```bash
-# Required for OAuth
-GOOGLE_CLIENT_ID=your_google_client_id
-GOOGLE_CLIENT_SECRET=your_google_client_secret
+# Google OAuth
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_API_TIMEOUT=10        # optional, seconds (default 10)
 
-# Required for Django
-SECRET_KEY=your_django_secret_key
-DEBUG=True
+# Django
+SECRET_KEY=...
+# settings.FRONTEND_URL must match the SPA's OAuth redirect_uri
 ```
 
-## 🧪 Testing Authentication
+Required apps: `rest_framework_simplejwt`, `rest_framework_simplejwt.token_blacklist`, `custom_auth`. `AUTH_USER_MODEL = 'billing.User'`. django-allauth is **not** installed — do not add it back.
 
-### Test JWT Authentication
-```python
-# Login
-response = requests.post('/api/auth/token/', json={
-    'email': 'teacher@example.com',
-    'password': 'password123'
-})
+## Security — Locked Decisions
 
-# Use token
-headers = {'Authorization': f'Bearer {response.json()["access_token"]}'}
-response = requests.get('/api/billing/lessons/', headers=headers)
-```
+See `.planning/codebase/SECURITY.md` for the full list. The ones that live in this app:
 
-### Test OAuth Flow
-```python
-# Initiate OAuth
-response = requests.get('/api/auth/google/')
-
-# Handle callback (simplified)
-response = requests.get('/api/auth/google/callback/?code=oauth_code')
-```
-
-## 🛠️ Error Handling
-
-### Common Error Responses
-
-**401 Unauthorized:**
-```json
-{
-    "error": "Authentication required",
-    "message": "Please provide a valid JWT token"
-}
-```
-
-**403 Forbidden (Wrong Role):**
-```json
-{
-    "error": "Insufficient permissions",
-    "message": "This endpoint requires one of: teacher, management"
-}
-```
-
-**403 Forbidden (Pending Approval):**
-```json
-{
-    "error": "Account pending approval",
-    "message": "Your account is awaiting management approval"
-}
-```
-
-**403 Forbidden (Resource Access):**
-```json
-{
-    "error": "Access denied",
-    "message": "You can only access your own resources"
-}
-```
-
-## 🔒 Security Features
-
-### Token Security
-- **Short-lived access tokens** (1 hour)
-- **Refresh token rotation** (optional)
-- **Token blacklisting** on logout
-- **HTTPS required** in production
-
-### Permission Security
-- **Role-based access control**
-- **Resource ownership validation**
-- **Approval status checking**
-- **Audit trail** for all actions
-
-### OAuth Security
-- **State parameter validation** (recommended)
-- **Secure token exchange**
-- **User data validation**
-- **Account linking** for existing users
-
-## 🚀 Frontend Integration
-
-### Login Component
-```javascript
-const login = async (email, password) => {
-    const response = await fetch('/api/auth/token/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-    });
-    
-    const data = await response.json();
-    localStorage.setItem('access_token', data.access_token);
-    localStorage.setItem('refresh_token', data.refresh_token);
-};
-```
-
-### API Client with Auto-Refresh
-```javascript
-const apiClient = axios.create({
-    baseURL: '/api',
-    headers: { 'Content-Type': 'application/json' }
-});
-
-// Add token to requests
-apiClient.interceptors.request.use((config) => {
-    const token = localStorage.getItem('access_token');
-    if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-});
-
-// Handle token refresh
-apiClient.interceptors.response.use(
-    (response) => response,
-    async (error) => {
-        if (error.response?.status === 401) {
-            await refreshToken();
-            return apiClient.request(error.config);
-        }
-        return Promise.reject(error);
-    }
-);
-```
-
-## 📝 Usage Examples
-
-### Teacher Login Flow
-```javascript
-// 1. Login
-const loginResponse = await fetch('/api/auth/token/', {
-    method: 'POST',
-    body: JSON.stringify({
-        email: 'teacher@example.com',
-        password: 'password123'
-    })
-});
-
-// 2. Store tokens
-const { access_token, refresh_token, user } = await loginResponse.json();
-localStorage.setItem('access_token', access_token);
-
-// 3. Check approval status
-if (!user.is_approved) {
-    showMessage('Your account is pending management approval');
-}
-
-// 4. Redirect based on role
-if (user.user_type === 'teacher') {
-    router.push('/teacher/dashboard');
-}
-```
-
-### Google OAuth Flow
-```javascript
-// 1. Redirect to Google OAuth
-window.location.href = '/api/auth/google/';
-
-// 2. Handle callback (automatic redirect)
-// 3. User is logged in with JWT tokens
-```
-
-## 🔮 Future Enhancements
-
-- **Multi-factor authentication**
-- **Social login providers** (Facebook, Apple)
-- **Password reset flow**
-- **Account verification emails**
-- **Session management dashboard**
-- **Advanced permission system**
-- **API rate limiting**
-- **Audit logging**
+- **LOCK-01:** the `is_approved` check before JWT issuance must never be removed
+- **LOCK-02:** never use `School.objects.first()` to assign a school
+- **LOCK-03:** both Google API calls in `google_exchange` must keep their `timeout=`
+- **LOCK-04:** tokens are returned in the response body only — never in URL params or redirects
