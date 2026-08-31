@@ -1,15 +1,23 @@
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError
 import logging
 
 logger = logging.getLogger(__name__)
 
 
+class RegistrationThrottle(ScopedRateThrottle):
+    scope = 'registration'
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
 def register_with_email(request):
     """
     Register new user and create registration request for management approval
@@ -35,6 +43,15 @@ def register_with_email(request):
 
     User = get_user_model()
 
+    # Bot filter: the frontend renders a hidden "website" field humans never
+    # fill. A value here means an automated submitter — answer with the same
+    # generic 202 so the bot learns nothing, and store nothing.
+    if request.data.get('website'):
+        logger.warning('Registration honeypot tripped from %s', request.META.get('REMOTE_ADDR'))
+        return Response({
+            'message': 'Registration request submitted successfully',
+        }, status=status.HTTP_202_ACCEPTED)
+
     # Get data from request
     email = request.data.get('email', '').strip().lower()
     first_name = request.data.get('first_name', '').strip()
@@ -53,6 +70,14 @@ def register_with_email(request):
     if not email or not first_name or not last_name:
         return Response({
             'error': 'Email, first name, and last name are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Validate email format before touching the database
+    try:
+        validate_email(email)
+    except ValidationError:
+        return Response({
+            'error': 'Enter a valid email address'
         }, status=status.HTTP_400_BAD_REQUEST)
 
     # Validate user_type

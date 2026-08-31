@@ -314,6 +314,11 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require authentication for write operations
     ],
+    # Scoped throttles only — applied per-view via ScopedRateThrottle
+    # (registration is an open, unauthenticated form; bots hammer open forms)
+    'DEFAULT_THROTTLE_RATES': {
+        'registration': '5/hour',
+    },
 }
 
 # Custom User Model
