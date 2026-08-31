@@ -149,6 +149,28 @@ jobs:
               pg_isready -h postgres -U ${{ secrets.POSTGRES_USER }} \
               || { echo "❌ Cannot reach PostgreSQL — aborting"; exit 1; }
 
+            # ===== BACKUP FIRST =====
+            # Explicit opening move of every deploy (Aug 28 audit item 1):
+            # a dump is taken BEFORE migrations or any container change, so
+            # rollback always has a pre-deploy anchor. Retention: nothing
+            # younger than 30 days is ever deleted (3-3-30 policy).
+            echo "========================================="
+            echo "Backing up database before deploy..."
+            echo "========================================="
+            BACKUP_DIR="$HOME/maplekey-backups"
+            mkdir -p "$BACKUP_DIR"
+            BACKUP_FILE="$BACKUP_DIR/pre-deploy-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+            docker exec postgres pg_dump \
+              -U "${{ secrets.POSTGRES_USER }}" "${{ secrets.POSTGRES_DB }}" \
+              | gzip > "$BACKUP_FILE"
+            if [ ! -s "$BACKUP_FILE" ]; then
+              echo "❌ Backup file is empty — aborting deploy"
+              exit 1
+            fi
+            echo "✅ Backup written: $BACKUP_FILE ($(du -h "$BACKUP_FILE" | cut -f1))"
+            # Prune backups older than 30 days (never younger)
+            find "$BACKUP_DIR" -name 'pre-deploy-*.sql.gz' -mtime +30 -delete || true
+
             # ===== MIGRATION GATE =====
             # Runs against the LIVE database BEFORE stopping any running container.
             # If this fails, production keeps serving traffic unchanged.
