@@ -36,6 +36,7 @@ from ..models import (
     RecurringLessonsSchedule,
 )
 from ..services.helcim_client import HelcimClient, HelcimAPIError, payment_page_url
+from billing.metrics import invoices_sent_total
 from ..services.email_service import PreBillingEmailService
 
 logger = logging.getLogger(__name__)
@@ -344,6 +345,7 @@ def _send_single_invoice(invoice, school):
         PreBillingInvoice.objects.filter(
             pk=invoice.pk, status='sending'
         ).update(status='draft')
+        invoices_sent_total.labels(result='failed').inc()
         raise
 
     # Build payment URL from subdomain + token (per-school subdomain wins)
@@ -358,6 +360,7 @@ def _send_single_invoice(invoice, school):
         invoice.payment_token = helcim_response['token']
         invoice.status = 'sent'
         invoice.save()
+    invoices_sent_total.labels(result='sent').inc()
 
     # Email OUTSIDE atomic + after DB commit. Failure is recorded on the
     # invoice (email_sent/email_error) so management can resend or copy the
