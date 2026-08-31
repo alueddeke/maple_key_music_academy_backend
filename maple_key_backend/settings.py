@@ -318,6 +318,7 @@ REST_FRAMEWORK = {
     # (registration is an open, unauthenticated form; bots hammer open forms)
     'DEFAULT_THROTTLE_RATES': {
         'registration': '5/hour',
+        'client_errors': '30/hour',
     },
 }
 
