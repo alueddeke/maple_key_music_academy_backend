@@ -16,6 +16,9 @@ urlpatterns = [
     path('user/', views.user_profile, name='user_profile'),
     path('logout/', views.logout, name='logout'),
 
+    # Frontend error-boundary beacon (observability wave)
+    path('client-errors/', views.report_client_error, name='report_client_error'),
+
     # Password reset endpoints
     path('password-reset/', views.password_reset_request, name='password_reset_request'),
     path('password-reset/validate/', views.password_reset_validate_token, name='password_reset_validate'),

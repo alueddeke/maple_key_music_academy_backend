@@ -109,9 +109,15 @@ from .pre_billing import (
     management_pre_billing_list,
     management_pre_billing_detail,
     management_pre_billing_send,
-    management_pre_billing_send_all,
     management_pre_billing_remove_lesson,
     management_pre_billing_resend_email,
     management_pre_billing_skip_date,
     management_pre_billing_restore_date,
+)
+
+from .send_runs import (
+    management_pre_billing_send_all,
+    management_send_run_detail,
+    management_send_run_latest,
+    management_send_run_cancel,
 )

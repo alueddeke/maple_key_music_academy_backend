@@ -25,6 +25,8 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
+from billing.metrics import webhook_events_total
+
 from ..models import (
     HelcimWebhookEvent,
     PreBillingInvoice,
@@ -150,6 +152,7 @@ def process_webhook_event(event):
             )
             event.processed_at = timezone.now()
             event.save(update_fields=['school', 'processing_status', 'last_error', 'processed_at'])
+            webhook_events_total.labels(outcome=event.processing_status).inc()
             if not covered:
                 logger.warning(
                     'Partial/mismatched payment on invoice %s: received %s, expected %s (event %s)',
@@ -166,6 +169,7 @@ def process_webhook_event(event):
 
 def _finalize(event, processing_status, detail):
     """Stamp a non-credited outcome. Retryable states keep their detail for admin."""
+    webhook_events_total.labels(outcome=processing_status).inc()
     event.processing_status = processing_status
     event.last_error = detail
     event.processed_at = timezone.now()

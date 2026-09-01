@@ -105,7 +105,7 @@ def test_send_passes_credit_as_helcim_discount(management_client, school, teache
     student = _student_with_contact(school, 'discount')
     invoice = _sendable_invoice(school, teacher_user, student, '75.00')
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         response = management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
@@ -124,7 +124,7 @@ def test_send_without_credit_passes_no_discount(management_client, school, teach
     student = _student_with_contact(school, 'nodiscount')
     invoice = _sendable_invoice(school, teacher_user, student, '120.00')
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         response = management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
@@ -144,7 +144,7 @@ def test_second_send_returns_409_no_duplicate_helcim_invoice(
     invoice = _sendable_invoice(school, teacher_user, student, '120.00')
     url = reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         r1 = management_client.post(url)
         r2 = management_client.post(url)
@@ -162,7 +162,7 @@ def test_helcim_failure_releases_claim_back_to_draft(management_client, school, 
     student = _student_with_contact(school, 'release')
     invoice = _sendable_invoice(school, teacher_user, student, '120.00')
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.side_effect = HelcimAPIError('boom', status_code=500)
         response = management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
@@ -181,9 +181,9 @@ def test_email_failure_recorded_and_recoverable_via_resend(
     student = _student_with_contact(school, 'emailfail')
     invoice = _sendable_invoice(school, teacher_user, student, '120.00')
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient, \
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient, \
          mock.patch(
-             'billing.views.pre_billing.PreBillingEmailService.send_payment_request',
+             'billing.services.invoice_sending.PreBillingEmailService.send_payment_request',
              return_value=(False, 'Failed to send email: Resend down'),
          ):
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
@@ -198,7 +198,7 @@ def test_email_failure_recorded_and_recoverable_via_resend(
     assert 'Resend down' in invoice.email_error
 
     with mock.patch(
-        'billing.views.pre_billing.PreBillingEmailService.send_payment_request',
+        'billing.services.invoice_sending.PreBillingEmailService.send_payment_request',
         return_value=(True, 'Email sent successfully'),
     ) as mock_send:
         response = management_client.post(
@@ -260,7 +260,7 @@ def test_projected_invoice_sends_with_schedule_line_items(management_client, sch
     student = _student_with_contact(school, 'projected')
     invoice = _projected_invoice(school, teacher_user, student, '0.00')  # stale amount
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         response = management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
@@ -286,7 +286,7 @@ def test_projected_invoice_send_applies_current_credit(management_client, school
         student=student, school=school, balance=Decimal('45.00')
     )
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         response = management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
@@ -334,7 +334,7 @@ def test_skip_date_recomputes_amount_and_send_omits_it(management_client, school
     assert '2026-10-12' not in dates and len(dates) == 3
 
     # Send: line items must omit the skipped date
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         send = management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
@@ -430,7 +430,7 @@ def test_serializer_exposes_payment_url_and_email_state(management_client, schoo
     student = _student_with_contact(school, 'serialize')
     invoice = _sendable_invoice(school, teacher_user, student, '120.00')
 
-    with mock.patch('billing.views.pre_billing.HelcimClient') as MockClient:
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
         management_client.post(
             reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})

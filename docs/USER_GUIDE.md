@@ -582,22 +582,23 @@ The page displays:
 
 **Steps:**
 
-1. Find the ORIGINAL lesson in the table
+1. Find the lesson in the table
 2. Click the **Status** dropdown
 3. Select **"Reschedule"**
 4. A reschedule modal appears
 5. **In the modal:**
-   - **New Date:** Select the rescheduled date
+   - **New Date:** Select the rescheduled date (must be in the same billing month)
    - **New Time:** Enter the new time (HH:MM format)
 6. Click **"Confirm Reschedule"**
 
 **What happens:**
-- Original lesson row turns blue
-- A note is added: "Rescheduled from [original date] to [new date]"
-- The lesson still appears on the original date (for record-keeping)
-- You should add the rescheduled lesson as a one-off on the new date
+- The lesson moves to the new date and time — same row, updated in place
+- A note is added automatically: "[Rescheduled] [original date] -> [new date]"
+- No need to add anything manually — the moved lesson is the lesson
 
-> **Important:** Rescheduling does NOT move the lesson. It marks the original and adds a note. You must manually add the new lesson date as a one-off.
+> **Important:** The new date must fall within the same billing month as the batch. If the lesson moved to a different month, cancel it here and let it appear in that month's batch instead — the system will reject a cross-month reschedule.
+
+> **💡 Pro Tip:** Rescheduling works on draft batches, and on approved batches through **Mark Exceptions** — up until your teacher invoice for the month is generated. After that, the batch is locked.
 
 #### Adding One-Off Lessons
 

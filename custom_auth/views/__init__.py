@@ -21,3 +21,4 @@ from .password_reset import (
     password_reset_validate_token,
     password_reset_confirm,
 )
+from .client_errors import report_client_error

@@ -165,7 +165,10 @@ if DATABASE_URL:
     url = urlparse(DATABASE_URL)
     DATABASES = {
         'default': {
-            'ENGINE': 'django.db.backends.postgresql',
+            # django_prometheus wrapper: identical to the stock postgresql
+            # backend, plus django_db_* query metrics on /metrics (the
+            # "Database Query Rate" dashboard panel reads these).
+            'ENGINE': 'django_prometheus.db.backends.postgresql',
             'NAME': url.path[1:],  # Remove leading slash
             'USER': url.username,
             'PASSWORD': url.password,
@@ -177,7 +180,7 @@ else:
     # Local development: Use individual environment variables
     DATABASES = {
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
+            "ENGINE": "django_prometheus.db.backends.postgresql",
             "NAME": config('POSTGRES_DB', default='maple_key_dev'),
             "USER": config('POSTGRES_USER', default='maple_key_user'),
             "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
@@ -314,6 +317,32 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require authentication for write operations
     ],
+    # Per-view throttles for the open, unauthenticated endpoints (bots hammer
+    # open forms). Classes live in custom_auth/throttling.py — AnonRateThrottle
+    # subclasses, NOT ScopedRateThrottle (which silently no-ops without a
+    # view-level throttle_scope; found dead in 2026-08-31 UAT).
+    'DEFAULT_THROTTLE_RATES': {
+        'registration': '5/hour',
+        'client_errors': '30/hour',
+    },
+    # Nginx fronts the app in prod and sets X-Forwarded-For; key throttles on
+    # the real client IP, not the proxy's. Requests that bypass nginx (local
+    # dev hits :8000 directly) fall back to REMOTE_ADDR.
+    'NUM_PROXIES': 1,
+}
+
+# Throttle counters need one shared store: the default LocMem cache is
+# per-gunicorn-worker (rate × workers, reset on deploy). DatabaseCache is
+# shared and needs no new infra; the table is created by a billing migration
+# (createcachetable), so dev boot and the prod deploy pipeline both get it.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    },
+    'throttle': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'django_throttle_cache',
+    },
 }
 
 # Custom User Model

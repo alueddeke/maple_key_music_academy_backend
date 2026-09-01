@@ -1,226 +1,99 @@
 # Billing App
 
-The Billing app handles all user management, lesson scheduling, and invoicing for the Maple Key Music Academy backend.
+The Billing app owns users, schools, lessons, schedules, and the entire monthly billing cycle — teacher payroll on one side, student pre-billing and credits on the other.
 
-## 🏗️ Architecture Overview
+This is a tour of `billing/models.py` (~23 models). For system architecture and design decisions see `../../.planning/codebase/ARCHITECTURE.md`; for a plain-language walkthrough of the billing cycle and per-lesson money rules see `../../.planning/BILLING-PROCESS.md`.
 
-This app implements a **unified User model** with role-based permissions supporting three user types:
-- **Management** - Full system access, can approve teachers, manage invoices
-- **Teachers** - Can teach lessons, manage their own students/lessons
-- **Students** - Can request lessons, view their own information
+## Model Groups
 
-## 📊 Models
+### Users & Schools
 
-### User Model (Custom User)
-```python
-class User(AbstractUser):
-    user_type = models.CharField(choices=[('management', 'Management'), ('teacher', 'Teacher'), ('student', 'Student')])
-    email = models.EmailField(unique=True)
-    phone_number = models.CharField(max_length=15, blank=True)
-    address = models.TextField(blank=True)
-    is_approved = models.BooleanField(default=False)
-    oauth_provider = models.CharField(max_length=50, blank=True)
-    oauth_id = models.CharField(max_length=100, blank=True)
-    
-    # Teacher-specific fields
-    bio = models.TextField(blank=True)
-    instruments = models.CharField(max_length=500, blank=True)
-    hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
-    
-    # Student-specific fields
-    assigned_teacher = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True)
-    parent_email = models.EmailField(blank=True)
-    parent_phone = models.CharField(max_length=15, blank=True)
-```
+| Model | What it is |
+|-------|------------|
+| `School` | Tenant root. Tax rates, billing cycle day, contact info, and per-school Helcim credentials (blank = fall back to `HELCIM_*` env settings). |
+| `SchoolSettings` | Per-school rates (`online_teacher_rate` 45, `online_student_rate` 60, `inperson_student_rate` 100 defaults) and the waived-cancellation limit policy (MAP-101). |
+| `User` | Unified custom user (`AbstractUser`, email as username) with `user_type` = management / teacher / student. Teachers carry `hourly_rate` (default **50.00**); management is auto-approved on save. Every user has a `school` FK. |
+| `BillableContact` | Parent/guardian billing contact for a student. One `is_primary` contact per student (enforced in `save()`); caches `helcim_customer_id` after first invoice send. |
 
-**Key Features:**
-- Uses email as username (no separate username field)
-- Auto-approves management users
-- Supports OAuth integration (Google)
-- Role-based field access
+### Lessons & Schedules
 
-### Lesson Model
-```python
-class Lesson(models.Model):
-    teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_teaching')
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lessons_taking')
-    rate = models.DecimalField(max_digits=6, decimal_places=2, default=80.00)
-    scheduled_date = models.DateTimeField()
-    completed_date = models.DateTimeField(null=True, blank=True)
-    duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0)
-    status = models.CharField(choices=[('requested', 'Requested'), ('confirmed', 'Confirmed'), ('completed', 'Completed'), ('cancelled', 'Cancelled')])
-    teacher_notes = models.TextField(blank=True)
-    student_notes = models.TextField(blank=True)
-```
+| Model | What it is |
+|-------|------------|
+| `Lesson` | A delivered/scheduled lesson with **dual rates**: `teacher_rate` (paid to teacher) and `student_rate` (billed to student), locked at creation from `SchoolSettings` / teacher `hourly_rate`. Statuses include `trial` (teacher paid, student pays $0), `waived`, `forfeited`. First-ever lesson for a student auto-marks as trial. |
+| `RecurringLessonsSchedule` | Weekly teacher-student slot (day, time, duration, locked rates) with optional pause window for planned leave. `generate_lessons_for_month()` projects the dates without creating records. |
 
-**Key Features:**
-- Default rate of $80/hour
-- Automatic rate setting from teacher's hourly rate
-- Status tracking for lesson workflow
-- Notes for both teacher and student
+### Monthly Batch Flow (Teacher Payroll)
 
-### Invoice Model
-```python
-class Invoice(models.Model):
-    invoice_type = models.CharField(choices=[('teacher_payment', 'Teacher Payment'), ('student_billing', 'Student Billing')])
-    lessons = models.ManyToManyField(Lesson)
-    teacher = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
-    student = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
-    payment_balance = models.DecimalField(max_digits=10, decimal_places=2)
-    status = models.CharField(choices=[('draft', 'Draft'), ('pending', 'Pending'), ('approved', 'Approved'), ('paid', 'Paid'), ('overdue', 'Overdue')])
-    due_date = models.DateTimeField()
-    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
-    approved_at = models.DateTimeField(null=True, blank=True)
-```
+| Model | What it is |
+|-------|------------|
+| `MonthlyInvoiceBatch` | One teacher's month of lessons. `draft → submitted → approved → rejected`; unique per teacher/month/year. Locked once its teacher `Invoice` is generated; `archived_at` removes it from Payroll lists without deleting anything. |
+| `BatchLessonItem` | A lesson line inside a batch (rates, status, notes). `calculate_teacher_payment()` / `calculate_student_charge()` encode the per-status money rules. |
+| `BatchRejectionSnapshot` | Frozen JSON copy of the batch's items at each rejection — the audit record of what was actually rejected. |
+| `StudentInvoice` | Per-student audit record created at batch approval (what the student was billed), with cached billing-contact data and credit-reconciliation fields. |
+| `Invoice` | Classic invoice with `invoice_type` = `teacher_payment` or `student_billing`. The teacher-payment invoice is generated at month-end from an approved batch; carries approval/rejection tracking and payroll fields (`date_paid`, `reference_number`). |
 
-**Key Features:**
-- Two invoice types: teacher payments and student billing
-- Automatic payment balance calculation
-- Approval workflow with tracking
-- Audit trail of who created/approved
+### Student Pre-Billing & Credits
 
-## 🔗 API Endpoints
+| Model | What it is |
+|-------|------------|
+| `PreBillingInvoice` | The invoice actually sent to the parent for an upcoming period. `draft → sending → sent → adjusted → paid`; amount locked at draft generation; unique per student/school/period. Stores Helcim invoice id/number and hosted-payment token (no card data). |
+| `StudentCreditAccount` | Per-student credit wallet. `balance >= 0` enforced by DB check constraint — no debt tracking. |
+| `CreditTransaction` | Immutable ledger entry. Amount is **always positive**; the `type` implies direction: `pre_billing_payment` (+), `waived_rollover` (+), `forfeited` (−/audit). |
 
-### User Management
-- `GET /api/billing/teachers/` - Public teacher directory (approved teachers only)
-- `POST /api/billing/teachers/` - Create teacher (management only)
-- `GET /api/billing/teachers/all/` - All teachers including pending (management only)
-- `POST /api/billing/teachers/{id}/approve/` - Approve pending teacher (management only)
-- `GET /api/billing/students/` - Student list (students see themselves, management sees all)
+### Helcim Integration
 
-### Lesson Management
-- `GET /api/billing/lessons/` - List lessons (teachers see their own, management sees all)
-- `POST /api/billing/lessons/` - Create lesson (teachers/management)
-- `POST /api/billing/lessons/request/` - Student requests lesson from teacher
-- `POST /api/billing/lessons/{id}/confirm/` - Teacher confirms lesson request
-- `POST /api/billing/lessons/{id}/complete/` - Teacher marks lesson as completed
+| Model | What it is |
+|-------|------------|
+| `HelcimWebhookEvent` | One payment-webhook receipt. `helcim_transaction_id` is the idempotency key (unique) so Helcim retries are no-ops. `processing_status` tracks reconciliation outcome (`credited`, `not_approved`, retryable states, ...). |
 
-### Invoice Management
-- `GET /api/billing/invoices/teacher/` - Teacher payment invoices
-- `POST /api/billing/invoices/teacher/` - Create teacher payment invoice
-- `POST /api/billing/invoices/teacher/submit-lessons/` - **NEW: Teacher submits lesson details and creates invoice**
-- `POST /api/billing/invoices/teacher/{id}/approve/` - Management approves teacher invoice
+Helcim API client and webhook reconciliation live in `billing/services/` (`helcim_client.py`, `webhook_processing.py`).
 
-### Detail Views
-- `GET/PUT/DELETE /api/billing/teachers/{id}/` - Teacher detail (public GET, auth required for PUT/DELETE)
-- `GET/PUT/DELETE /api/billing/students/{id}/` - Student detail (role-based access)
-- `GET/PUT/DELETE /api/billing/lessons/{id}/` - Lesson detail (role-based access)
-- `GET/PUT/DELETE /api/billing/invoices/{id}/` - Invoice detail (role-based access)
+### Registration & Invitations
 
-## 🔐 Permission System
+| Model | What it is |
+|-------|------------|
+| `ApprovedEmail` | Pre-approved email that can register without review. |
+| `UserRegistrationRequest` | Registration request pending management approval (`pending / approved / rejected`). |
+| `InvitationToken` | Single-use, expiring token for invited users to set up their account. |
 
-### Role-Based Access Control
-- **Management**: Full access to all endpoints and data
-- **Teachers**: Can only access their own lessons, students, and invoices
-- **Students**: Can only access their own data and request lessons
+### Settings & Misc
 
-### Approval System
-- **Management**: Auto-approved, full access immediately
-- **Teachers**: Must be approved by management before full access
-- **Students**: Must be approved by management before full access
+| Model | What it is |
+|-------|------------|
+| `GlobalRateSettings` | Legacy singleton rate settings — fallback when `SchoolSettings` is unavailable. |
+| `InvoiceRecipientEmail` | Per-school list of emails that receive invoice PDFs on teacher submission. |
+| `SchoolMonthlyExpenses` / `SchoolExpenseItem` | Monthly operating expenses per school, shown on the billing dashboard (Phase 21). |
 
-## 💰 Invoicing Workflows
+## Key Flows
 
-### Teacher Payment Flow
-1. Teacher completes lessons
-2. Teacher submits monthly lesson form via `/api/billing/invoices/teacher/submit-lessons/`
-3. System creates lessons and invoice automatically
-4. Invoice status: `pending` (awaiting management approval)
-5. Management approves via `/api/billing/invoices/teacher/{id}/approve/`
-6. Invoice status: `approved` → `paid`
-7. School processes payment to teacher
+### Teacher batch: submit → approve → month-end
 
-### Student Billing Flow (Future)
-1. Management creates invoice for upcoming lessons
-2. Student pays in advance
-3. Lessons get scheduled and can be rescheduled/canceled
-4. Teacher completes lessons and submits for payment
-5. Management pays teacher from student pre-payments
+1. Teacher opens their month — `MonthlyInvoiceBatch` is get-or-created and `BatchLessonItem` rows are synced from active recurring schedules (manual one-offs can be added).
+2. Teacher marks statuses and **submits**. Management **approves** (charges each student's credit wallet, creates `StudentInvoice` records) or **rejects** (snapshot taken, batch back to draft).
+3. Approved-but-uninvoiced batches are the teacher's adjustment window: they can mark exceptions (waived/forfeited/etc.) via the adjustments endpoint.
+4. Management **generates the teacher Invoice** from the Month-End queue — pays the teacher, writes credit rollovers, and locks the batch. Then mark-as-paid and archive.
 
-## 🎯 Key Features
+### Pre-billing: generate → send → webhook credit
 
-### Smart Student/Lesson Creation
-- **Teacher Form Submission**: Automatically creates students and lessons if they don't exist
-- **Flexible Student Lookup**: Finds existing students by email or creates new ones
-- **Default Rate Handling**: Uses teacher's hourly rate if not specified
+1. Management generates a `PreBillingInvoice` draft per student for the upcoming period (projected lesson cost minus existing credit, floored at $0; duplicate generation blocked by the DB constraint).
+2. Send creates the Helcim invoice and emails the parent a hosted-payment link.
+3. Parent pays → Helcim webhook arrives → `HelcimWebhookEvent` stored idempotently → reconciliation credits the `StudentCreditAccount`, records a `CreditTransaction`, and marks the invoice `paid`.
 
-### Automatic Calculations
-- **Lesson Total Cost**: `rate × duration`
-- **Invoice Payment Balance**: Sum of all lesson costs in the invoice
-- **Rate Defaults**: $80/hour default, teacher custom rates override
+## Views & Endpoints
 
-### Audit Trail
-- **Created By**: Tracks who created each invoice
-- **Approved By**: Tracks who approved each invoice
-- **Timestamps**: Creation and approval times recorded
+Views are split by audience in `billing/views/`: `teacher.py` (batches, adjustments, paystubs, legacy submit-lessons), `management.py` (approval, payroll, school-scoped admin), `pre_billing.py`, `webhooks.py`, `students.py`, `lessons.py`, `invitation.py`. All management querysets filter by `school=request.user.school` — see `../../.planning/codebase/SECURITY.md` (LOCK-05) before touching them.
 
-## 🧪 Testing
+For the teacher submit-lessons endpoint specifically, see `../INVOICE_SUBMISSION_GUIDE.md`.
 
-Run the architecture test suite:
+## Django Admin
+
+Role-based User admin, lesson/invoice/batch admins with status filtering. Access at `http://localhost:8000/admin/`.
+
+## Testing
+
 ```bash
-python test_architecture.py
+docker compose exec api pytest tests/                # full suite
+docker compose exec api pytest tests/integration/    # integration only
 ```
 
-This tests:
-- User creation with different roles
-- JWT authentication
-- Role-based permissions
-- Lesson workflow
-- Invoice system
-- Error handling
-
-## 🔧 Django Admin
-
-The app includes comprehensive Django admin configuration:
-- **User Admin**: Role-based fieldsets, search, filtering
-- **Lesson Admin**: Status filtering, cost display
-- **Invoice Admin**: Type filtering, recipient display
-
-Access at: `http://localhost:8000/admin/`
-
-## 📝 Usage Examples
-
-### Teacher Submits Monthly Lessons
-```python
-POST /api/billing/invoices/teacher/submit-lessons/
-{
-    "month": "January 2024",
-    "lessons": [
-        {
-            "student_name": "John Smith",
-            "student_email": "john@example.com",
-            "scheduled_date": "2024-01-15T14:00:00Z",
-            "duration": 1.0,
-            "rate": 80.00,
-            "teacher_notes": "Worked on scales"
-        }
-    ],
-    "due_date": "2024-02-15T00:00:00Z"
-}
-```
-
-### Management Approves Invoice
-```python
-POST /api/billing/invoices/teacher/123/approve/
-Authorization: Bearer <management_token>
-```
-
-### Student Requests Lesson
-```python
-POST /api/billing/lessons/request/
-{
-    "teacher": 5,
-    "scheduled_date": "2024-01-20T16:00:00Z",
-    "duration": 1.0
-}
-```
-
-## 🚀 Future Enhancements
-
-- Student billing invoice creation
-- Payment processing integration
-- Email notifications
-- Calendar integration
-- Advanced reporting and analytics
-- Mobile app support
+See `.planning/codebase/TESTING.md` for structure.
