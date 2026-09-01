@@ -15,6 +15,7 @@ missing contact, non-draft invoice) fail or skip immediately — retrying can't
 fix them.
 """
 import logging
+import os
 import signal
 import time
 
@@ -22,7 +23,9 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
+from prometheus_client import start_http_server
 
+from billing.metrics import send_run_pending_items
 from billing.models import InvoiceSendItem, InvoiceSendRun
 from billing.services.helcim_client import HelcimAPIError
 from billing.services.invoice_sending import InvoiceSendConflict, send_single_invoice
@@ -57,9 +60,17 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, self._request_stop)
 
         self._recover_stale_items()
+
+        # The worker owns the only registry that counts bulk sends
+        # (invoices_sent_total increments here, not in gunicorn), so it
+        # exposes its own /metrics for the 'send-worker' Prometheus job.
+        # --once (tests/cron) skips the server: no port conflicts.
+        if not options['once']:
+            start_http_server(int(os.environ.get('WORKER_METRICS_PORT', '9102')))
         logger.info('Send-run worker started (once=%s)', options['once'])
 
         while not self._stop:
+            self._update_queue_gauge()
             item = self._claim_next_item()
             if item is None:
                 if options['once']:
@@ -68,6 +79,7 @@ class Command(BaseCommand):
                 continue
             self._process_item(item)
             self._finish_run_if_drained(item.run_id)
+        self._update_queue_gauge()
 
         logger.info('Send-run worker stopped')
 
@@ -94,6 +106,13 @@ class Command(BaseCommand):
         ).update(status='pending')
         if recovered:
             logger.warning('Recovered %s orphaned sending item(s) back to pending', recovered)
+
+    def _update_queue_gauge(self):
+        send_run_pending_items.set(
+            InvoiceSendItem.objects.filter(
+                status='pending', run__status__in=('queued', 'running')
+            ).count()
+        )
 
     def _claim_next_item(self):
         """Atomically claim the FIFO-next pending item across live runs."""

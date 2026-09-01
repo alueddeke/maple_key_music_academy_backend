@@ -14,6 +14,8 @@ from .models import (
     StudentCreditAccount,
     CreditTransaction,
     HelcimWebhookEvent,
+    InvoiceSendItem,
+    InvoiceSendRun,
     PreBillingInvoice,
     InvoiceRecipientEmail,
 )
@@ -196,3 +198,25 @@ class InvitationTokenAdmin(admin.ModelAdmin):
         return obj.is_valid()
     is_token_valid.boolean = True
     is_token_valid.short_description = 'Valid'
+
+class InvoiceSendItemInline(admin.TabularInline):
+    model = InvoiceSendItem
+    extra = 0
+    can_delete = False
+    readonly_fields = ('invoice', 'position', 'status', 'attempts', 'last_error', 'finished_at')
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(InvoiceSendRun)
+class InvoiceSendRunAdmin(admin.ModelAdmin):
+    """2am debugging surface for the send-run worker (OPS-RUNBOOK: 'send run stuck')."""
+    list_display = ('id', 'school', 'period_start', 'status',
+                    'sent_count', 'failed_count', 'item_count',
+                    'created_at', 'finished_at')
+    list_filter = ('status', 'school')
+    readonly_fields = ('school', 'period_start', 'created_by', 'item_count',
+                       'sent_count', 'failed_count', 'created_at',
+                       'started_at', 'finished_at')
+    inlines = [InvoiceSendItemInline]
