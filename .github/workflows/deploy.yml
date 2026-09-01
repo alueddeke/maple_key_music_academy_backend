@@ -543,8 +543,10 @@ jobs:
 
       - name: Tag successful deploy
         run: |
-          TAG="deploy-$(date -u +%Y-%m-%d-%H)"
-          git tag "$TAG"
-          git push origin "$TAG"
+          # Minute precision: two deploys in the same hour collided on the
+          # old hour-only tag and failed this step after a successful deploy
+          # (2026-09-01). Tagging is best-effort — never fail the run for it.
+          TAG="deploy-$(date -u +%Y-%m-%d-%H%M)"
+          git tag "$TAG" && git push origin "$TAG" || echo "tagging skipped: $TAG"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
