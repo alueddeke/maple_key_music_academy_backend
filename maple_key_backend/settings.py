@@ -314,11 +314,31 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require authentication for write operations
     ],
-    # Scoped throttles only — applied per-view via ScopedRateThrottle
-    # (registration is an open, unauthenticated form; bots hammer open forms)
+    # Per-view throttles for the open, unauthenticated endpoints (bots hammer
+    # open forms). Classes live in custom_auth/throttling.py — AnonRateThrottle
+    # subclasses, NOT ScopedRateThrottle (which silently no-ops without a
+    # view-level throttle_scope; found dead in 2026-08-31 UAT).
     'DEFAULT_THROTTLE_RATES': {
         'registration': '5/hour',
         'client_errors': '30/hour',
+    },
+    # Nginx fronts the app in prod and sets X-Forwarded-For; key throttles on
+    # the real client IP, not the proxy's. Requests that bypass nginx (local
+    # dev hits :8000 directly) fall back to REMOTE_ADDR.
+    'NUM_PROXIES': 1,
+}
+
+# Throttle counters need one shared store: the default LocMem cache is
+# per-gunicorn-worker (rate × workers, reset on deploy). DatabaseCache is
+# shared and needs no new infra; the table is created by a billing migration
+# (createcachetable), so dev boot and the prod deploy pipeline both get it.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    },
+    'throttle': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'django_throttle_cache',
     },
 }
 
