@@ -36,7 +36,6 @@ from ..models import (
     RecurringLessonsSchedule,
 )
 from ..services.helcim_client import HelcimClient, HelcimAPIError, payment_page_url
-from billing.metrics import invoices_sent_total
 from ..services.email_service import PreBillingEmailService
 from ..services.invoice_sending import (
     InvoiceSendConflict,
