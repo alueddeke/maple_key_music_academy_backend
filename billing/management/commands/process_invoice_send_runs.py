@@ -75,6 +75,9 @@ class Command(BaseCommand):
             if item is None:
                 if options['once']:
                     break
+                # Idle moments double as the recovery sweep — a crash-restart
+                # that happens within the stale window still self-heals.
+                self._recover_stale_items()
                 time.sleep(IDLE_SLEEP_SECONDS)
                 continue
             self._process_item(item)
@@ -91,19 +94,17 @@ class Command(BaseCommand):
 
     def _recover_stale_items(self):
         """
-        Re-queue items a dead worker left in 'sending'. The invoice-level
-        claim in send_single_invoice still prevents a double Helcim send if
-        the old worker got that far — the retry will surface
-        InvoiceSendConflict and the item is skipped, not re-sent.
+        Re-queue items a dead worker left in 'sending', keyed on claimed_at —
+        runs at startup and on every idle sweep, so a single crash-restart
+        self-heals within STALE_SENDING_MINUTES. A healthy send never lasts
+        that long; if one somehow did and a second worker re-claimed the item,
+        the invoice-level draft->sending CAS in send_single_invoice surfaces
+        InvoiceSendConflict and the duplicate claim is skipped, not re-sent.
         """
         cutoff = timezone.now() - timezone.timedelta(minutes=STALE_SENDING_MINUTES)
-        # updated_at doesn't exist on items; conservative proxy: any 'sending'
-        # item at startup is orphaned — no other worker instance is expected,
-        # and a concurrent healthy worker holds a row lock we must not steal,
-        # so filter to runs older than the cutoff as the safety margin.
         recovered = InvoiceSendItem.objects.filter(
-            status='sending', run__created_at__lt=cutoff,
-        ).update(status='pending')
+            status='sending', claimed_at__lt=cutoff,
+        ).update(status='pending', claimed_at=None)
         if recovered:
             logger.warning('Recovered %s orphaned sending item(s) back to pending', recovered)
 
@@ -127,7 +128,8 @@ class Command(BaseCommand):
             if item is None:
                 return None
             item.status = 'sending'
-            item.save(update_fields=['status'])
+            item.claimed_at = timezone.now()
+            item.save(update_fields=['status', 'claimed_at'])
             InvoiceSendRun.objects.filter(pk=item.run_id, status='queued').update(
                 status='running', started_at=timezone.now()
             )

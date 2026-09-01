@@ -1803,6 +1803,9 @@ class InvoiceSendItem(models.Model):
     )
     attempts = models.PositiveIntegerField(default=0)
     last_error = models.TextField(blank=True, default='')
+    # Set when a worker claims the item; stale-recovery keys on this, so a
+    # crashed worker's items re-queue after STALE_SENDING_MINUTES.
+    claimed_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

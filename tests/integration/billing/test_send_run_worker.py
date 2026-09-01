@@ -204,3 +204,25 @@ def test_cancelled_run_items_stay_untouched(run_with_two_invoices, management_us
     for invoice in invoices:
         invoice.refresh_from_db()
         assert invoice.status == 'draft'
+
+
+def test_orphaned_sending_item_recovers_and_processes(run_with_two_invoices):
+    """A dead worker's 'sending' item (stale claimed_at) re-queues and sends."""
+    from django.utils import timezone
+    run, invoices = run_with_two_invoices
+    orphan = run.items.order_by('position').first()
+    InvoiceSendItem.objects.filter(pk=orphan.pk).update(
+        status='sending',
+        claimed_at=timezone.now() - timezone.timedelta(minutes=30),
+    )
+    InvoiceSendRun.objects.filter(pk=run.pk).update(status='running')
+
+    helcim_patch, client = _mock_helcim()
+    with helcim_patch, _mock_email():
+        call_command('process_invoice_send_runs', '--once')
+
+    run.refresh_from_db()
+    assert run.status == 'done'
+    assert run.sent_count == 2
+    orphan.refresh_from_db()
+    assert orphan.status == 'sent'
