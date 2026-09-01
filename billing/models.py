@@ -1705,3 +1705,121 @@ class SchoolExpenseItem(models.Model):
 
     def __str__(self):
         return f"{self.title}: ${self.amount} ({self.period_start})"
+
+class InvoiceSendRun(models.Model):
+    """
+    One bulk pre-billing send, snapshotted at the moment management clicks
+    "send all" (batch-queue wave). The request only creates this row plus its
+    items — the actual Helcim/email work happens in the send-run worker
+    (process_invoice_send_runs), off the request workers.
+
+    Snapshot cutoff (Nick, Aug 28 audit): drafts created after the run exists
+    are NOT part of it. Counts are maintained on write so the UI reads
+    progress from this row instead of re-scanning invoices.
+    """
+
+    STATUS_CHOICES = [
+        ('queued', 'Queued'),        # created, no worker has started it
+        ('running', 'Running'),      # worker is processing items
+        ('done', 'Done'),            # every item reached a terminal state
+        ('cancelled', 'Cancelled'),  # remaining pending items were skipped
+    ]
+
+    school = models.ForeignKey(
+        'School',
+        on_delete=models.PROTECT,
+        related_name='invoice_send_runs',
+    )
+    period_start = models.DateField()
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='queued',
+    )
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='invoice_send_runs',
+    )
+    item_count = models.PositiveIntegerField(default=0)
+    sent_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            # One live run per school+period: send-all returns 409 with the
+            # live run instead of double-queuing the same invoices.
+            models.UniqueConstraint(
+                fields=['school', 'period_start'],
+                condition=models.Q(status__in=['queued', 'running']),
+                name='one_live_send_run_per_period',
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"SendRun {self.pk} {self.period_start:%Y-%m} {self.school_id} "
+            f"({self.get_status_display()} {self.sent_count}/{self.item_count})"
+        )
+
+
+class InvoiceSendItem(models.Model):
+    """
+    One invoice inside an InvoiceSendRun. FIFO by ``position``; the worker
+    claims items with select_for_update(skip_locked), so adding parallel
+    workers later needs no schema change. The invoice-level draft->sending
+    conditional UPDATE in invoice_sending remains the last double-send guard.
+    """
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('sending', 'Sending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+        ('skipped', 'Skipped'),  # run cancelled before this item was processed
+    ]
+
+    run = models.ForeignKey(
+        InvoiceSendRun,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    invoice = models.ForeignKey(
+        PreBillingInvoice,
+        on_delete=models.PROTECT,
+        related_name='send_items',
+    )
+    position = models.PositiveIntegerField()
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True, default='')
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['run_id', 'position']
+        constraints = [
+            # An invoice can sit in at most one unfinished run item — a second
+            # run for the same period is blocked at the run level, and this
+            # closes the cross-period/cancel-race hole.
+            models.UniqueConstraint(
+                fields=['invoice'],
+                condition=models.Q(status__in=['pending', 'sending']),
+                name='one_live_send_item_per_invoice',
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"SendItem run={self.run_id} pos={self.position} "
+            f"invoice={self.invoice_id} ({self.get_status_display()})"
+        )

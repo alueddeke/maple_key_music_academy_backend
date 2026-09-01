@@ -129,6 +129,11 @@ urlpatterns = [
     # would try to coerce "send-all" to int and raise ValueError otherwise.
     path('management/pre-billing/generate/', views.management_pre_billing_generate, name='management_pre_billing_generate'),
     path('management/pre-billing/send-all/', views.management_pre_billing_send_all, name='management_pre_billing_send_all'),
+    # Send runs (batch-queue wave): latest/ before <int:run_id>/ — same URL-resolver
+    # ordering constraint as send-all/ above.
+    path('management/send-runs/latest/', views.management_send_run_latest, name='management_send_run_latest'),
+    path('management/send-runs/<int:run_id>/', views.management_send_run_detail, name='management_send_run_detail'),
+    path('management/send-runs/<int:run_id>/cancel/', views.management_send_run_cancel, name='management_send_run_cancel'),
     path('management/pre-billing/', views.management_pre_billing_list, name='management_pre_billing_list'),
     path('management/pre-billing/<int:invoice_id>/', views.management_pre_billing_detail, name='management_pre_billing_detail'),
     path('management/pre-billing/<int:invoice_id>/send/', views.management_pre_billing_send, name='management_pre_billing_send'),

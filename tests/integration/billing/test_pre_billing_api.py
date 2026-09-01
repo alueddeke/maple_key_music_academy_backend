@@ -321,83 +321,43 @@ def test_send_sets_status(management_client, school, teacher_user, student_with_
 # ---------------------------------------------------------------------------
 
 @pytest.mark.django_db
-def test_send_all_partial_failure(management_client, school, teacher_user, db):
+def test_send_all_enqueues_run_instead_of_sending(management_client, school, teacher_user, student_with_contact):
     """
-    POST send-all processes invoices sequentially; one HelcimAPIError captured in 'failed'.
-    BILL-05: partial failure returns summary {sent: N, failed: [{student_id, student_name, error}]}.
+    Batch-queue wave: POST send-all snapshots the period's drafts into an
+    InvoiceSendRun (202) and performs NO Helcim/email work in the request —
+    the worker owns the sending. BILL-07 semantics move to the run lifecycle.
     """
-    # Create 3 students with contacts and draft invoices
-    invoices = []
-    for i in range(3):
-        student = User.objects.create_user(
-            email=f"send_all_student_{i}@prebilling.test",
-            password="pass",
-            user_type="student",
-            first_name=f"Student{i}",
-            last_name="SendAll",
-            school=school,
-            is_approved=True,
-        )
-        BillableContact.objects.create(
-            student=student,
-            school=school,
-            is_primary=True,
-            first_name=f"Contact{i}",
-            last_name="SendAll",
-            email=f"contact_send_all_{i}@prebilling.test",
-            phone="555-0300",
-            street_address="123 Test St",
-            city="Toronto",
-            province="ON",
-            postal_code="M5H 2N2",
-            helcim_customer_id=f'cust_{i}',  # pre-set to skip customer creation
-        )
-        invoice = _make_draft_invoice(student, school)
-        lesson = _make_confirmed_lesson(
-            student, teacher_user, school,
-            lesson_date=date(2026, 6, 3 + i)
-        )
-        invoice.lessons.add(lesson)
-        invoices.append(invoice)
+    from billing.models import InvoiceSendRun
 
-    def post_side_effect(*args, **kwargs):
-        """2nd invoice's send fails."""
-        if post_side_effect.call_count == 2:
-            post_side_effect.call_count += 1
-            raise HelcimAPIError('Helcim server error', status_code=500)
-        post_side_effect.call_count += 1
-        return _helcim_create_invoice_ok()
+    student, contact = student_with_contact
+    june = _make_draft_invoice(student, school)  # period_start 2026-06-01
+    lesson = _make_confirmed_lesson(student, teacher_user, school)
+    june.lessons.add(lesson)
 
-    post_side_effect.call_count = 1
-
-    with patch('billing.services.helcim_client.requests.post', side_effect=post_side_effect), \
-         patch('billing.services.email_service.PreBillingEmailService.send_payment_request',
-               return_value=(True, 'sent')):
-
+    with patch('billing.services.helcim_client.requests.post') as helcim_post:
         url = reverse('management_pre_billing_send_all')
-        response = management_client.post(url, format='json')
+        response = management_client.post(url, {'month': 6, 'year': 2026}, format='json')
 
-    assert response.status_code == 200
-    assert response.data['sent'] == 2
-    assert len(response.data['failed']) == 1
-    failed_entry = response.data['failed'][0]
-    assert 'student_id' in failed_entry
-    assert 'student_name' in failed_entry
-    assert 'error' in failed_entry
+    assert response.status_code == 202
+    helcim_post.assert_not_called()  # request does zero provider work
+    run = InvoiceSendRun.objects.get(pk=response.data['id'])
+    assert run.status == 'queued'
+    assert run.item_count == 1
+    assert list(run.items.values_list('invoice_id', flat=True)) == [june.id]
+    june.refresh_from_db()
+    assert june.status == 'draft'  # untouched until the worker claims it
 
 
 @pytest.mark.django_db
 def test_send_all_scoped_to_period(management_client, school, teacher_user, student_with_contact):
     """
-    Regression (2026-08-27): POST send-all with month/year in the body sends only
-    that billing period's drafts. Unscoped, it swept every draft in the school —
-    the period-scoped UI fired invoices for months the user never looked at.
+    Regression (2026-08-27, re-expressed for send runs): the run snapshot
+    contains ONLY the requested period's drafts — other months untouched.
     """
-    student, contact = student_with_contact
-    contact.helcim_customer_id = 'cust_scope_1'
-    contact.save()
+    from billing.models import InvoiceSendRun
 
-    june = _make_draft_invoice(student, school)  # period_start 2026-06-01
+    student, contact = student_with_contact
+    june = _make_draft_invoice(student, school)
     july = PreBillingInvoice.objects.create(
         student=student,
         school=school,
@@ -406,23 +366,14 @@ def test_send_all_scoped_to_period(management_client, school, teacher_user, stud
         period_start=date(2026, 7, 1),
         period_end=date(2026, 7, 31),
     )
-    lesson = _make_confirmed_lesson(student, teacher_user, school)
-    june.lessons.add(lesson)
-    july.lessons.add(lesson)
 
-    with patch('billing.services.helcim_client.requests.post',
-               return_value=_helcim_create_invoice_ok()), \
-         patch('billing.services.email_service.PreBillingEmailService.send_payment_request',
-               return_value=(True, 'sent')):
-        url = reverse('management_pre_billing_send_all')
-        response = management_client.post(url, {'month': 6, 'year': 2026}, format='json')
+    url = reverse('management_pre_billing_send_all')
+    response = management_client.post(url, {'month': 6, 'year': 2026}, format='json')
 
-    assert response.status_code == 200
-    assert response.data['sent'] == 1
-    june.refresh_from_db()
-    july.refresh_from_db()
-    assert june.status == 'sent'
-    assert july.status == 'draft'  # untouched — different period
+    assert response.status_code == 202
+    run = InvoiceSendRun.objects.get(pk=response.data['id'])
+    assert list(run.items.values_list('invoice_id', flat=True)) == [june.id]
+    assert july.send_items.count() == 0
 
 
 # ---------------------------------------------------------------------------

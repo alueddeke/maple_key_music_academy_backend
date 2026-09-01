@@ -452,63 +452,6 @@ def management_pre_billing_send(request, invoice_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @management_required
-def management_pre_billing_send_all(request):
-    """
-    POST /api/billing/management/pre-billing/send-all/
-
-    Process draft invoices for request.user.school sequentially. When month/year
-    are supplied in the body, only that billing period's drafts are sent — the UI
-    is period-scoped, so an unscoped send would fire every draft in the school
-    (all months at once). Omitting month/year keeps the legacy school-wide sweep.
-    Per-student failures are caught and accumulated in response.failed[].
-    One failure does not abort the batch (T-19-03-09).
-    """
-    drafts = (
-        PreBillingInvoice.objects
-        .filter(school=request.user.school, status='draft')
-        .select_related('student')
-    )
-    month = request.data.get('month')
-    year = request.data.get('year')
-    if month and year:
-        try:
-            period_start = date(int(year), int(month), 1)
-        except (TypeError, ValueError):
-            return Response(
-                {'error': 'Invalid month/year'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        drafts = drafts.filter(period_start=period_start)
-
-    sent = 0
-    failed = []
-
-    for draft in drafts:
-        try:
-            _send_single_invoice(draft, request.user.school)
-            sent += 1
-        except (HelcimAPIError, BillableContact.DoesNotExist,
-                InvoiceSendConflict, Exception) as e:
-            logger.error(
-                'send-all failed for invoice %s (student %s): %s',
-                draft.id,
-                draft.student_id,
-                e,
-            )
-            failed.append(
-                {
-                    'student_id': draft.student_id,
-                    'student_name': draft.student.get_full_name(),
-                    'error': str(e),
-                }
-            )
-
-    return Response({'sent': sent, 'failed': failed})
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-@management_required
 def management_pre_billing_remove_lesson(request, invoice_id):
     """
     POST /api/billing/management/pre-billing/<invoice_id>/remove-lesson/
