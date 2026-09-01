@@ -61,6 +61,12 @@ if not DEBUG:
     # Redirect all HTTP requests to HTTPS
     SECURE_SSL_REDIRECT = True
 
+    # Prometheus scrapes /metrics (and health checks hit /health/) over plain
+    # HTTP on the container network; the redirect would bounce them to an
+    # HTTPS port 8000 doesn't speak. Both paths are denied at the public
+    # nginx, so exempting them exposes nothing externally.
+    SECURE_REDIRECT_EXEMPT = [r'^metrics$', r'^health/']
+
     # Use secure cookies (only sent over HTTPS)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
