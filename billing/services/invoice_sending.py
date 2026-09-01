@@ -100,8 +100,11 @@ def send_single_invoice(invoice, school):
 
     # Guard: reject zero-lesson invoices before hitting Helcim
     if not lessons and not projected:
+        # status_code=400: validation failure, so the send-run worker never
+        # retries it (a bare HelcimAPIError reads as a transient network error).
         raise HelcimAPIError(
-            'This invoice has no lesson dates. Add lessons before sending.'
+            'This invoice has no lesson dates. Add lessons before sending.',
+            status_code=400,
         )
 
     # Schedule-sourced drafts: schedules (or credit) may have changed since
@@ -122,8 +125,10 @@ def send_single_invoice(invoice, school):
         invoice.amount = max(Decimal('0.00'), gross_projected - credit_balance)
 
     if invoice.amount is None or invoice.amount == 0:
+        # status_code=400: validation failure — see the no-lesson guard above.
         raise HelcimAPIError(
-            'This invoice has a $0.00 balance. Only invoices with an amount owing can be sent.'
+            'This invoice has a $0.00 balance. Only invoices with an amount owing can be sent.',
+            status_code=400,
         )
 
     # Atomically claim the invoice (draft → sending) so two concurrent send
