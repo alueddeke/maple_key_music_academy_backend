@@ -165,7 +165,10 @@ if DATABASE_URL:
     url = urlparse(DATABASE_URL)
     DATABASES = {
         'default': {
-            'ENGINE': 'django.db.backends.postgresql',
+            # django_prometheus wrapper: identical to the stock postgresql
+            # backend, plus django_db_* query metrics on /metrics (the
+            # "Database Query Rate" dashboard panel reads these).
+            'ENGINE': 'django_prometheus.db.backends.postgresql',
             'NAME': url.path[1:],  # Remove leading slash
             'USER': url.username,
             'PASSWORD': url.password,
@@ -177,7 +180,7 @@ else:
     # Local development: Use individual environment variables
     DATABASES = {
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
+            "ENGINE": "django_prometheus.db.backends.postgresql",
             "NAME": config('POSTGRES_DB', default='maple_key_dev'),
             "USER": config('POSTGRES_USER', default='maple_key_user'),
             "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
