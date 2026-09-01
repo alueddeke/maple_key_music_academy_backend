@@ -1,173 +1,94 @@
-# Maple Key Music Academy Backend
+# Maple Key Music Academy — Backend
 
-A Django REST API backend for a music school management system with role-based authentication, lesson scheduling, and invoicing.
+**Start here** (human or AI — this file is the universal entry point for this repo).
 
-## 🏗️ System Architecture
+Django/DRF API running a real Toronto music school's money cycle: recurring
+lesson schedules feed teacher batch submissions; approval atomically creates
+lessons and debits student credit wallets; pre-billing invoices go out through
+Helcim (Canadian payment processor) with HMAC-verified, idempotent webhook
+reconciliation. It handles real money in production today.
 
-### Core Components
+## The domain in one tree
 
-- **Unified User Model** - Single model supporting Management, Teachers, and Students
-- **Role-Based Permissions** - Different access levels for different user types
-- **Mixed Authentication** - OAuth (Google) + JWT token authentication
-- **Dual Invoicing System** - Teacher payments and student billing
-- **Lesson Management** - Scheduling, confirmation, and completion workflow
-
-### Apps Structure
+Everything depends on what's above it — you can't touch a lower layer safely
+without understanding the ones it feeds:
 
 ```
-maple_key_music_academy_backend/
-├── billing/           # User management, lessons, invoices
-├── custom_auth/       # Authentication and authorization
-├── maple_key_backend/ # Django project settings
-└── requirements.txt   # Python dependencies
+users (management / teacher / student, one User model, role field)
+  → recurring schedules (teacher×student, day/time/rate)
+    → monthly teacher batches (prepopulated from schedules; teacher marks
+      cancellations/exceptions, submits; management approves or rejects)
+      → lessons (created AT APPROVAL, atomically, with wallet debits)
+      → credit wallet (per student; waives/refunds land here)
+        → pre-billing invoices (bill-ahead drafts projected from schedules)
+          → send runs (bulk send = queued snapshot drained by a worker container)
+            → Helcim invoice + hosted payment page + our email
+              → webhook reconciliation (HMAC-verified, idempotent, credits wallet)
+  → teacher payroll (approved batches → month-end teacher invoices, mark-as-paid)
 ```
 
-## 🚀 Quick Start
+Closed vocabulary that matters: **lesson vs batch-item vs invoice vs credit**;
+**waived vs forfeited vs cancelled** (each has a different money rule: waived
+charges nobody, forfeited charges the student, both pay the teacher nothing).
 
-### Prerequisites
+## User paths (what the API actually serves)
 
-- Python 3.11+
-- Virtual environment
-- Google OAuth credentials (for OAuth login)
+- **Teacher:** log in → Monthly Invoices → review the prepopulated month →
+  add/edit/reschedule/cancel lessons → submit batch → (after approval) mark
+  exceptions until the invoice generates → see paystub.
+- **Management:** review/approve/reject batches → Student Billing: generate
+  bill-ahead drafts → Send All (queues a send run; worker sends) → Month End:
+  generate teacher invoices → "Have you paid?" → dashboards.
+- **Parent:** gets an email with a Helcim payment link — never logs in.
+  Payment → webhook → wallet credit → next invoice nets it off.
 
-### Installation
+## Layout
+
+```
+billing/            almost everything: models, views/ (function-based), services/,
+                    management/commands/ (seed_realistic, bootstrap_dev,
+                    process_invoice_send_runs = the send-run worker, ...)
+custom_auth/        JWT + Google OAuth (PKCE), decorators (@management_required,
+                    @teacher_required), registration guards, throttling
+teacher_profiles/   instruments, availability
+notifications/      in-app bell
+analytics/          dashboard aggregation
+tests/              pytest — unit/ + integration/
+```
+
+## Run it
+
+Dev runs through the docker repo (sibling `maple_key_music_academy_docker/`):
 
 ```bash
-# Clone repository
-git clone <repository-url>
-cd maple_key_music_academy_backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your settings
-
-# Run migrations
-python manage.py migrate
-
-# Create superuser
-python manage.py createsuperuser
-
-# Start development server
-python manage.py runserver
+cd ../maple_key_music_academy_docker && make up
+# first boot auto-seeds a demo school; sign in at http://localhost:5173
+#   e2e.manager@maplekeytest.com / testpass123
+# make up-empty boots with no data
 ```
 
-## 👥 User Types & Roles
+Tests: `docker compose exec api pytest tests/` (600+; run before any commit).
 
-### Management
+## Hard rules (violating these has broken production before)
 
-- **Full system access** - Can view and manage all data
-- **Auto-approved** - No approval required
-- **Admin privileges** - Django admin access
-- **Invoice approval** - Can approve teacher payment invoices
+- **Money is `Decimal`, never float.** Rates lock at creation.
+- **No Helcim HTTP call inside `transaction.atomic()`** — rollback orphans a
+  real Helcim invoice. Claim state with a conditional UPDATE, call outside,
+  write results in a minimal transaction.
+- **Every queryset filters by `request.user.school`** (multi-school isolation).
+- **Idempotency everywhere money moves:** webhook events are replay-safe;
+  invoice sends claim `draft→sending` so exactly one sender wins.
+- Function-based views + decorators only; no ViewSets.
+- Branches: `develop` → `production` (PR-gated, migrations auto-run behind a
+  pg_dump). Never push production directly.
+- Migration workflow: merge develop before `makemigrations`; check duplicate
+  numbers: `ls -1 billing/migrations/0*.py | cut -d_ -f1 | sort | uniq -d`
 
-### Teachers
+## Where deeper docs live
 
-- **Lesson management** - Can create, confirm, and complete lessons
-- **Student management** - Can manage their own students
-- **Invoice creation** - Can submit monthly lesson invoices
-- **Approval required** - Must be approved by management
-
-### Students
-
-- **Lesson requests** - Can request lessons from teachers
-- **Own data access** - Can view their own lessons and invoices
-- **Approval required** - Must be approved by management
-
-## 🔐 Authentication System
-
-### JWT Token Authentication
-
-```bash
-# Login
-POST /api/auth/token/
-{
-    "email": "teacher@example.com",
-    "password": "password123"
-}
-```
-
-### Google OAuth
-
-```bash
-# Initiate OAuth
-GET /api/auth/google/
-```
-
-## 📚 Key API Endpoints
-
-### Authentication
-
-- `POST /api/auth/token/` - Get JWT tokens
-- `POST /api/auth/token/refresh/` - Refresh access token
-- `GET /api/auth/google/` - Initiate Google OAuth
-- `GET /api/auth/user/` - Get current user profile
-
-### Lesson Management
-
-- `GET /api/billing/lessons/` - List lessons
-- `POST /api/billing/lessons/request/` - Student requests lesson
-- `POST /api/billing/lessons/{id}/confirm/` - Teacher confirms lesson
-
-### Invoice Management
-
-- `POST /api/billing/invoices/teacher/submit-lessons/` - **Submit lesson details and create invoice**
-- `POST /api/billing/invoices/teacher/{id}/approve/` - Approve invoice
-
-## 💰 Invoicing Workflows
-
-### Teacher Payment Flow
-
-Teachers work from monthly lesson batches: at month end, the teacher reviews their batch (marking cancellations, reschedules, and one-off lessons) and submits it. Management reviews and approves the batch, and the approved batch is then rolled into a month-end teacher invoice, which the school pays. See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the full workflow.
-
-## 🧪 Testing
-
-### Run Architecture Tests
-
-```bash
-python test_architecture.py
-```
-
-**Tests include:**
-
-- ✅ User creation with different roles
-- ✅ JWT authentication
-- ✅ Role-based permissions
-- ✅ Lesson workflow
-- ✅ Invoice system
-- ✅ Error handling
-
-## 🔧 Django Admin
-
-Access the admin interface at: `http://localhost:8000/admin/`
-
-## 📖 Documentation
-
-- [Billing App README](billing/README.md) - User management, lessons, invoices
-- [Custom Auth App README](custom_auth/README.md) - Authentication and authorization
-
-## 🏛️ Architecture Decisions
-
-Architecture decision records live in the umbrella repo, folded into `.planning/codebase/ARCHITECTURE.md` (with related docs like `SECURITY.md`, `CONVENTIONS.md`, and `STACK.md` alongside it in `.planning/codebase/`).
-
-## 🚀 Future Enhancements
-
-- Student billing invoices (pre-payment system)
-- Payment processing integration
-- Email notifications
-- Calendar integration
-- Video call integration
-- Mobile app support
-- Advanced analytics
-
-## 📄 License
-
-This project is licensed under the MIT License.
-
-change to trigger deploy
+- `docs/USER_GUIDE.md` — full billing workflow narrative
+- `billing/README.md`, `custom_auth/README.md` — app-level detail
+- Umbrella/planning repo (local): `.planning/codebase/` — ARCHITECTURE,
+  CONVENTIONS, STANDARDS, SECURITY (authoritative for agents working the
+  full workspace)
+- `CLAUDE.md` — repo-specific gotchas for Claude sessions
