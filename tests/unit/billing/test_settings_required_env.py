@@ -95,3 +95,14 @@ def test_boot_refuses_cors_wildcard(complete_env):
 
     assert result.returncode != 0
     assert 'CORS_ALLOWED_ORIGINS' in result.stderr
+
+
+@pytest.mark.parametrize('value', ['', ','])
+def test_boot_refuses_empty_cors(complete_env, value):
+    """An empty or all-blank origin list is not a configured CORS policy."""
+    env = dict(complete_env, CORS_ALLOWED_ORIGINS=value)
+
+    result = _boot(env)
+
+    assert result.returncode != 0
+    assert 'CORS_ALLOWED_ORIGINS' in result.stderr

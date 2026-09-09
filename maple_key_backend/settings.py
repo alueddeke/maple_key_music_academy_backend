@@ -43,7 +43,9 @@ ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_STR.split(',') if host.s
 cors_allowed_str = config('CORS_ALLOWED_ORIGINS')
 if cors_allowed_str == '*':
     raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS must not be '*'")
-CORS_ALLOWED_ORIGINS = [host.strip() for host in cors_allowed_str.split(',')]
+CORS_ALLOWED_ORIGINS = [host.strip() for host in cors_allowed_str.split(',') if host.strip()]
+if not CORS_ALLOWED_ORIGINS:
+    raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS must list at least one origin")
 
 
 # Platform admins (MAP-177): the only accounts that hold Django is_staff /
