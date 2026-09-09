@@ -337,9 +337,10 @@ class TestAutoTrialStatus:
         )
 
     @pytest.fixture
-    def first_time_student(self, school, db):
-        """Student with zero prior Lesson records — will trigger trial auto-detection."""
-        return User.objects.create_user(
+    def first_time_student(self, school, teacher_user, db):
+        """Student with zero prior Lesson records — will trigger trial auto-detection.
+        Assigned to teacher_user: batch_add_lesson only accepts assigned students (MAP-179)."""
+        student = User.objects.create_user(
             email="firsttime@edittest.com",
             password="pass",
             user_type="student",
@@ -348,6 +349,8 @@ class TestAutoTrialStatus:
             school=school,
             is_approved=True,
         )
+        student.assigned_teachers.add(teacher_user)
+        return student
 
     @pytest.fixture
     def teacher_client(self, api_client, teacher_user):
@@ -367,6 +370,7 @@ class TestAutoTrialStatus:
                 "start_time": "14:00:00",
                 "duration": "1.0",
                 "lesson_type": "in_person",
+                "status": "completed",
             },
             format="json",
         )
