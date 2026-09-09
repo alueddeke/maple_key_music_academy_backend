@@ -3,10 +3,8 @@
 # to use `from . import views` and `views.function_name` without any change.
 
 from .management import (
-    teacher_list,
     all_teachers,
     approve_teacher,
-    student_list,
     approved_email_list,
     approved_email_delete,
     registration_request_list,
@@ -83,16 +81,9 @@ from .teacher import (
 )
 
 from .lessons import (
-    lesson_list,
     request_lesson,
     confirm_lesson,
     complete_lesson,
-)
-
-from .students import (
-    student_detail,
-    lesson_detail,
-    invoice_detail,
 )
 
 from .invitation import (
