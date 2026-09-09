@@ -541,6 +541,21 @@ class TestTeacherBatchAddLesson:
         assert response.status_code == status.HTTP_201_CREATED, response.data
         assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'trial'
 
+    def test_duration_omitted_is_rejected_and_nothing_written(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        """P0 audit 2026-09-09: duration has a model default, but the teacher
+        payload must state it — before this a missing duration wrote the row
+        and then 500'd while rendering the response."""
+        payload = _live_payload(assigned_student)
+        del payload['duration']
+
+        response = self._post(authenticated_teacher_client, draft_batch, payload)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'duration' in response.data
+        assert not BatchLessonItem.objects.exists()
+
     def test_fuzz_every_model_field_only_the_seven_are_accepted(
         self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
     ):

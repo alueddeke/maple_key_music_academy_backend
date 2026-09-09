@@ -918,7 +918,9 @@ class BatchLessonItem(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+', limit_choices_to={'user_type':'student'})
     scheduled_date = models.DateField()
     start_time = models.TimeField()
-    duration = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
+    # Decimal default: a float default made calculate_teacher_payment() raise
+    # TypeError on an unsaved instance (P0 audit 2026-09-09).
+    duration = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('1.00'))
     lesson_type = models.CharField(max_length=20, choices=Lesson.LESSON_TYPES)
 
     # Rates (locked from recurring schedule or derived by the server — MAP-179)

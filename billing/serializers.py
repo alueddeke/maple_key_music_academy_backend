@@ -243,6 +243,8 @@ class TeacherBatchLessonItemSerializer(StrictFieldsMixin, serializers.ModelSeria
             'student', 'scheduled_date', 'start_time', 'duration',
             'lesson_type', 'status', 'teacher_notes',
         ]
+        # duration has a model default; the teacher payload must state it.
+        extra_kwargs = {'duration': {'required': True}}
 
     def validate_duration(self, value):
         if value <= 0:
