@@ -219,8 +219,6 @@ class User(AbstractUser):
         # Auto-approve management users
         if self.user_type == 'management':
             self.is_approved = True
-            self.is_staff = True
-            self.is_superuser = True
         
         super().save(*args, **kwargs)
     

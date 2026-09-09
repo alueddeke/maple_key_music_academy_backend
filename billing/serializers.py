@@ -45,7 +45,6 @@ class BillableContactSerializer(serializers.ModelSerializer):
 
         return data
 class UserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=False)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
     school_name = serializers.CharField(source='school.name', read_only=True)
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
@@ -62,10 +61,14 @@ class UserSerializer(serializers.ModelSerializer):
             'assigned_teachers', 'assigned_teachers_data',
             'assigned_students_data',
             'billable_contacts',
-            'date_joined', 'last_login', 'password'
+            'date_joined', 'last_login'
         ]
-        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display', 'school_name']
-        extra_kwargs = {'password': {'write_only': True}}
+        # MAP-177: role, tenancy and status columns are never writable through
+        # request input; password only via invitation setup / password reset.
+        read_only_fields = [
+            'id', 'date_joined', 'last_login', 'user_type_display', 'school_name',
+            'user_type', 'school', 'is_approved', 'is_active',
+        ]
 
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
@@ -94,14 +97,6 @@ class UserSerializer(serializers.ModelSerializer):
                 for student in obj.assigned_students.filter(is_active=True)
             ]
         return []
-
-    def create(self, validated_data):
-        password = validated_data.pop('password', None)
-        user = User.objects.create_user(**validated_data)
-        if password:
-            user.set_password(password)
-            user.save()
-        return user
 
 
 class LessonSerializer(serializers.ModelSerializer):

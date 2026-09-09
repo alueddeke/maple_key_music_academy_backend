@@ -46,6 +46,12 @@ if cors_allowed_str == '*':
 CORS_ALLOWED_ORIGINS = [host.strip() for host in cors_allowed_str.split(',')]
 
 
+# Platform admins (MAP-177): the only accounts that hold Django is_staff /
+# is_superuser. Required, comma-separated, no default (check-no-fallbacks).
+platform_admin_emails_str = config('PLATFORM_ADMIN_EMAILS')
+PLATFORM_ADMIN_EMAILS = [e.strip().lower() for e in platform_admin_emails_str.split(',') if e.strip()]
+
+
 # SSL/HTTPS Security Settings
 # These settings ensure your Django app works properly behind an HTTPS proxy (Nginx)
 
