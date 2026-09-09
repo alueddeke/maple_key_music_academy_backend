@@ -85,36 +85,6 @@ def validate_batch_billable_contacts(batch):
 
 # USER MANAGEMENT ENDPOINTS
 
-@api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-def teacher_list(request):
-    """Authenticated teacher directory + management teacher creation"""
-    if request.method == 'GET':
-        # Public endpoint - show approved teachers only
-        # For authenticated users, filter by school; for public, show all (future: subdomain filtering)
-        teachers = User.objects.filter(user_type='teacher', is_approved=True)
-        if request.user.is_authenticated and hasattr(request.user, 'school') and request.user.school:
-            teachers = teachers.filter(school=request.user.school)
-        serializer = UserSerializer(teachers, many=True)
-        return Response(serializer.data)
-
-    elif request.method == 'POST':
-        # Only management can create teachers via API
-        if not request.user.is_authenticated or request.user.user_type != 'management':
-            return Response({
-                'error': 'Management access required to create teacher accounts'
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        data = request.data.copy()
-        data['user_type'] = 'teacher'
-        data['is_approved'] = True  # Management-created teachers are auto-approved
-
-        serializer = UserSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 @api_view(['GET'])
 @management_required
 def all_teachers(request):
@@ -134,19 +104,6 @@ def approve_teacher(request, teacher_id):
         return Response({'message': 'Teacher approved successfully'})
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
-
-@api_view(['GET'])
-@role_required('student', 'management')
-def student_list(request):
-    """Students can see themselves, management can see all students"""
-    if request.user.user_type == 'management':
-        students = User.objects.filter(user_type='student', school=request.user.school)
-    else:
-        students = User.objects.filter(id=request.user.id)
-
-    serializer = UserSerializer(students, many=True)
-    return Response(serializer.data)
-
 
 # MANAGEMENT ENDPOINTS FOR USER APPROVAL SYSTEM
 
