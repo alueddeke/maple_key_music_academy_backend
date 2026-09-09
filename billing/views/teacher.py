@@ -28,41 +28,29 @@ User = get_user_model()
 
 # INVOICE MANAGEMENT
 
-@api_view(['GET', 'POST'])
+@api_view(['GET'])
 @teacher_or_management_required
 def teacher_invoice_list(request):
-    """Teacher payment invoices"""
-    if request.method == 'GET':
-        if request.user.user_type == 'management':
-            invoices = Invoice.objects.filter(
-                invoice_type='teacher_payment',
-                school=request.user.school
-            ).order_by('-created_at')
-        else:  # teacher
-            invoices = Invoice.objects.filter(
-                invoice_type='teacher_payment',
-                teacher=request.user,
-                school=request.user.school
-            ).order_by('-created_at')
+    """
+    Teacher payment invoices (read-only). Invoices are created only through
+    submit_lessons_for_invoice; the former POST branch could not create a row
+    once MAP-178 made teacher/payment_balance read-only (P0 audit 2026-09-09).
+    """
+    if request.user.user_type == 'management':
+        invoices = Invoice.objects.filter(
+            invoice_type='teacher_payment',
+            school=request.user.school
+        ).order_by('-created_at')
+    else:  # teacher
+        invoices = Invoice.objects.filter(
+            invoice_type='teacher_payment',
+            teacher=request.user,
+            school=request.user.school
+        ).order_by('-created_at')
 
-        # Use DetailedInvoiceSerializer to include lesson details
-        serializer = DetailedInvoiceSerializer(invoices, many=True)
-        return Response(serializer.data)
-
-    elif request.method == 'POST':
-        # Create teacher payment invoice
-        data = request.data.copy()
-        data['invoice_type'] = 'teacher_payment'
-
-        if request.user.user_type == 'teacher':
-            data['teacher'] = request.user.id
-            data['created_by'] = request.user.id
-
-        serializer = InvoiceSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    # Use DetailedInvoiceSerializer to include lesson details
+    serializer = DetailedInvoiceSerializer(invoices, many=True)
+    return Response(serializer.data)
 
 @api_view(['GET'])
 @teacher_required

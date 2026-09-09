@@ -380,6 +380,32 @@ class TestSubmitLessonsIgnoresBodyStatus:
         assert response.data['invoice']['status'] == 'pending'
 
 
+@pytest.mark.django_db
+class TestTeacherInvoiceListIsReadOnly:
+    """P0 audit 2026-09-09: invoices/teacher/ lists only; invoices are created
+    through submit-lessons/. The former POST branch could not create a row once
+    MAP-178 made teacher/payment_balance read-only (IntegrityError -> 500)."""
+
+    @pytest.mark.parametrize('client_fixture', ['authenticated_teacher_client', 'authenticated_management_client'])
+    def test_post_is_not_allowed_and_creates_nothing(self, request, client_fixture, school_settings):
+        client = request.getfixturevalue(client_fixture)
+        before = Invoice.objects.count()
+
+        response = client.post(
+            reverse('teacher_invoice_list'),
+            {'invoice_type': 'teacher_payment', 'due_date': '2026-09-30T00:00:00Z', 'lessons': []},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+        assert Invoice.objects.count() == before
+
+    def test_get_still_lists_for_teacher(self, authenticated_teacher_client, school_settings):
+        response = authenticated_teacher_client.get(reverse('teacher_invoice_list'))
+        assert response.status_code == status.HTTP_200_OK
+        assert isinstance(response.data, list)
+
+
 # ---------------------------------------------------------------------------
 # MAP-179: teacher one-off lesson creation — strict seven-field input,
 # server-derived rates, assigned same-school students only.
