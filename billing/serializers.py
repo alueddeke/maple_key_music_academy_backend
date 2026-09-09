@@ -143,7 +143,20 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Invoice
-        fields = '__all__'
+        fields = [
+            'id', 'school', 'school_name', 'invoice_number', 'invoice_type', 'lessons',
+            'teacher', 'teacher_name', 'student', 'student_name',
+            'total_amount', 'payment_balance', 'status', 'due_date',
+            'created_at', 'created_by', 'created_by_name',
+            'approved_by', 'approved_by_name', 'approved_at',
+            'rejected_by', 'rejected_at', 'rejection_reason',
+            'notes', 'last_edited_by', 'last_edited_at',
+            'date_paid', 'reference_number',
+        ]
+        # MAP-178: invoice status and payment fields are written only by
+        # management_patch_invoice and the webhook processor — never by a
+        # serializer fed from a request body.
+        read_only_fields = ['status', 'date_paid', 'reference_number', 'teacher', 'total_amount', 'payment_balance']
 
 class RecurringScheduleSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
