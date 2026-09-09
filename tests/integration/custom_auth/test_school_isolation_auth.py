@@ -107,7 +107,7 @@ class TestAuthSchoolIsolation:
         If the filter is removed, the response would be 200 and this test fails.
         """
         api_client.force_authenticate(user=management_user)
-        url = reverse('teacher_detail', kwargs={'pk': school2_teacher.id})
+        url = reverse('management_teacher_detail', kwargs={'pk': school2_teacher.id})
         response = api_client.get(url)
 
         assert response.status_code == status.HTTP_404_NOT_FOUND

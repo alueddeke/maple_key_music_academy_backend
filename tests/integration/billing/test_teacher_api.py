@@ -13,6 +13,10 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.contrib.auth import get_user_model
+from django.urls import NoReverseMatch
+from decimal import Decimal
+
+from billing.models import Invoice, Lesson
 
 User = get_user_model()
 
@@ -216,26 +220,160 @@ class TestTeacherAssignedStudentsAPI:
         assert 'id' in student_data
 
 
+
 @pytest.mark.django_db
-class TestTeacherListAuthentication:
-    """SEC-03: teacher_list and teacher_detail require authentication."""
+class TestManagementTeacherRoutesAuthentication:
+    """
+    SEC-03 (MAP-178): the management teacher routes are the only teacher
+    directory. Unauthenticated -> 401; non-management roles -> 403.
+    """
 
     def test_unauthenticated_teacher_list_returns_401(self, api_client):
-        """
-        SEC-03: Unauthenticated GET to /api/billing/teachers/ must return 401, not teacher PII.
-        """
-        url = reverse('teacher_list')
+        """Unauthenticated GET to management/teachers/ must return 401, not teacher PII."""
+        url = reverse('management_teacher_list')
         response = api_client.get(url)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_unauthenticated_teacher_detail_returns_401(self, api_client, school):
-        """
-        SEC-03: Unauthenticated GET to /api/billing/teachers/<pk>/ must return 401.
-        """
-        teacher = User.objects.create_user(
-            email="pub_teacher@test.com", password="test123",
-            user_type="teacher", school=school, is_approved=True
-        )
-        url = reverse('teacher_detail', kwargs={'pk': teacher.id})
+    def test_unauthenticated_teacher_detail_returns_401(self, api_client, teacher_user):
+        """Unauthenticated GET to management/teachers/<pk>/ must return 401."""
+        url = reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
         response = api_client.get(url)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    @pytest.mark.parametrize('role_fixture', ['teacher_user', 'student_user'])
+    def test_non_management_teacher_list_returns_403(self, request, api_client, role_fixture):
+        """A teacher or student session gets 403 from the management teacher list."""
+        api_client.force_authenticate(user=request.getfixturevalue(role_fixture))
+        response = api_client.get(reverse('management_teacher_list'))
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert 'error' in response.data
+
+    @pytest.mark.parametrize('role_fixture', ['teacher_user', 'student_user'])
+    def test_non_management_teacher_detail_returns_403(
+        self, request, api_client, teacher_user, role_fixture
+    ):
+        """A teacher or student session gets 403 from the management teacher detail."""
+        api_client.force_authenticate(user=request.getfixturevalue(role_fixture))
+        url = reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        response = api_client.get(url)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert 'error' in response.data
+
+
+# MAP-178: the seven legacy generic routes no longer exist.
+LEGACY_ROUTE_NAMES = [
+    'teacher_list', 'student_list', 'lesson_list',
+    'teacher_detail', 'student_detail', 'lesson_detail', 'invoice_detail',
+]
+
+LEGACY_ROUTE_PATHS = [
+    'teachers', 'students', 'lessons',
+    'teacher_pk', 'student_pk', 'lesson_pk', 'invoice_pk',
+]
+
+ROLE_FIXTURES = ['anonymous', 'student_user', 'teacher_user', 'management_user']
+
+
+@pytest.fixture
+def legacy_route_paths(school, teacher_user, student_user):
+    """
+    Concrete legacy paths pointing at rows that DO exist, so a 404 can only
+    mean "route does not exist", never "row not found".
+    """
+    lesson = Lesson.objects.filter(teacher=teacher_user, student=student_user).first()
+    invoice = Invoice.objects.create(
+        invoice_type='teacher_payment',
+        teacher=teacher_user,
+        school=school,
+        status='pending',
+        payment_balance=Decimal('100.00'),
+        total_amount=Decimal('100.00'),
+    )
+    return {
+        'teachers': '/api/billing/teachers/',
+        'students': '/api/billing/students/',
+        'lessons': '/api/billing/lessons/',
+        'teacher_pk': f'/api/billing/teachers/{teacher_user.id}/',
+        'student_pk': f'/api/billing/students/{student_user.id}/',
+        'lesson_pk': f'/api/billing/lessons/{lesson.id}/',
+        'invoice_pk': f'/api/billing/invoices/{invoice.id}/',
+    }
+
+
+@pytest.mark.django_db
+class TestLegacyGenericRoutesRemoved:
+    """MAP-178 acceptance: each of the seven routes -> 404 for every role."""
+
+    @pytest.mark.parametrize('route_name', LEGACY_ROUTE_NAMES)
+    def test_legacy_route_name_is_not_registered(self, route_name):
+        """The URL name is gone from billing/urls.py."""
+        with pytest.raises(NoReverseMatch):
+            reverse(route_name, kwargs={'pk': 1} if route_name.endswith('_detail') else None)
+
+    @pytest.mark.parametrize('role_fixture', ROLE_FIXTURES)
+    @pytest.mark.parametrize('route_key', LEGACY_ROUTE_PATHS)
+    def test_legacy_route_returns_404_for_every_role(
+        self, request, api_client, legacy_route_paths, route_key, role_fixture
+    ):
+        if role_fixture != 'anonymous':
+            api_client.force_authenticate(user=request.getfixturevalue(role_fixture))
+        response = api_client.get(legacy_route_paths[route_key])
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_teacher_put_invoice_detail_status_paid_returns_404(
+        self, api_client, teacher_user, legacy_route_paths
+    ):
+        """
+        MAP-178 acceptance: a teacher can no longer mark their own invoice paid
+        through invoices/<pk>/. The route is gone (404) and the row is untouched.
+        """
+        api_client.force_authenticate(user=teacher_user)
+        invoice_id = int(legacy_route_paths['invoice_pk'].rstrip('/').rsplit('/', 1)[1])
+
+        response = api_client.put(
+            legacy_route_paths['invoice_pk'],
+            {'status': 'paid', 'date_paid': '2026-09-01', 'reference_number': 'SELF-PAID'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        invoice = Invoice.objects.get(pk=invoice_id)
+        assert invoice.status == 'pending'
+        assert invoice.date_paid is None
+        assert invoice.reference_number is None
+
+
+@pytest.mark.django_db
+class TestSubmitLessonsIgnoresBodyStatus:
+    """MAP-178 acceptance: invoice status is server-set; a body status is never read."""
+
+    def test_submit_lessons_with_status_paid_creates_pending_invoice(
+        self, api_client, teacher_user, school_settings
+    ):
+        api_client.force_authenticate(user=teacher_user)
+
+        body = {
+            'month': 'September 2026',
+            'status': 'paid',
+            'date_paid': '2026-09-01',
+            'reference_number': 'SELF-PAID',
+            'lessons': [
+                {
+                    'student_name': 'Brand New Student',
+                    'scheduled_date': '2026-09-01T14:00:00Z',
+                    'duration': 1.0,
+                    'lesson_type': 'online',
+                }
+            ],
+            'due_date': '2026-09-30T00:00:00Z',
+        }
+
+        response = api_client.post(reverse('submit_lessons_for_invoice'), body, format='json')
+
+        assert response.status_code == status.HTTP_201_CREATED
+        invoice = Invoice.objects.get(pk=response.data['invoice']['id'])
+        assert invoice.teacher_id == teacher_user.id
+        assert invoice.status == 'pending'
+        assert invoice.date_paid is None
+        assert invoice.reference_number is None
+        assert response.data['invoice']['status'] == 'pending'
