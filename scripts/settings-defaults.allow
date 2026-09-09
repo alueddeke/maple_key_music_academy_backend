@@ -1,0 +1,18 @@
+# Settings allowed to carry a default in maple_key_backend/settings.py (MAP-181).
+# One name per line. Anything not listed here must be required from the
+# environment. PLATFORM_ADMIN_EMAILS is deliberately absent (readiness audit R1).
+EMAIL_BACKEND
+EMAIL_HOST
+EMAIL_PORT
+EMAIL_USE_TLS
+EMAIL_HOST_USER
+EMAIL_HOST_PASSWORD
+DEFAULT_FROM_EMAIL
+TEST_EMAIL_RECIPIENT
+RESEND_API_KEY
+HELCIM_API_TOKEN
+HELCIM_TERMINAL_ID
+HELCIM_WEBHOOK_SECRET
+HELCIM_SUBDOMAIN
+ANALYTICS_EXCLUDE_TEST_DATA
+TEST_ACCOUNT_EMAIL_DOMAINS
