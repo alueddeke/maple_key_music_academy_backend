@@ -32,3 +32,8 @@ class BillingConfig(AppConfig):
             raise ImproperlyConfigured(
                 "HELCIM_SUBDOMAIN environment variable is required but not set."
             )
+
+        # MAP-181: a production process must never run with DEBUG on. No-op when
+        # MAPLEKEY_ENV is unset (image build, CI, dev).
+        if os.environ.get('MAPLEKEY_ENV') == 'prod' and os.environ.get('DEBUG', '').lower() == 'true':
+            raise ImproperlyConfigured('DEBUG must be False when MAPLEKEY_ENV=prod')
