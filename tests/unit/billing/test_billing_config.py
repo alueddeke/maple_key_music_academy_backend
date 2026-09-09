@@ -92,3 +92,36 @@ class TestBillingConfigReady:
             config = get_config()
             # Should not raise
             config.ready()
+
+
+class TestBillingConfigDebugInProd:
+    """Tests for the MAP-181 guard: DEBUG=True refuses to boot when MAPLEKEY_ENV=prod."""
+
+    HELCIM_ENV = {
+        'HELCIM_API_TOKEN': 'test-token',
+        'HELCIM_TERMINAL_ID': 'test-terminal',
+        'HELCIM_WEBHOOK_SECRET': 'dGVzdC1zZWNyZXQ=',
+        'HELCIM_SUBDOMAIN': 'testschool',
+    }
+
+    def test_ready_raises_when_prod_and_debug_true(self):
+        env = {**self.HELCIM_ENV, 'MAPLEKEY_ENV': 'prod', 'DEBUG': 'True'}
+        with mock.patch.dict(os.environ, env, clear=False):
+            config = get_config()
+            with pytest.raises(ImproperlyConfigured) as exc_info:
+                config.ready()
+        assert 'DEBUG' in str(exc_info.value)
+
+    def test_ready_passes_when_prod_and_debug_false(self):
+        env = {**self.HELCIM_ENV, 'MAPLEKEY_ENV': 'prod', 'DEBUG': 'False'}
+        with mock.patch.dict(os.environ, env, clear=False):
+            config = get_config()
+            config.ready()
+
+    def test_ready_passes_when_maplekey_env_unset_and_debug_true(self):
+        """The guard is a no-op outside prod (protects CI, dev, image build)."""
+        env = {**self.HELCIM_ENV, 'DEBUG': 'True'}
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop('MAPLEKEY_ENV', None)
+            config = get_config()
+            config.ready()
