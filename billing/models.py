@@ -1249,6 +1249,16 @@ class CreditTransaction(models.Model):
         help_text="Always positive. Direction determined by type field.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # MAP-180: the webhook event that posted this credit. Unique per event so the
+    # database, not the caller, guarantees one credit per helcim_transaction_id.
+    source_event = models.ForeignKey(
+        'HelcimWebhookEvent',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Webhook event that posted this credit; at most one credit per event.",
+    )
 
     history = HistoricalRecords()
 
@@ -1260,7 +1270,12 @@ class CreditTransaction(models.Model):
             models.CheckConstraint(
                 check=Q(amount__gt=0),
                 name='credit_transaction_amount_positive',
-            )
+            ),
+            models.UniqueConstraint(
+                fields=['source_event'],
+                condition=Q(source_event__isnull=False),
+                name='one_credit_per_webhook_event',
+            ),
         ]
 
     def __str__(self):
