@@ -28,6 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check no config fallbacks
+        run: bash scripts/check-no-fallbacks.sh
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
