@@ -380,6 +380,32 @@ class TestSubmitLessonsIgnoresBodyStatus:
         assert response.data['invoice']['status'] == 'pending'
 
 
+@pytest.mark.django_db
+class TestTeacherInvoiceListIsReadOnly:
+    """P0 audit 2026-09-09: invoices/teacher/ lists only; invoices are created
+    through submit-lessons/. The former POST branch could not create a row once
+    MAP-178 made teacher/payment_balance read-only (IntegrityError -> 500)."""
+
+    @pytest.mark.parametrize('client_fixture', ['authenticated_teacher_client', 'authenticated_management_client'])
+    def test_post_is_not_allowed_and_creates_nothing(self, request, client_fixture, school_settings):
+        client = request.getfixturevalue(client_fixture)
+        before = Invoice.objects.count()
+
+        response = client.post(
+            reverse('teacher_invoice_list'),
+            {'invoice_type': 'teacher_payment', 'due_date': '2026-09-30T00:00:00Z', 'lessons': []},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+        assert Invoice.objects.count() == before
+
+    def test_get_still_lists_for_teacher(self, authenticated_teacher_client, school_settings):
+        response = authenticated_teacher_client.get(reverse('teacher_invoice_list'))
+        assert response.status_code == status.HTTP_200_OK
+        assert isinstance(response.data, list)
+
+
 # ---------------------------------------------------------------------------
 # MAP-179: teacher one-off lesson creation — strict seven-field input,
 # server-derived rates, assigned same-school students only.
@@ -514,6 +540,21 @@ class TestTeacherBatchAddLesson:
 
         assert response.status_code == status.HTTP_201_CREATED, response.data
         assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'trial'
+
+    def test_duration_omitted_is_rejected_and_nothing_written(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        """P0 audit 2026-09-09: duration has a model default, but the teacher
+        payload must state it — before this a missing duration wrote the row
+        and then 500'd while rendering the response."""
+        payload = _live_payload(assigned_student)
+        del payload['duration']
+
+        response = self._post(authenticated_teacher_client, draft_batch, payload)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'duration' in response.data
+        assert not BatchLessonItem.objects.exists()
 
     def test_fuzz_every_model_field_only_the_seven_are_accepted(
         self, authenticated_teacher_client, draft_batch, assigned_student, school_settings

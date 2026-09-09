@@ -243,6 +243,8 @@ class TeacherBatchLessonItemSerializer(StrictFieldsMixin, serializers.ModelSeria
             'student', 'scheduled_date', 'start_time', 'duration',
             'lesson_type', 'status', 'teacher_notes',
         ]
+        # duration has a model default; the teacher payload must state it.
+        extra_kwargs = {'duration': {'required': True}}
 
     def validate_duration(self, value):
         if value <= 0:
@@ -424,7 +426,8 @@ class DetailedUserSerializer(serializers.ModelSerializer):
             'billable_contacts',
             'date_joined', 'last_login'
         ]
-        read_only_fields = ['date_joined', 'last_login']
+        # Read-only serializer today; privileged columns locked anyway (MAP-177 rule).
+        read_only_fields = ['date_joined', 'last_login', 'user_type', 'is_approved', 'is_active']
 
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
