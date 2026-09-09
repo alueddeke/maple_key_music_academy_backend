@@ -426,7 +426,8 @@ class DetailedUserSerializer(serializers.ModelSerializer):
             'billable_contacts',
             'date_joined', 'last_login'
         ]
-        read_only_fields = ['date_joined', 'last_login']
+        # Read-only serializer today; privileged columns locked anyway (MAP-177 rule).
+        read_only_fields = ['date_joined', 'last_login', 'user_type', 'is_approved', 'is_active']
 
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
