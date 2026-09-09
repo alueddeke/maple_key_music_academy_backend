@@ -341,8 +341,8 @@ class Lesson(models.Model):
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
-    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, help_text="Rate paid to teacher for this lesson")
-    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate paid to teacher for this lesson")
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)
@@ -921,9 +921,9 @@ class BatchLessonItem(models.Model):
     duration = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
     lesson_type = models.CharField(max_length=20, choices=Lesson.LESSON_TYPES)
 
-    # Rates (locked from recurring schedule or entered manually)
-    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2)
-    student_rate = models.DecimalField(max_digits=6, decimal_places=2)
+    # Rates (locked from recurring schedule or derived by the server — MAP-179)
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
 
     # status (teacher marks this)
     status = models.CharField(max_length=20, choices=Lesson.LESSON_STATUS, default='completed')
