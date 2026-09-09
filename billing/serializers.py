@@ -1,5 +1,8 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.core.validators import MinValueValidator
 from django.db.models import Count, Sum, Q
 from .models import (
     Lesson, Invoice, ApprovedEmail, UserRegistrationRequest,
@@ -201,6 +204,60 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
             'created_at'
         ]
         read_only_fields = ['teacher_payment', 'student_charge', 'created_at']
+        # MAP-179: rates are never negative (management paths keep the field list).
+        extra_kwargs = {
+            'teacher_rate': {'validators': [MinValueValidator(Decimal('0'))]},
+            'student_rate': {'validators': [MinValueValidator(Decimal('0'))]},
+        }
+
+
+class StrictFieldsMixin:
+    """
+    MAP-179 (D1): reject any input key that is not declared on the serializer.
+    Wire body: {"error": ["unknown_fields"], "fields": [...]}. The list is
+    built here on purpose: an error raised from to_internal_value() reaches
+    serializer.errors as-is (Serializer.is_valid stores exc.detail; only
+    validate()/validator errors pass through as_serializer_error's list-wrap).
+    Mix in before ModelSerializer.
+    """
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'keys'):
+            extra = set(data.keys()) - set(self.fields.keys())
+            if extra:
+                raise serializers.ValidationError({'error': ['unknown_fields'], 'fields': sorted(extra)})
+        return super().to_internal_value(data)
+
+
+class TeacherBatchLessonItemSerializer(StrictFieldsMixin, serializers.ModelSerializer):
+    """
+    Teacher one-off lesson creation (batch_add_lesson). Exactly seven input
+    fields; rates, is_one_off, admin_notes and the trial override are set by
+    the view, never from the body. Management paths keep BatchLessonItemSerializer.
+    """
+    status = serializers.ChoiceField(choices=['completed', 'confirmed', 'cancelled'])
+
+    class Meta:
+        model = BatchLessonItem
+        fields = [
+            'student', 'scheduled_date', 'start_time', 'duration',
+            'lesson_type', 'status', 'teacher_notes',
+        ]
+
+    def validate_duration(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Duration must be greater than 0.")
+        return value
+
+    def validate_student(self, student):
+        teacher = self.context['request'].user
+        if student.user_type != 'student':
+            raise serializers.ValidationError("Selected user is not a student.")
+        if student.school_id != teacher.school_id:
+            raise serializers.ValidationError("Student belongs to another school.")
+        if not student.assigned_teachers.filter(pk=teacher.pk).exists():
+            raise serializers.ValidationError("Student is not assigned to you.")
+        return student
 
 class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
