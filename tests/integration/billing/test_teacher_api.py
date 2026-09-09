@@ -16,7 +16,8 @@ from django.contrib.auth import get_user_model
 from django.urls import NoReverseMatch
 from decimal import Decimal
 
-from billing.models import Invoice, Lesson
+from billing.models import Invoice, Lesson, BatchLessonItem, MonthlyInvoiceBatch
+from faker import Faker
 
 User = get_user_model()
 
@@ -377,3 +378,160 @@ class TestSubmitLessonsIgnoresBodyStatus:
         assert invoice.date_paid is None
         assert invoice.reference_number is None
         assert response.data['invoice']['status'] == 'pending'
+
+
+# ---------------------------------------------------------------------------
+# MAP-179: teacher one-off lesson creation — strict seven-field input,
+# server-derived rates, assigned same-school students only.
+# ---------------------------------------------------------------------------
+
+SEVEN_FIELDS = {'student', 'scheduled_date', 'start_time', 'duration', 'lesson_type', 'status', 'teacher_notes'}
+
+
+@pytest.fixture
+def assigned_student(teacher_user, student_user):
+    student_user.assigned_teachers.add(teacher_user)
+    return student_user
+
+
+@pytest.fixture
+def draft_batch(teacher_user, school):
+    return MonthlyInvoiceBatch.objects.create(teacher=teacher_user, school=school, month=9, year=2026, status='draft')
+
+
+def _live_payload(student, **overrides):
+    """Exactly what src/queries/useBatchLessons.ts::useAddLessonItem sends."""
+    return {
+        'student': student.id,
+        'scheduled_date': '2026-09-03',
+        'start_time': '14:00:00',
+        'duration': 1.0,
+        'lesson_type': 'in_person',
+        'status': 'completed',
+        'teacher_notes': 'Scales and arpeggios',
+    } | overrides
+
+
+@pytest.mark.django_db
+class TestTeacherBatchAddLesson:
+
+    def _post(self, client, batch, payload):
+        return client.post(reverse('batch_add_lesson', kwargs={'batch_id': batch.id}), payload, format='json')
+
+    @pytest.mark.parametrize('extra', [
+        {'teacher_rate': 9999},
+        {'student_rate': -50},
+        {'admin_notes': 'x'},
+        {'is_one_off': False},
+    ])
+    def test_unknown_key_is_rejected_and_nothing_written(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings, extra
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, **extra))
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {'error': ['unknown_fields'], 'fields': sorted(extra)}
+        assert not BatchLessonItem.objects.exists()
+
+    @pytest.mark.parametrize('bad_status', ['waived', 'trial', 'requested', 'forfeited'])
+    def test_status_outside_teacher_choices_is_rejected(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings, bad_status
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, status=bad_status))
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'status' in response.data
+        assert not BatchLessonItem.objects.exists()
+
+    def test_student_from_another_school_is_rejected(
+        self, authenticated_teacher_client, draft_batch, teacher_user, second_school, school_settings
+    ):
+        other = User.objects.create_user(
+            email='other_school_student@test.com', password='x', user_type='student',
+            first_name='O', last_name='S', school=second_school, is_approved=True,
+        )
+        other.assigned_teachers.add(teacher_user)
+
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(other))
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'student' in response.data
+        assert not BatchLessonItem.objects.exists()
+
+    def test_unassigned_same_school_student_is_rejected(
+        self, authenticated_teacher_client, draft_batch, student_user, school_settings
+    ):
+        assert not student_user.assigned_teachers.exists()
+
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(student_user))
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'student' in response.data
+        assert not BatchLessonItem.objects.exists()
+
+    def test_live_payload_in_person_uses_fixture_rates(
+        self, authenticated_teacher_client, draft_batch, assigned_student, teacher_user, school_settings
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student))
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        item = BatchLessonItem.objects.get(pk=response.data['id'])
+        assert item.teacher_rate == teacher_user.hourly_rate
+        assert item.student_rate == school_settings.inperson_student_rate
+        assert item.is_one_off is True
+        assert item.status == 'completed'   # student_user already has a completed lesson
+        assert item.batch_id == draft_batch.id
+        assert item.teacher_notes == 'Scales and arpeggios'
+
+    def test_live_payload_online_uses_school_online_rates(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, lesson_type='online'))
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        item = BatchLessonItem.objects.get(pk=response.data['id'])
+        assert item.teacher_rate == school_settings.online_teacher_rate
+        assert item.student_rate == school_settings.online_student_rate
+
+    def test_cancelled_status_is_stored(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, status='cancelled'))
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'cancelled'
+
+    def test_first_lesson_for_new_student_becomes_trial(
+        self, authenticated_teacher_client, draft_batch, teacher_user, school, school_settings
+    ):
+        newcomer = User.objects.create_user(
+            email='newcomer@test.com', password='x', user_type='student',
+            first_name='New', last_name='Comer', school=school, is_approved=True,
+        )
+        newcomer.assigned_teachers.add(teacher_user)
+
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(newcomer, status='completed'))
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'trial'
+
+    def test_fuzz_every_model_field_only_the_seven_are_accepted(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        fake = Faker()
+        Faker.seed(179)
+        all_fields = {f.name for f in BatchLessonItem._meta.get_fields() if f.concrete}
+        assert SEVEN_FIELDS < all_fields
+        payload = _live_payload(assigned_student)
+        for name in all_fields - SEVEN_FIELDS:
+            payload[name] = fake.pystr(max_chars=12)
+
+        response = self._post(authenticated_teacher_client, draft_batch, payload)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {'error': ['unknown_fields'], 'fields': sorted(all_fields - SEVEN_FIELDS)}
+        assert not BatchLessonItem.objects.exists()
+
+        accepted = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student))
+        assert accepted.status_code == status.HTTP_201_CREATED
+        assert BatchLessonItem.objects.count() == 1
