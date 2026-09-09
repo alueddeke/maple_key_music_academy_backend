@@ -209,3 +209,33 @@ class TestInvitationTokenSetup:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         # No duplicate created — still exactly one user with this email
         assert User.objects.filter(email='collide@example.com').count() == 1
+
+
+@pytest.mark.django_db
+class TestInvitationCreatesSchoolStaffNotDjangoStaff:
+    """MAP-177: a management account created through the invitation path is
+    school staff (is_approved) but never Django staff/superuser."""
+
+    def test_management_invitation_setup_yields_no_django_privileges(self, api_client, management_user):
+        approved_email = ApprovedEmail.objects.create(
+            email='newmanager@example.com', approved_by=management_user, user_type='management'
+        )
+        inv = InvitationToken.objects.create(
+            email='newmanager@example.com',
+            token=secrets.token_urlsafe(32),
+            user_type='management',
+            approved_email=approved_email,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+
+        url = reverse('setup_account_with_invitation', kwargs={'token': inv.token})
+        response = api_client.post(url, {
+            'first_name': 'New', 'last_name': 'Manager', 'password': 'StrongPass!1',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_201_CREATED
+        created = User.objects.get(email='newmanager@example.com')
+        assert created.user_type == 'management'
+        assert created.is_approved is True
+        assert created.is_staff is False
+        assert created.is_superuser is False

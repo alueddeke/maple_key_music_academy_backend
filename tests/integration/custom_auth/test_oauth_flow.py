@@ -13,7 +13,10 @@ from unittest.mock import patch, MagicMock
 from django.urls import reverse
 from rest_framework import status
 from django.contrib.auth import get_user_model
-from billing.models import ApprovedEmail, UserRegistrationRequest
+from billing.models import ApprovedEmail, UserRegistrationRequest, InvitationToken
+import secrets
+from datetime import timedelta
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -245,3 +248,59 @@ class TestGoogleOAuthFlow:
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert response.data.get('error') == 'Failed to retrieve user info from Google'
+
+
+@pytest.mark.django_db
+class TestOAuthManagementCreationHasNoDjangoPrivileges:
+    """MAP-177: every OAuth branch that creates a management user yields
+    is_approved=True, is_staff=False, is_superuser=False."""
+
+    def _exchange(self, api_client, email, extra=None):
+        helper = TestGoogleOAuthFlow()
+        mock_token, mock_userinfo = helper._mock_google_responses(email)
+        body = {'code': 'auth_code_abc', 'code_verifier': 'verifier_xyz_long_enough'} | (extra or {})
+        with patch('custom_auth.views.oauth.requests.post', return_value=mock_token), \
+             patch('custom_auth.views.oauth.requests.get', return_value=mock_userinfo):
+            return api_client.post(reverse('google_exchange'), body, format='json')
+
+    def _assert_school_staff_only(self, email):
+        user = User.objects.get(email=email)
+        assert user.user_type == 'management'
+        assert user.is_approved is True
+        assert user.is_staff is False
+        assert user.is_superuser is False
+
+    def test_invitation_fast_path(self, api_client, management_user):
+        approved = ApprovedEmail.objects.create(
+            email='inv.manager@example.com', approved_by=management_user, user_type='management'
+        )
+        inv = InvitationToken.objects.create(
+            email='inv.manager@example.com', token=secrets.token_urlsafe(32), user_type='management',
+            approved_email=approved, expires_at=timezone.now() + timedelta(days=7),
+        )
+
+        response = self._exchange(api_client, 'inv.manager@example.com', {'invitation_token': inv.token})
+
+        assert response.status_code == status.HTTP_200_OK
+        self._assert_school_staff_only('inv.manager@example.com')
+
+    def test_approved_email_path(self, api_client, management_user):
+        ApprovedEmail.objects.create(
+            email='pre.manager@example.com', approved_by=management_user, user_type='management'
+        )
+
+        response = self._exchange(api_client, 'pre.manager@example.com')
+
+        assert response.status_code == status.HTTP_200_OK
+        self._assert_school_staff_only('pre.manager@example.com')
+
+    def test_approved_registration_request_path(self, api_client, management_user):
+        UserRegistrationRequest.objects.create(
+            email='reg.manager@example.com', first_name='Reg', last_name='Manager',
+            user_type='management', status='approved', reviewed_by=management_user,
+        )
+
+        response = self._exchange(api_client, 'reg.manager@example.com')
+
+        assert response.status_code == status.HTTP_200_OK
+        self._assert_school_staff_only('reg.manager@example.com')
