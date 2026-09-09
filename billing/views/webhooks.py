@@ -2,7 +2,8 @@
 billing/views/webhooks.py — Helcim payment webhook receiver.
 
 HELM-03: POST /api/billing/payment-callback/ (no 'helcim' in path per D-10).
-HELM-04: Idempotency via get_or_create on helcim_transaction_id.
+HELM-04: one HelcimWebhookEvent row per helcim_transaction_id via get_or_create;
+credit idempotency is enforced in process_webhook_event (MAP-180).
 
 Security constraints enforced:
   - HMAC-SHA256 over "{webhook-id}.{webhook-timestamp}.{body}" with base64-decoded secret.
