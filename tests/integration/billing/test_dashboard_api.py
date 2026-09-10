@@ -737,3 +737,57 @@ def test_all_endpoints_require_management(school, teacher_user):
             f"Expected 401 or 403 from anonymous {method.upper()} {url}, "
             f"got {response.status_code}"
         )
+
+
+# ---------------------------------------------------------------------------
+# MAP-183 — status-only PATCH never touches money; legacy invoice routes gone
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_patch_mark_paid_keeps_total_and_writes_history(
+    management_client, school, teacher_user, school_settings
+):
+    """
+    Mark-as-paid on a payroll invoice (empty lessons M2M) leaves total_amount and
+    payment_balance untouched and records a history row for the status change.
+    """
+    total = school_settings.online_teacher_rate * 3
+    invoice = _make_teacher_invoice(school, teacher_user, total_amount=total, status='pending')
+    assert invoice.lessons.count() == 0
+    history_before = invoice.history.count()
+
+    response = management_client.patch(
+        f'/api/billing/management/invoices/{invoice.id}/',
+        data={'status': 'paid', 'date_paid': '2026-06-30', 'reference_number': 'ET-42'},
+        format='json',
+    )
+
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.data}"
+    invoice.refresh_from_db()
+    assert invoice.status == 'paid'
+    assert invoice.total_amount == total, f"total_amount changed: {invoice.total_amount} != {total}"
+    assert invoice.payment_balance == total, f"payment_balance changed: {invoice.payment_balance} != {total}"
+    assert invoice.history.count() == history_before + 1
+    latest = invoice.history.order_by('-history_date').first()
+    assert latest.status == 'paid'
+    assert latest.date_paid == date(2026, 6, 30)
+    assert latest.reference_number == 'ET-42'
+    assert latest.total_amount == total
+
+
+@pytest.mark.django_db
+def test_legacy_invoice_management_routes_are_gone(management_client, school, teacher_user):
+    """The five orphaned /management/invoices/ routes no longer resolve (404 for management)."""
+    invoice = _make_teacher_invoice(school, teacher_user)
+    gone = [
+        ('get', '/api/billing/management/invoices/'),
+        ('put', f'/api/billing/management/invoices/{invoice.id}/update/'),
+        ('put', f'/api/billing/management/invoices/{invoice.id}/status/'),
+        ('post', f'/api/billing/management/invoices/{invoice.id}/recalculate/'),
+        ('post', f'/api/billing/management/invoices/{invoice.id}/reject/'),
+    ]
+    for method, url in gone:
+        response = getattr(management_client, method)(url, data={}, format='json')
+        assert response.status_code == 404, (
+            f"Expected 404 from {method.upper()} {url}, got {response.status_code}"
+        )
