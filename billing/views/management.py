@@ -1330,15 +1330,31 @@ def management_generate_teacher_invoice(request, batch_id):
          stands. Dedup is keyed on the batch item, so re-running never writes a second
          row for the same item.
 
-    Returns 400 if batch not approved or Invoice already generated.
+    Returns 400 if batch not approved; 409 if the Invoice is already generated
+    (the batch row is locked for the whole generation, so a concurrent second
+    call waits and then sees the link — MAP-183).
     Returns 404 if batch not in management's school (T-22-03 school isolation).
     """
+    from django.db import IntegrityError
     from django.db import transaction as db_transaction
     from ..models import CreditTransaction, StudentCreditAccount
     from ..services import ledger
 
     try:
-        batch = MonthlyInvoiceBatch.objects.get(
+        with db_transaction.atomic():
+            return _generate_teacher_invoice_locked(request, batch_id, ledger,
+                                                    CreditTransaction, StudentCreditAccount)
+    except IntegrityError:
+        return Response(
+            {'error': 'Teacher Invoice already generated for this batch'},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+
+def _generate_teacher_invoice_locked(request, batch_id, ledger, CreditTransaction, StudentCreditAccount):
+    """Body of management_generate_teacher_invoice; runs inside one atomic block."""
+    try:
+        batch = MonthlyInvoiceBatch.objects.select_for_update().get(
             id=batch_id,
             school=request.user.school,
         )
@@ -1353,76 +1369,47 @@ def management_generate_teacher_invoice(request, batch_id):
     if batch.invoice_id is not None:
         return Response(
             {'error': 'Teacher Invoice already generated for this batch'},
-            status=status.HTTP_400_BAD_REQUEST,
+            status=status.HTTP_409_CONFLICT,
         )
 
-    with db_transaction.atomic():
-        # Teacher pay = Σ calculate_teacher_payment() over every item, so the invoice
-        # total can never drift from the canonical per-lesson rule (pays completed,
-        # confirmed, trial, forfeited; $0 for waived and cancelled). Summing the model
-        # method instead of a hardcoded status filter is what fixes the historical
-        # bug where an all-'confirmed' batch generated a $0 teacher invoice.
-        all_items = list(batch.lesson_items.all())
-        total_amount = sum(
-            (item.calculate_teacher_payment() for item in all_items),
-            Decimal('0.00'),
-        )
+    # Teacher pay = Σ calculate_teacher_payment() over every item, so the invoice
+    # total can never drift from the canonical per-lesson rule (pays completed,
+    # confirmed, trial, forfeited; $0 for waived and cancelled). Summing the model
+    # method instead of a hardcoded status filter is what fixes the historical
+    # bug where an all-'confirmed' batch generated a $0 teacher invoice.
+    all_items = list(batch.lesson_items.all())
+    total_amount = sum(
+        (item.calculate_teacher_payment() for item in all_items),
+        Decimal('0.00'),
+    )
 
-        # Create Invoice with total_amount set at creation — do NOT call invoice.save()
-        # afterward (Pitfall 7: Invoice.save() recalculates from M2M lessons which is empty).
-        invoice = Invoice.objects.create(
-            invoice_type='teacher_payment',
-            teacher=batch.teacher,
-            school=batch.school,
-            status='pending',
-            created_by=request.user,
-            payment_balance=total_amount,
-            total_amount=total_amount,
-        )
+    # Payroll invoice is priced here, once; it carries no lessons.
+    invoice = Invoice.objects.create(
+        invoice_type='teacher_payment',
+        teacher=batch.teacher,
+        school=batch.school,
+        status='pending',
+        created_by=request.user,
+        payment_balance=total_amount,
+        total_amount=total_amount,
+    )
 
-        # Link batch to invoice — signals batch lock for teacher adjustment endpoint (ADJ-07)
-        batch.invoice = invoice
-        batch.save(update_fields=['invoice'])
+    # Link batch to invoice — signals batch lock for teacher adjustment endpoint (ADJ-07)
+    batch.invoice = invoice
+    batch.save(update_fields=['invoice'])
 
-        # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval).
-        # Only items charged at approval get the refund: the StudentInvoice.lesson_items
-        # M2M is the approval-time record of what was billed. A lesson waived while the
-        # batch was still a draft was excluded from the invoice — crediting it anyway
-        # would gift the parent a free lesson credit (verified live 2026-08-27).
-        waived_items = list(
-            batch.lesson_items.filter(status='waived', student_invoice__isnull=False)
-        )
-        for item in waived_items:
-            lesson_rate = item.student_rate * item.duration
-            if lesson_rate > Decimal('0.00'):
-                # get_or_create then re-acquire with select_for_update (REC-02 pattern)
-                StudentCreditAccount.objects.get_or_create(
-                    student=item.student,
-                    school=batch.school,
-                    defaults={'balance': Decimal('0.00')},
-                )
-                account = StudentCreditAccount.objects.select_for_update().get(
-                    student=item.student, school=batch.school
-                )
-                ledger.post(
-                    account,
-                    type='waived_rollover',
-                    amount=lesson_rate,
-                    source_batch_item=item,
-                )
-
-        # Forfeited no-show records (MAP-186): balance-neutral ledger rows, one per
-        # forfeited item, keyed on the item. The charge itself was posted at
-        # approval (lesson_charge/shortfall).
-        forfeited_credits_written = 0
-        for item in batch.lesson_items.filter(status='forfeited'):
-            charge = item.student_rate * item.duration
-            if charge <= Decimal('0.00'):
-                continue
-            if CreditTransaction.objects.filter(
-                type='forfeited', source_batch_item=item
-            ).exists():
-                continue
+    # D-05: Write waived_rollover CreditTransactions now (deferred from batch approval).
+    # Only items charged at approval get the refund: the StudentInvoice.lesson_items
+    # M2M is the approval-time record of what was billed. A lesson waived while the
+    # batch was still a draft was excluded from the invoice — crediting it anyway
+    # would gift the parent a free lesson credit (verified live 2026-08-27).
+    waived_items = list(
+        batch.lesson_items.filter(status='waived', student_invoice__isnull=False)
+    )
+    for item in waived_items:
+        lesson_rate = item.student_rate * item.duration
+        if lesson_rate > Decimal('0.00'):
+            # get_or_create then re-acquire with select_for_update (REC-02 pattern)
             StudentCreditAccount.objects.get_or_create(
                 student=item.student,
                 school=batch.school,
@@ -1433,11 +1420,38 @@ def management_generate_teacher_invoice(request, batch_id):
             )
             ledger.post(
                 account,
-                type='forfeited',
-                amount=charge,
+                type='waived_rollover',
+                amount=lesson_rate,
                 source_batch_item=item,
             )
-            forfeited_credits_written += 1
+
+    # Forfeited no-show records (MAP-186): balance-neutral ledger rows, one per
+    # forfeited item, keyed on the item. The charge itself was posted at
+    # approval (lesson_charge/shortfall).
+    forfeited_credits_written = 0
+    for item in batch.lesson_items.filter(status='forfeited'):
+        charge = item.student_rate * item.duration
+        if charge <= Decimal('0.00'):
+            continue
+        if CreditTransaction.objects.filter(
+            type='forfeited', source_batch_item=item
+        ).exists():
+            continue
+        StudentCreditAccount.objects.get_or_create(
+            student=item.student,
+            school=batch.school,
+            defaults={'balance': Decimal('0.00')},
+        )
+        account = StudentCreditAccount.objects.select_for_update().get(
+            student=item.student, school=batch.school
+        )
+        ledger.post(
+            account,
+            type='forfeited',
+            amount=charge,
+            source_batch_item=item,
+        )
+        forfeited_credits_written += 1
 
     return Response({
         'status': 'invoice_generated',
@@ -2317,7 +2331,7 @@ def management_teacher_invoices(request, teacher_id):
         school=request.user.school,
     ).order_by('-created_at')
 
-    # Map invoice_id -> source batch (period label + record link). batch.invoice is the FK.
+    # Map invoice_id -> source batch (period label + record link). batch.invoice is one-to-one.
     batch_by_invoice = {
         b.invoice_id: b
         for b in MonthlyInvoiceBatch.objects.filter(invoice__in=invoices)
@@ -2377,11 +2391,8 @@ def management_patch_invoice(request, pk):
             fields_to_save.append(field)
 
     if fields_to_save:
-        # Use update_fields to bypass Invoice.save() total_amount recalculation
-        # (Invoice.save() recalculates total_amount from lessons when pk exists)
-        Invoice.objects.filter(pk=invoice.pk).update(
-            **{field: getattr(invoice, field) for field in fields_to_save}
-        )
+        # Status-only change: monetary fields untouched, history row written (MAP-183 A4).
+        invoice.save(update_fields=fields_to_save)
     return Response({'status': 'updated'})
 
 
