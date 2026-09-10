@@ -14,36 +14,6 @@ User = get_user_model()
 
 # LESSON MANAGEMENT
 
-@api_view(['GET', 'POST'])
-@teacher_or_management_required
-def lesson_list(request):
-    """List and create lessons"""
-    if request.method == 'GET':
-        if request.user.user_type == 'management':
-            lessons = Lesson.objects.filter(school=request.user.school)
-        else:  # teacher
-            lessons = Lesson.objects.filter(teacher=request.user, school=request.user.school)
-
-        serializer = LessonSerializer(lessons, many=True)
-        return Response(serializer.data)
-
-    elif request.method == 'POST':
-        data = request.data.copy()
-
-        if request.user.user_type == 'teacher':
-            # Teachers can only create lessons for themselves
-            data['teacher'] = request.user.id
-        elif request.user.user_type == 'management':
-            # Management can create lessons for any teacher
-            if 'teacher' not in data:
-                return Response({'error': 'Teacher ID required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        serializer = LessonSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 @api_view(['POST'])
 @role_required('student')
 def request_lesson(request):

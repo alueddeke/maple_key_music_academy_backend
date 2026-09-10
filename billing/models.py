@@ -219,8 +219,6 @@ class User(AbstractUser):
         # Auto-approve management users
         if self.user_type == 'management':
             self.is_approved = True
-            self.is_staff = True
-            self.is_superuser = True
         
         super().save(*args, **kwargs)
     
@@ -343,8 +341,8 @@ class Lesson(models.Model):
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
-    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, help_text="Rate paid to teacher for this lesson")
-    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, help_text="Rate billed to student for this lesson")
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate paid to teacher for this lesson")
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)
@@ -920,12 +918,14 @@ class BatchLessonItem(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+', limit_choices_to={'user_type':'student'})
     scheduled_date = models.DateField()
     start_time = models.TimeField()
-    duration = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
+    # Decimal default: a float default made calculate_teacher_payment() raise
+    # TypeError on an unsaved instance (P0 audit 2026-09-09).
+    duration = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('1.00'))
     lesson_type = models.CharField(max_length=20, choices=Lesson.LESSON_TYPES)
 
-    # Rates (locked from recurring schedule or entered manually)
-    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2)
-    student_rate = models.DecimalField(max_digits=6, decimal_places=2)
+    # Rates (locked from recurring schedule or derived by the server — MAP-179)
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, validators=[MinValueValidator(Decimal('0'))])
 
     # status (teacher marks this)
     status = models.CharField(max_length=20, choices=Lesson.LESSON_STATUS, default='completed')
@@ -1251,6 +1251,16 @@ class CreditTransaction(models.Model):
         help_text="Always positive. Direction determined by type field.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # MAP-180: the webhook event that posted this credit. Unique per event so the
+    # database, not the caller, guarantees one credit per helcim_transaction_id.
+    source_event = models.ForeignKey(
+        'HelcimWebhookEvent',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Webhook event that posted this credit; at most one credit per event.",
+    )
 
     history = HistoricalRecords()
 
@@ -1262,7 +1272,12 @@ class CreditTransaction(models.Model):
             models.CheckConstraint(
                 check=Q(amount__gt=0),
                 name='credit_transaction_amount_positive',
-            )
+            ),
+            models.UniqueConstraint(
+                fields=['source_event'],
+                condition=Q(source_event__isnull=False),
+                name='one_credit_per_webhook_event',
+            ),
         ]
 
     def __str__(self):

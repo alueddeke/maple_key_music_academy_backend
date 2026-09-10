@@ -9,8 +9,9 @@ from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, Batc
 from ..waive_policy import apply_waive_limit, get_waive_usage
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
-    MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer
+    MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, TeacherBatchLessonItemSerializer
 )
+from ..services.rates import resolve_rates
 from custom_auth.decorators import (
     teacher_required, management_required, teacher_or_management_required
 )
@@ -27,41 +28,29 @@ User = get_user_model()
 
 # INVOICE MANAGEMENT
 
-@api_view(['GET', 'POST'])
+@api_view(['GET'])
 @teacher_or_management_required
 def teacher_invoice_list(request):
-    """Teacher payment invoices"""
-    if request.method == 'GET':
-        if request.user.user_type == 'management':
-            invoices = Invoice.objects.filter(
-                invoice_type='teacher_payment',
-                school=request.user.school
-            ).order_by('-created_at')
-        else:  # teacher
-            invoices = Invoice.objects.filter(
-                invoice_type='teacher_payment',
-                teacher=request.user,
-                school=request.user.school
-            ).order_by('-created_at')
+    """
+    Teacher payment invoices (read-only). Invoices are created only through
+    submit_lessons_for_invoice; the former POST branch could not create a row
+    once MAP-178 made teacher/payment_balance read-only (P0 audit 2026-09-09).
+    """
+    if request.user.user_type == 'management':
+        invoices = Invoice.objects.filter(
+            invoice_type='teacher_payment',
+            school=request.user.school
+        ).order_by('-created_at')
+    else:  # teacher
+        invoices = Invoice.objects.filter(
+            invoice_type='teacher_payment',
+            teacher=request.user,
+            school=request.user.school
+        ).order_by('-created_at')
 
-        # Use DetailedInvoiceSerializer to include lesson details
-        serializer = DetailedInvoiceSerializer(invoices, many=True)
-        return Response(serializer.data)
-
-    elif request.method == 'POST':
-        # Create teacher payment invoice
-        data = request.data.copy()
-        data['invoice_type'] = 'teacher_payment'
-
-        if request.user.user_type == 'teacher':
-            data['teacher'] = request.user.id
-            data['created_by'] = request.user.id
-
-        serializer = InvoiceSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    # Use DetailedInvoiceSerializer to include lesson details
+    serializer = DetailedInvoiceSerializer(invoices, many=True)
+    return Response(serializer.data)
 
 @api_view(['GET'])
 @teacher_required
@@ -655,7 +644,14 @@ def batch_detail(request, batch_id):
 @api_view(['POST'])
 @teacher_required
 def batch_add_lesson(request, batch_id):
-    """Add a one-off lesson to a draft batch"""
+    """
+    Add a one-off lesson to a draft batch.
+
+    MAP-179: the body carries exactly student, scheduled_date, start_time,
+    duration, lesson_type, status, teacher_notes (anything else → 400
+    unknown_fields). Rates come from resolve_rates(), is_one_off is forced,
+    and the first-lesson rule overrides status to 'trial'.
+    """
     try:
         batch = MonthlyInvoiceBatch.objects.get(
             id=batch_id,
@@ -671,48 +667,31 @@ def batch_add_lesson(request, batch_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    data = request.data.copy()
-    data['is_one_off'] = True
+    serializer = TeacherBatchLessonItemSerializer(data=request.data, context={'request': request})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # Auto-populate rates based on lesson type if not provided
-    if 'teacher_rate' not in data or 'student_rate' not in data:
-        lesson_type = data.get('lesson_type', 'in_person')
-        try:
-            from billing.models import SchoolSettings
-            school_settings = SchoolSettings.get_settings_for_school(request.user.school)
-            if lesson_type == 'online':
-                data['teacher_rate'] = school_settings.online_teacher_rate
-                data['student_rate'] = school_settings.online_student_rate
-            else:  # in_person
-                data['teacher_rate'] = request.user.hourly_rate or school_settings.inperson_student_rate
-                data['student_rate'] = school_settings.inperson_student_rate
-        except Exception:
-            # Fallback to legacy GlobalRateSettings for backward compatibility
-            global_settings = GlobalRateSettings.get_settings()
-            if lesson_type == 'online':
-                data['teacher_rate'] = global_settings.online_teacher_rate
-                data['student_rate'] = global_settings.online_student_rate
-            else:  # in_person
-                data['teacher_rate'] = request.user.hourly_rate or global_settings.online_teacher_rate
-                data['student_rate'] = global_settings.inperson_student_rate
+    student = serializer.validated_data['student']
+    teacher_rate, student_rate = resolve_rates(
+        request.user.school, request.user, serializer.validated_data['lesson_type']
+    )
 
     # Auto-default trial: only if student has no Lesson records AND no BatchLessonItems
-    student_id = data.get('student_id') or data.get('student')
-    if student_id:
-        try:
-            student_obj = User.objects.get(id=student_id)
-            prior_lesson_count = Lesson.objects.filter(student=student_obj).count()
-            prior_batch_item_count = BatchLessonItem.objects.filter(student=student_obj).count()
-            if prior_lesson_count == 0 and prior_batch_item_count == 0:
-                data['status'] = 'trial'
-        except Exception:
-            pass
+    item_status = serializer.validated_data['status']
+    if (
+        not Lesson.objects.filter(student=student).exists()
+        and not BatchLessonItem.objects.filter(student=student).exists()
+    ):
+        item_status = 'trial'
 
-    serializer = BatchLessonItemSerializer(data=data)
-    if serializer.is_valid():
-        serializer.save(batch=batch)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    item = serializer.save(
+        batch=batch,
+        teacher_rate=teacher_rate,
+        student_rate=student_rate,
+        is_one_off=True,
+        status=item_status,
+    )
+    return Response(BatchLessonItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['PUT', 'DELETE'])

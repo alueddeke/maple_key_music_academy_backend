@@ -49,7 +49,12 @@ jobs:
           DEBUG: "True"
           ALLOWED_HOSTS: "localhost,127.0.0.1"
           CORS_ALLOWED_ORIGINS: http://localhost:5173
+          PLATFORM_ADMIN_EMAILS: e2e.manager@maplekeytest.com
           FRONTEND_URL: http://localhost:5173
           RESEND_API_KEY: ci-resend-key
           DEFAULT_FROM_EMAIL: ci@test.com
+          HELCIM_API_TOKEN: ci-helcim-token
+          HELCIM_TERMINAL_ID: ci-terminal
+          HELCIM_WEBHOOK_SECRET: dGVzdC1zZWNyZXQ=
+          HELCIM_SUBDOMAIN: citest
         run: pytest tests/

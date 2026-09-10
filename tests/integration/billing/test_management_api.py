@@ -15,6 +15,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from billing.models import GlobalRateSettings, Lesson, Invoice, MonthlyInvoiceBatch
 from django.contrib.auth import get_user_model
+from faker import Faker
 
 User = get_user_model()
 
@@ -372,3 +373,143 @@ class TestPhase2BillableContactSchoolScoping:
         response = api_client.get(url)
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# MAP-177: UserSerializer never writes privileged columns or the password.
+# ---------------------------------------------------------------------------
+
+PRIVILEGED_COLUMNS = ('user_type', 'school_id', 'is_approved', 'is_active', 'is_staff', 'is_superuser')
+
+
+def _snapshot(user):
+    user.refresh_from_db()
+    return {c: getattr(user, c) for c in PRIVILEGED_COLUMNS} | {'password': user.password}
+
+
+def _escalation_payload(other_school):
+    return {
+        'user_type': 'management',
+        'school': other_school.id,
+        'is_approved': False,
+        'is_active': False,
+        'is_staff': True,
+        'is_superuser': True,
+        'password': 'Hijack!123',
+    }
+
+
+@pytest.mark.django_db
+class TestManagementPutsCannotEscalate:
+    """MAP-177 acceptance: the two management PUTs ignore privileged keys and password."""
+
+    def test_update_teacher_ignores_privileged_keys(
+        self, authenticated_management_client, teacher_user, second_school
+    ):
+        before = _snapshot(teacher_user)
+        url = reverse('management_update_teacher', kwargs={'pk': teacher_user.id})
+
+        response = authenticated_management_client.put(
+            url, _escalation_payload(second_school) | {'hourly_rate': '95.00', 'bio': 'Updated bio'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert _snapshot(teacher_user) == before
+        assert teacher_user.hourly_rate == Decimal('95.00')
+        assert teacher_user.bio == 'Updated bio'
+        assert teacher_user.check_password('Hijack!123') is False
+
+    def test_update_student_ignores_privileged_keys(
+        self, authenticated_management_client, student_user, second_school
+    ):
+        before = _snapshot(student_user)
+        url = reverse('management_student_detail', kwargs={'pk': student_user.id})
+
+        response = authenticated_management_client.put(
+            url, _escalation_payload(second_school) | {'phone_number': '4165550199', 'address': '1 New St'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert _snapshot(student_user) == before
+        assert student_user.phone_number == '4165550199'
+        assert student_user.address == '1 New St'
+        assert student_user.check_password('Hijack!123') is False
+
+    @pytest.mark.parametrize('route,fixture', [
+        ('management_update_teacher', 'teacher_user'),
+        ('management_student_detail', 'student_user'),
+    ])
+    def test_put_with_password_leaves_hash_unchanged(
+        self, request, authenticated_management_client, route, fixture
+    ):
+        user = request.getfixturevalue(fixture)
+        hash_before = user.password
+        assert user.check_password('testpass123') is True
+
+        response = authenticated_management_client.put(
+            reverse(route, kwargs={'pk': user.id}),
+            {'password': 'Hijack!123', 'first_name': 'Renamed'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        user.refresh_from_db()
+        assert user.password == hash_before
+        assert user.check_password('testpass123') is True
+        assert user.first_name == 'Renamed'
+
+    @pytest.mark.parametrize('route,fixture', [
+        ('management_update_teacher', 'teacher_user'),
+        ('management_student_detail', 'student_user'),
+    ])
+    def test_fuzz_every_user_field_only_profile_fields_change(
+        self, request, authenticated_management_client, teacher_user, second_school, route, fixture
+    ):
+        """Faker payload carrying every concrete User field name: only the
+        writable, non-privileged profile fields may change."""
+        user = request.getfixturevalue(fixture)
+        fake = Faker()
+        Faker.seed(177)
+
+        def fake_value(field):
+            kind = field.get_internal_type()
+            if field.name == 'email':
+                return fake.email()
+            if field.name == 'hourly_rate':
+                return str(fake.pydecimal(left_digits=3, right_digits=2, positive=True))
+            if field.name == 'phone_number':
+                return fake.numerify('###########')
+            if field.name == 'school':
+                return second_school.id
+            if field.name == 'assigned_teachers':
+                return [teacher_user.id]
+            if kind in ('ManyToManyField',):
+                return []
+            if kind == 'ForeignKey':
+                return fake.pyint()
+            if kind == 'BooleanField':
+                return fake.pybool()
+            if kind in ('DateTimeField', 'DateField'):
+                return fake.iso8601()
+            if kind in ('DecimalField', 'IntegerField', 'AutoField', 'BigAutoField'):
+                return fake.pyint()
+            return fake.pystr(max_chars=min(field.max_length or 40, 40))
+
+        payload = {f.name: fake_value(f) for f in User._meta.get_fields() if f.concrete}
+        payload.update(_escalation_payload(second_school))
+        assert {'id', 'password', 'is_staff', 'is_superuser', 'oauth_provider', 'date_joined'} <= payload.keys()
+
+        before = _snapshot(user)
+        untouched_before = (user.id, user.oauth_provider, user.oauth_id, user.date_joined, user.last_login)
+
+        response = authenticated_management_client.put(reverse(route, kwargs={'pk': user.id}), payload, format='json')
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _snapshot(user) == before
+        assert (user.id, user.oauth_provider, user.oauth_id, user.date_joined, user.last_login) == untouched_before
+        for name in ('email', 'first_name', 'last_name', 'phone_number', 'address', 'bio', 'instruments'):
+            assert getattr(user, name) == payload[name], name
+        assert user.hourly_rate == Decimal(payload['hourly_rate'])
+        assert set(user.assigned_teachers.values_list('id', flat=True)) == {teacher_user.id}

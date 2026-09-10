@@ -60,7 +60,8 @@ class ArchitectureTest:
             user_type='management'
         )
         assert mgmt.is_approved == True, "Management should be auto-approved"
-        assert mgmt.is_staff == True, "Management should be staff"
+        assert mgmt.is_staff is False, "Management is school staff, not Django staff (MAP-177)"
+        assert mgmt.is_superuser is False, "Management never derives superuser from user_type (MAP-177)"
         
         # Create teacher user
         teacher = User.objects.create_user(

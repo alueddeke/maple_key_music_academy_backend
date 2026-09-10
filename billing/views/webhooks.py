@@ -2,7 +2,8 @@
 billing/views/webhooks.py — Helcim payment webhook receiver.
 
 HELM-03: POST /api/billing/payment-callback/ (no 'helcim' in path per D-10).
-HELM-04: Idempotency via get_or_create on helcim_transaction_id.
+HELM-04: one HelcimWebhookEvent row per helcim_transaction_id via get_or_create;
+credit idempotency is enforced in process_webhook_event (MAP-180).
 
 Security constraints enforced:
   - HMAC-SHA256 over "{webhook-id}.{webhook-timestamp}.{body}" with base64-decoded secret.
@@ -146,9 +147,13 @@ def payment_callback(request):
         logger.warning('Helcim cardTransaction webhook missing id — ignoring')
         return Response({'status': 'ignored'}, status=200)
 
-    # D-12 / HELM-04: idempotency guard via unique constraint on helcim_transaction_id.
-    # school is the signature-matched school (None for the env/default secret);
-    # process_webhook_event overwrites it with the invoice's school on credit.
+    # helcim_transaction_id is unique, so get_or_create yields one row per
+    # transaction. The status check below is a cheap fast path only — a
+    # terminal event answers 'duplicate' without entering the service.
+    # Correctness under concurrent delivery comes from the event row lock and
+    # the one_credit_per_webhook_event constraint in process_webhook_event
+    # (MAP-180). school is the signature-matched school (None for the
+    # env/default secret); process_webhook_event overwrites it on credit.
     event, created = HelcimWebhookEvent.objects.get_or_create(
         helcim_transaction_id=tx_id,
         defaults={

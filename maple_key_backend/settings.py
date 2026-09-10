@@ -12,8 +12,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from decouple import config  # For reading environment variables from .env file
+from django.core.exceptions import ImproperlyConfigured
 from urllib.parse import urlparse
-import os
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -30,24 +30,28 @@ SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # DEBUG should be False in production for security
-DEBUG = config('DEBUG', default=True, cast=bool)
+DEBUG = config('DEBUG', cast=bool)
 
 # ALLOWED_HOSTS configuration
-# Read from environment variable or use safe defaults for development
-ALLOWED_HOSTS_STR = config('ALLOWED_HOSTS', default='localhost,127.0.0.1')
+ALLOWED_HOSTS_STR = config('ALLOWED_HOSTS')
 ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_STR.split(',') if host.strip()]
 
 
 # CORS configuration
-cors_allowed_str = os.getenv('CORS_ALLOWED_ORIGINS', '')
-if cors_allowed_str:
-    if cors_allowed_str == '*':
-        CORS_ALLOW_ALL_ORIGINS = True
-    else:
-        CORS_ALLOWED_ORIGINS = [host.strip() for host in cors_allowed_str.split(',')]
-else:
-    # Default: Allow your frontend domain
-    CORS_ALLOWED_ORIGINS = []
+# Required, comma-separated browser origins. '*' is rejected: with
+# CORS_ALLOW_CREDENTIALS=True it would expose credentials to any origin.
+cors_allowed_str = config('CORS_ALLOWED_ORIGINS')
+if cors_allowed_str == '*':
+    raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS must not be '*'")
+CORS_ALLOWED_ORIGINS = [host.strip() for host in cors_allowed_str.split(',') if host.strip()]
+if not CORS_ALLOWED_ORIGINS:
+    raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS must list at least one origin")
+
+
+# Platform admins (MAP-177): the only accounts that hold Django is_staff /
+# is_superuser. Required, comma-separated, no default (check-no-fallbacks).
+platform_admin_emails_str = config('PLATFORM_ADMIN_EMAILS')
+PLATFORM_ADMIN_EMAILS = [e.strip().lower() for e in platform_admin_emails_str.split(',') if e.strip()]
 
 
 # SSL/HTTPS Security Settings
@@ -162,38 +166,23 @@ WSGI_APPLICATION = "maple_key_backend.wsgi.application"
 
 
 
-# Try to get DATABASE_URL first (for production), fall back to individual vars (for local dev)
-DATABASE_URL = config('DATABASE_URL', default=None)
-
-if DATABASE_URL:
-    # Production: Parse DATABASE_URL (from Docker environment)
-    # Format: postgresql://user:password@host:port/dbname
-    url = urlparse(DATABASE_URL)
-    DATABASES = {
-        'default': {
-            # django_prometheus wrapper: identical to the stock postgresql
-            # backend, plus django_db_* query metrics on /metrics (the
-            # "Database Query Rate" dashboard panel reads these).
-            'ENGINE': 'django_prometheus.db.backends.postgresql',
-            'NAME': url.path[1:],  # Remove leading slash
-            'USER': url.username,
-            'PASSWORD': url.password,
-            'HOST': url.hostname,
-            'PORT': url.port or 5432,
-        }
+# DATABASE_URL is the only database configuration (required, no default).
+# Format: postgresql://user:password@host:port/dbname
+DATABASE_URL = config('DATABASE_URL')
+url = urlparse(DATABASE_URL)
+DATABASES = {
+    'default': {
+        # django_prometheus wrapper: identical to the stock postgresql
+        # backend, plus django_db_* query metrics on /metrics (the
+        # "Database Query Rate" dashboard panel reads these).
+        'ENGINE': 'django_prometheus.db.backends.postgresql',
+        'NAME': url.path[1:],  # Remove leading slash
+        'USER': url.username,
+        'PASSWORD': url.password,
+        'HOST': url.hostname,
+        'PORT': url.port or 5432,
     }
-else:
-    # Local development: Use individual environment variables
-    DATABASES = {
-        "default": {
-            "ENGINE": "django_prometheus.db.backends.postgresql",
-            "NAME": config('POSTGRES_DB', default='maple_key_dev'),
-            "USER": config('POSTGRES_USER', default='maple_key_user'),
-            "PASSWORD": config('POSTGRES_PASSWORD', default='maple_key_password'),
-            "HOST": config('POSTGRES_HOST', default='127.0.0.1'),
-            "PORT": config('POSTGRES_PORT', default='5432'),
-        }
-    }
+}
 
 
 
@@ -278,7 +267,7 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 # Frontend URL (used by PKCE OAuth exchange and password reset)
-FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')
+FRONTEND_URL = config('FRONTEND_URL')
 
 # CSRF settings
 # Add both HTTP (for local dev) and HTTPS (for production)
@@ -287,18 +276,6 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8000",
     "https://api.maplekeymusic.com",  # Production HTTPS domain
 ]
-
-# CORS settings (only used if CORS_ALLOWED_ORIGINS env var is not set - see line 42-50)
-# In production, CORS_ALLOWED_ORIGINS is set via environment variable
-# These are fallback values for local development
-if not CORS_ALLOWED_ORIGINS:  # Only set if not already set by environment variable
-    CORS_ALLOWED_ORIGINS = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ]
 
 # Additional CORS settings for credentials and headers
 CORS_ALLOW_CREDENTIALS = True  # Allow cookies/auth headers

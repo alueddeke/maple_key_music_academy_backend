@@ -15,13 +15,21 @@ Money-safety rules enforced here:
     real) but leaves the invoice open and flags the event credited_partial.
   - Re-running is safe: terminal states are never re-processed, and the
     'credited*' write happens in the same atomic block that stamps the state.
+  - Concurrency (MAP-180): inside the credit transaction the event row is
+    re-read under select_for_update() BEFORE the invoice and account locks.
+    Lock order is always event → invoice → account. Two deliveries of the
+    same event serialize on the event row; the second sees a terminal state
+    and returns. CreditTransaction.source_event is unique per event as the
+    database backstop, so a credit can never be posted twice for one
+    helcim_transaction_id regardless of caller (webhook view, retry command,
+    sync command).
   - Helcim HTTP calls stay OUTSIDE transaction.atomic() (STATE.md hard rule).
 """
 
 import logging
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -56,6 +64,16 @@ def process_webhook_event(event):
     if event.processing_status not in RETRYABLE_STATES:
         return event
 
+    written = _process(event)
+    if written is not event:
+        # The credit path re-read the row under lock and wrote through that
+        # copy; bring the caller's instance up to date (the management commands
+        # report event.processing_status from the instance they passed in).
+        event.refresh_from_db()
+    return event
+
+
+def _process(event):
     # Enrichment — outside any DB transaction. Re-fetch when either the
     # invoice number or the gating fields are missing (legacy rows predate
     # transaction_status).
@@ -92,6 +110,15 @@ def process_webhook_event(event):
 
     try:
         with transaction.atomic():
+            # Lock order: event → invoice → account (MAP-180). The pre-check
+            # above ran on an unlocked row; re-read under lock so concurrent
+            # deliveries serialize here and every later write goes through
+            # the locked copy — the caller-passed instance is stale.
+            locked = HelcimWebhookEvent.objects.select_for_update().get(pk=event.pk)
+            if locked.processing_status not in RETRYABLE_STATES:
+                return locked
+            event = locked
+
             # filter().order_by('-id').first() guards MultipleObjectsReturned —
             # helcim_invoice_number has no unique constraint. Match on
             # helcim_invoice_number: payment payloads carry invoiceNumber
@@ -120,12 +147,31 @@ def process_webhook_event(event):
                 student=invoice.student,
                 school=invoice.school,
             )
-            CreditTransaction.objects.create(
-                account=account,
-                school=invoice.school,
-                type='pre_billing_payment',
-                amount=event.amount,
-            )
+            # Savepoint: an IntegrityError on one_credit_per_webhook_event must
+            # not poison the outer atomic block.
+            try:
+                with transaction.atomic():
+                    CreditTransaction.objects.create(
+                        account=account,
+                        school=invoice.school,
+                        type='pre_billing_payment',
+                        amount=event.amount,
+                        source_event=event,
+                    )
+            except IntegrityError:
+                # The credit for this event was already posted — finalize as
+                # credited WITHOUT touching the balance.
+                logger.warning(
+                    'Credit already posted for webhook event %s; not posting again',
+                    event.helcim_transaction_id,
+                )
+                event.school = invoice.school
+                event.processing_status = 'credited'
+                event.last_error = ''
+                event.processed_at = timezone.now()
+                event.save(update_fields=['school', 'processing_status', 'last_error', 'processed_at'])
+                webhook_events_total.labels(outcome='credited').inc()
+                return event
             account.balance += event.amount
             account.save()
 

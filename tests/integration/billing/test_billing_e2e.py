@@ -57,8 +57,9 @@ def teacher_client(teacher_user):
 
 
 @pytest.fixture
-def student(school, db):
-    """Brand-new student with a BillableContact — no prior lessons so first item auto-promotes to 'trial'."""
+def student(school, teacher_user, db):
+    """Brand-new student with a BillableContact — no prior lessons so first item auto-promotes to 'trial'.
+    Assigned to teacher_user: batch_add_lesson only accepts assigned students (MAP-179)."""
     s = User.objects.create_user(
         email="student@e2etest.com",
         password="pass",
@@ -82,6 +83,7 @@ def student(school, db):
         postal_code='M1A 1A1',
         is_primary=True,
     )
+    s.assigned_teachers.add(teacher_user)
     return s
 
 

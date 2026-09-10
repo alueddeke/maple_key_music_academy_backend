@@ -1,5 +1,8 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.core.validators import MinValueValidator
 from django.db.models import Count, Sum, Q
 from .models import (
     Lesson, Invoice, ApprovedEmail, UserRegistrationRequest,
@@ -45,7 +48,6 @@ class BillableContactSerializer(serializers.ModelSerializer):
 
         return data
 class UserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=False)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
     school_name = serializers.CharField(source='school.name', read_only=True)
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
@@ -62,10 +64,14 @@ class UserSerializer(serializers.ModelSerializer):
             'assigned_teachers', 'assigned_teachers_data',
             'assigned_students_data',
             'billable_contacts',
-            'date_joined', 'last_login', 'password'
+            'date_joined', 'last_login'
         ]
-        read_only_fields = ['id', 'date_joined', 'last_login', 'user_type_display', 'school_name']
-        extra_kwargs = {'password': {'write_only': True}}
+        # MAP-177: role, tenancy and status columns are never writable through
+        # request input; password only via invitation setup / password reset.
+        read_only_fields = [
+            'id', 'date_joined', 'last_login', 'user_type_display', 'school_name',
+            'user_type', 'school', 'is_approved', 'is_active',
+        ]
 
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
@@ -94,14 +100,6 @@ class UserSerializer(serializers.ModelSerializer):
                 for student in obj.assigned_students.filter(is_active=True)
             ]
         return []
-
-    def create(self, validated_data):
-        password = validated_data.pop('password', None)
-        user = User.objects.create_user(**validated_data)
-        if password:
-            user.set_password(password)
-            user.save()
-        return user
 
 
 class LessonSerializer(serializers.ModelSerializer):
@@ -143,7 +141,20 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Invoice
-        fields = '__all__'
+        fields = [
+            'id', 'school', 'school_name', 'invoice_number', 'invoice_type', 'lessons',
+            'teacher', 'teacher_name', 'student', 'student_name',
+            'total_amount', 'payment_balance', 'status', 'due_date',
+            'created_at', 'created_by', 'created_by_name',
+            'approved_by', 'approved_by_name', 'approved_at',
+            'rejected_by', 'rejected_at', 'rejection_reason',
+            'notes', 'last_edited_by', 'last_edited_at',
+            'date_paid', 'reference_number',
+        ]
+        # MAP-178: invoice status and payment fields are written only by
+        # management_patch_invoice and the webhook processor — never by a
+        # serializer fed from a request body.
+        read_only_fields = ['status', 'date_paid', 'reference_number', 'teacher', 'total_amount', 'payment_balance']
 
 class RecurringScheduleSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
@@ -193,6 +204,62 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
             'created_at'
         ]
         read_only_fields = ['teacher_payment', 'student_charge', 'created_at']
+        # MAP-179: rates are never negative (management paths keep the field list).
+        extra_kwargs = {
+            'teacher_rate': {'validators': [MinValueValidator(Decimal('0'))]},
+            'student_rate': {'validators': [MinValueValidator(Decimal('0'))]},
+        }
+
+
+class StrictFieldsMixin:
+    """
+    MAP-179 (D1): reject any input key that is not declared on the serializer.
+    Wire body: {"error": ["unknown_fields"], "fields": [...]}. The list is
+    built here on purpose: an error raised from to_internal_value() reaches
+    serializer.errors as-is (Serializer.is_valid stores exc.detail; only
+    validate()/validator errors pass through as_serializer_error's list-wrap).
+    Mix in before ModelSerializer.
+    """
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'keys'):
+            extra = set(data.keys()) - set(self.fields.keys())
+            if extra:
+                raise serializers.ValidationError({'error': ['unknown_fields'], 'fields': sorted(extra)})
+        return super().to_internal_value(data)
+
+
+class TeacherBatchLessonItemSerializer(StrictFieldsMixin, serializers.ModelSerializer):
+    """
+    Teacher one-off lesson creation (batch_add_lesson). Exactly seven input
+    fields; rates, is_one_off, admin_notes and the trial override are set by
+    the view, never from the body. Management paths keep BatchLessonItemSerializer.
+    """
+    status = serializers.ChoiceField(choices=['completed', 'confirmed', 'cancelled'])
+
+    class Meta:
+        model = BatchLessonItem
+        fields = [
+            'student', 'scheduled_date', 'start_time', 'duration',
+            'lesson_type', 'status', 'teacher_notes',
+        ]
+        # duration has a model default; the teacher payload must state it.
+        extra_kwargs = {'duration': {'required': True}}
+
+    def validate_duration(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Duration must be greater than 0.")
+        return value
+
+    def validate_student(self, student):
+        teacher = self.context['request'].user
+        if student.user_type != 'student':
+            raise serializers.ValidationError("Selected user is not a student.")
+        if student.school_id != teacher.school_id:
+            raise serializers.ValidationError("Student belongs to another school.")
+        if not student.assigned_teachers.filter(pk=teacher.pk).exists():
+            raise serializers.ValidationError("Student is not assigned to you.")
+        return student
 
 class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
@@ -359,7 +426,8 @@ class DetailedUserSerializer(serializers.ModelSerializer):
             'billable_contacts',
             'date_joined', 'last_login'
         ]
-        read_only_fields = ['date_joined', 'last_login']
+        # Read-only serializer today; privileged columns locked anyway (MAP-177 rule).
+        read_only_fields = ['date_joined', 'last_login', 'user_type', 'is_approved', 'is_active']
 
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
