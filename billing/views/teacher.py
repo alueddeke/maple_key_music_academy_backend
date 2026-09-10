@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice, GlobalRateSettings
+from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
 from ..waive_policy import apply_waive_limit, get_waive_usage
 from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
@@ -309,33 +309,11 @@ def submit_lessons_for_invoice(request):
                 # Create lesson with dual-rate system
                 lesson_type = lesson_data.get('lesson_type', 'in_person')  # Default to in_person for backward compatibility
 
-                # Determine rates based on lesson type using SchoolSettings
-                from billing.models import SchoolSettings
                 from decimal import Decimal
 
-                # Get rates from school settings (with fallback to legacy GlobalRateSettings if needed)
-                try:
-                    school_settings = SchoolSettings.get_settings_for_school(request.user.school)
-                    if lesson_type == 'online':
-                        # Online lessons use school rates
-                        teacher_rate = school_settings.online_teacher_rate
-                        student_rate = school_settings.online_student_rate
-                    else:
-                        # In-person lessons: teacher gets their hourly_rate, student pays school in-person rate
-                        teacher_rate = request.user.hourly_rate
-                        student_rate = school_settings.inperson_student_rate
-                except Exception as e:
-                    # Fallback to legacy GlobalRateSettings for backward compatibility
-                    from billing.models import GlobalRateSettings
-                    logger.warning(f"Failed to load SchoolSettings, falling back to GlobalRateSettings: {e}")
-                    global_rates = GlobalRateSettings.get_settings()
-                    if lesson_type == 'online':
-                        teacher_rate = global_rates.online_teacher_rate
-                        student_rate = global_rates.online_student_rate
-                    else:
-                        teacher_rate = request.user.hourly_rate
-                        student_rate = global_rates.inperson_student_rate
-
+                teacher_rate, student_rate = resolve_rates(
+                    request.user.school, request.user, lesson_type
+                )
 
                 # Determine trial status
                 if 'is_trial' in lesson_data:

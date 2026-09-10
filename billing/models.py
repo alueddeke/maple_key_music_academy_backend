@@ -341,8 +341,8 @@ class Lesson(models.Model):
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
-    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate paid to teacher for this lesson")
-    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate billed to student for this lesson")
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, null=True, validators=[MinValueValidator(Decimal('0'))], help_text="Rate paid to teacher for this lesson")
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, null=True, validators=[MinValueValidator(Decimal('0'))], help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)
@@ -424,37 +424,15 @@ class Lesson(models.Model):
                     self.is_trial = True
 
 
-        # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
-        # Only set rates for new lessons (pk is None) and if both rates are still at model defaults
-        if not self.pk and (self.teacher_rate == Decimal('50.00') and self.student_rate == Decimal('100.00')):
-            # find school settings
-            settings = None
-            # try to get rates from teacher's school
-            if self.teacher and getattr(self.teacher, 'school', None):
-                settings = SchoolSettings.get_settings_for_school(self.teacher.school)
+        # Rate locking: rates are resolved once, at creation, and never re-derived (MAP-182).
+        if self.pk is None and (self.teacher_rate is None or self.student_rate is None):
+            from billing.services.rates import resolve_rates
+            self.teacher_rate, self.student_rate = resolve_rates(
+                self.teacher.school, self.teacher, self.lesson_type
+            )
 
-            if not settings:
-                try:
-                    # using legacy rate settings
-                    settings = GlobalRateSettings.get_settings()
-                except:
-                    settings = None
-
-            # Determine rates based on lesson type
-            if self.lesson_type == 'online':
-                # Use settings rates if found, legacy otherwise
-                self.teacher_rate = settings.online_teacher_rate if settings else Decimal('45.00')
-                base_student_rate = settings.online_student_rate if settings else Decimal('60.00')
-            else:
-                # In-person lesson rates, individual to teacher per school
-                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                base_student_rate = settings.inperson_student_rate if settings else Decimal('100.00')
-
-            # if lesson is trial, student pays $0
-            self.student_rate = Decimal('0.00') if self.is_trial else base_student_rate
-
-        # If lesson is marked as trial after rates were set, update student_rate to $0
-        elif self.is_trial and self.student_rate != Decimal('0.00'):
+        # Trial lesson: student pays $0, teacher still paid.
+        if self.is_trial and self.student_rate != Decimal('0.00'):
             self.student_rate = Decimal('0.00')
 
         super().save(*args, **kwargs)
@@ -524,22 +502,16 @@ class RecurringLessonsSchedule(models.Model):
 
     def save(self, *args, **kwargs):
         """auto-set rates and school if not provided"""
-        from decimal import Decimal
-
         #autoset school from teacher
         if not self.school_id and self.teacher:
             self.school = self.teacher.school
         # autoset rates if not provided (rate locking)
         if self.teacher_rate is None or self.student_rate is None:
-            settings = SchoolSettings.get_settings_for_school(self.school)
+            from billing.services.rates import resolve_rates
+            self.teacher_rate, self.student_rate = resolve_rates(
+                self.school, self.teacher, self.lesson_type
+            )
 
-            if self.lesson_type == 'online':
-                self.teacher_rate = settings.online_teacher_rate
-                self.student_rate = settings.online_student_rate
-            else:
-                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                self.student_rate = settings.inperson_student_rate
-            
         super().save(*args, **kwargs)
 
     def __str__(self):
