@@ -522,23 +522,21 @@ def _generate_for_period(client, year, month):
     return client.post(url, {'month': month, 'year': year}, format='json')
 
 
-def _pay_invoice_into_wallet(student, school, amount):
+def _pay_invoice_into_wallet(student, school, invoice):
     """
-    Simulate the parent paying the bill-ahead invoice: credit the period-keyed
-    wallet by the paid amount and write the immutable ledger entry
-    (CreditTransaction type='pre_billing_payment' → balance += amount).
-    This mirrors the payment path the rest of the suite uses; no real Helcim
-    HTTP is involved.
+    Simulate the parent paying the bill-ahead invoice: post the payment to the
+    period-keyed wallet through the ledger (type='pre_billing_payment', sourced
+    to the invoice → balance += amount). No real Helcim HTTP is involved.
     """
+    from django.db import transaction
+    from billing.services import ledger
+
     account, _ = StudentCreditAccount.objects.get_or_create(
         student=student, school=school, defaults={'balance': Decimal('0.00')},
     )
-    account.balance += amount
-    account.save(update_fields=['balance'])
-    CreditTransaction.objects.create(
-        account=account, school=school,
-        type='pre_billing_payment', amount=amount,
-    )
+    with transaction.atomic():
+        ledger.post(account, type='pre_billing_payment', amount=invoice.amount,
+                    source_invoice=invoice)
     return account
 
 
@@ -635,7 +633,7 @@ def test_bill_ahead_pay_then_approve_no_double_charge(
     assert invoice.lessons.count() == 0
 
     # Step 2: parent pays the invoice → wallet funded.
-    _pay_invoice_into_wallet(student, school, invoice.amount)
+    _pay_invoice_into_wallet(student, school, invoice)
     account = StudentCreditAccount.objects.get(student=student, school=school)
     assert account.balance == gross  # paid-in
 
@@ -711,7 +709,7 @@ def test_bill_ahead_with_rollover_credit_nets_correctly(
     assert invoice.amount == expected_draft
 
     # Step 2: parent pays the reduced (rollover-adjusted) amount.
-    _pay_invoice_into_wallet(student, school, invoice.amount)
+    _pay_invoice_into_wallet(student, school, invoice)
     account = StudentCreditAccount.objects.get(student=student, school=school)
     # rollover + (gross − rollover) == gross funded in the wallet.
     assert account.balance == gross

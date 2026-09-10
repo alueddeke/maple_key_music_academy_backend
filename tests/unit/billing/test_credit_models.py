@@ -176,17 +176,25 @@ class TestStudentCreditAccountConstraints:
 
 @pytest.mark.django_db
 class TestCreditTransactionConstraints:
-    """D-12, D-13: valid type choices enforced at full_clean; direct school FK present."""
+    """
+    D-12, D-13: valid type choices enforced at full_clean; direct school FK present.
+    MAP-186: every row needs a source unless legacy; the amount and per-event
+    constraints stay alongside the new one.
+    """
 
-    def test_valid_types_accepted(self, school, student_user):
-        """All 3 CreditTransaction type values create successfully (D-12 happy)."""
+    def test_valid_types_accepted(self, school, teacher_user, student_user):
+        """All CreditTransaction type values create successfully with a source (D-12 happy)."""
         account = _make_credit_account(student_user, school)
-        for tx_type in ('pre_billing_payment', 'forfeited', 'waived_rollover'):
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-CT1')
+        item = _make_batch_lesson_item(batch, student_user)
+        for tx_type in ('pre_billing_payment', 'forfeited', 'waived_rollover',
+                        'lesson_charge', 'shortfall'):
             tx = CreditTransaction.objects.create(
                 account=account,
                 school=school,
                 type=tx_type,
                 amount=Decimal('10.00'),
+                source_batch_item=item,
             )
             assert tx.type == tx_type
 
@@ -202,29 +210,92 @@ class TestCreditTransactionConstraints:
         with pytest.raises(ValidationError):
             tx.full_clean()
 
-    def test_amount_must_be_positive_decimal(self, school, student_user):
+    def test_amount_must_be_positive_decimal(self, school, teacher_user, student_user):
         """Amount = 50.00 stores and reads back as exact Decimal (D-07 happy path)."""
         account = _make_credit_account(student_user, school)
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-CT2')
+        item = _make_batch_lesson_item(batch, student_user)
         tx = CreditTransaction.objects.create(
             account=account,
             school=school,
             type='pre_billing_payment',
             amount=Decimal('50.00'),
+            source_batch_item=item,
         )
         tx.refresh_from_db()
         assert tx.amount == Decimal('50.00')
 
-    def test_school_fk_is_direct_not_through_account(self, school, student_user):
+    def test_amount_constraint_still_present(self, school, teacher_user, student_user):
+        """credit_transaction_amount_positive rejects a zero amount at the DB (D-09 failing path)."""
+        account = _make_credit_account(student_user, school)
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-CT3')
+        item = _make_batch_lesson_item(batch, student_user)
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                CreditTransaction.objects.create(
+                    account=account, school=school, type='forfeited',
+                    amount=Decimal('0.00'), source_batch_item=item,
+                )
+
+    def test_school_fk_is_direct_not_through_account(self, school, teacher_user, student_user):
         """CreditTransaction.school_id is set directly (denormalized FK per D-13)."""
         account = _make_credit_account(student_user, school)
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-CT4')
+        item = _make_batch_lesson_item(batch, student_user)
         tx = CreditTransaction.objects.create(
             account=account,
             school=school,
             type='forfeited',
             amount=Decimal('20.00'),
+            source_batch_item=item,
         )
         assert tx.school_id is not None
         assert tx.school_id == account.school_id
+
+    def test_source_less_row_rejected(self, school, student_user):
+        """credit_transaction_has_source: a non-legacy row with every source NULL is rejected (MAP-186)."""
+        account = _make_credit_account(student_user, school)
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                CreditTransaction.objects.create(
+                    account=account, school=school, type='waived_rollover',
+                    amount=Decimal('5.00'),
+                )
+        assert CreditTransaction.objects.filter(account=account).count() == 0
+
+    def test_legacy_row_without_source_accepted(self, school, student_user):
+        """The constraint is conditional: legacy=True rows (pre-0074 data) may carry no source."""
+        account = _make_credit_account(student_user, school)
+        tx = CreditTransaction.objects.create(
+            account=account, school=school, type='waived_rollover',
+            amount=Decimal('5.00'), legacy=True,
+        )
+        tx.refresh_from_db()
+        assert tx.legacy is True
+        assert tx.source_event_id is None and tx.source_batch_item_id is None
+        assert tx.source_invoice_id is None and tx.source_lesson_id is None
+
+    def test_every_source_kind_satisfies_the_constraint(self, school, teacher_user, student_user):
+        """Any one of the four source FKs is enough."""
+        from datetime import date as _date
+        from billing.models import HelcimWebhookEvent, PreBillingInvoice
+
+        account = _make_credit_account(student_user, school)
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-CT5')
+        sources = [
+            {'source_batch_item': _make_batch_lesson_item(batch, student_user)},
+            {'source_lesson': Lesson.objects.filter(student=student_user).first()},
+            {'source_invoice': PreBillingInvoice.objects.create(
+                student=student_user, school=school, status='sent', amount=Decimal('1.00'),
+                period_start=_date(2026, 1, 1), period_end=_date(2026, 1, 31))},
+            {'source_event': HelcimWebhookEvent.objects.create(
+                helcim_transaction_id='tx-credit-models-1', raw_payload={}, amount=Decimal('1.00'))},
+        ]
+        for src in sources:
+            CreditTransaction.objects.create(
+                account=account, school=school, type='forfeited', amount=Decimal('1.00'), **src,
+            )
+        assert CreditTransaction.objects.filter(account=account, legacy=False).count() == len(sources)
 
 
 # ---------------------------------------------------------------------------
