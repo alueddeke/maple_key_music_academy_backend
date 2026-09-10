@@ -64,6 +64,46 @@ def projected_items(invoice):
     return items
 
 
+def issued_line_items(lessons, projected):
+    """
+    Serialized line items for an invoice, in the API's `lessons` shape.
+
+    Lesson rows keep their real ids; projected items carry synthetic negative
+    ids (they are not removable rows). This is the shape written to
+    PreBillingInvoice.issued_items at send time (MAP-186) and returned by the
+    serializer, so a sent/adjusted/paid invoice displays exactly what was
+    issued and is never re-projected from current schedules.
+    """
+    return [
+        {
+            'id': l.id,
+            'scheduled_date': (
+                l.scheduled_date.date().isoformat()
+                if l.scheduled_date is not None
+                else None
+            ),
+            'duration': str(l.duration),
+            'student_rate': str(l.student_rate),
+            'charge': str(
+                (Decimal(str(l.student_rate)) * Decimal(str(l.duration)))
+                .quantize(Decimal('0.01'))
+            ),
+            'teacher_name': l.teacher.get_full_name() if l.teacher else '',
+        }
+        for l in lessons
+    ] + [
+        {
+            'id': -(i + 1),
+            'scheduled_date': item['date'].isoformat(),
+            'duration': str(item['duration']),
+            'student_rate': str(item['rate']),
+            'charge': str((item['rate'] * item['duration']).quantize(Decimal('0.01'))),
+            'teacher_name': item['teacher_name'],
+        }
+        for i, item in enumerate(projected)
+    ]
+
+
 
 def send_single_invoice(invoice, school):
     """
@@ -227,6 +267,9 @@ def send_single_invoice(invoice, school):
         invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
         invoice.payment_token = helcim_response['token']
         invoice.status = 'sent'
+        # Snapshot the issued line items (MAP-186): from here on the invoice
+        # displays these, never a re-projection of the current schedules.
+        invoice.issued_items = issued_line_items(lessons, projected)
         invoice.save()
     invoices_sent_total.labels(result='sent').inc()
 
