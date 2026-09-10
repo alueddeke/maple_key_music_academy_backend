@@ -686,12 +686,8 @@ class Invoice(models.Model):
         elif self.invoice_type == 'student_billing' and self.teacher:
             self.teacher = None
 
-        # Calculate payment balance and total_amount
-        if self.pk:  # Only if instance already exists (has lessons)
-            calculated_total = self.calculate_payment_balance()
-            self.payment_balance = calculated_total
-            self.total_amount = calculated_total
-
+        # Totals are never recomputed here — billing.services.invoice_totals.recalculate
+        # is the only writer of total_amount / payment_balance (MAP-183).
         if not self.invoice_number:
             # Outer atomic ensures the select_for_update() lock inside
             # generate_invoice_number() is held until super().save() inserts
@@ -750,10 +746,10 @@ class MonthlyInvoiceBatch(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
 
-    # linked invoice
-    invoice = models.ForeignKey(
+    # linked invoice — one payroll invoice per batch, enforced by the database (MAP-183)
+    invoice = models.OneToOneField(
         Invoice,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name='source_batch',
