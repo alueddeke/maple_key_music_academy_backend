@@ -1170,6 +1170,13 @@ class StudentCreditAccount(models.Model):
         default=Decimal('0.00'),
         help_text="Current credit balance in dollars. Always >= 0 (DB enforced).",
     )
+    needs_attention = models.BooleanField(
+        default=False,
+        help_text=(
+            "Set when a batch approval could not be fully covered by the balance "
+            "(a 'shortfall' ledger row was posted). Cleared manually."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     history = HistoricalRecords()
@@ -1191,17 +1198,28 @@ class StudentCreditAccount(models.Model):
 
 class CreditTransaction(models.Model):
     """
-    Immutable ledger entry for student credit account movements.
-    Amount is ALWAYS positive; direction is implied by type:
+    Immutable ledger entry. Every change to StudentCreditAccount.balance is one
+    row, posted by billing.services.ledger.post (the single writer) with a
+    non-null source reference (MAP-186).
+
+    Amount is ALWAYS positive; the balance effect is implied by type:
       pre_billing_payment → balance += amount
-      forfeited           → balance -= amount
       waived_rollover     → balance += amount
+      lesson_charge       → balance -= amount
+      forfeited           → informational, balance unchanged
+      shortfall           → informational, balance unchanged
+    Invariant: balance == Σ(pre_billing_payment + waived_rollover) − Σ(lesson_charge).
     Never use signed amounts (D-09: guards against sign-flip bugs).
+
+    `legacy=True` marks rows that existed before the source constraint was
+    introduced (migration 0074); ledger.post never sets it.
     """
     TRANSACTION_TYPES = [
         ('pre_billing_payment', 'Pre-Billing Payment'),
         ('forfeited', 'Forfeited'),
         ('waived_rollover', 'Waived Rollover'),
+        ('lesson_charge', 'Lesson Charge'),
+        ('shortfall', 'Shortfall'),
     ]
 
     account = models.ForeignKey(
@@ -1233,6 +1251,34 @@ class CreditTransaction(models.Model):
         related_name='credit_transactions',
         help_text="Webhook event that posted this credit; at most one credit per event.",
     )
+    source_invoice = models.ForeignKey(
+        'PreBillingInvoice',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Pre-billing invoice this row was posted against.",
+    )
+    source_batch_item = models.ForeignKey(
+        'BatchLessonItem',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Batch lesson item this row was posted against (approval charge, forfeit, rollover).",
+    )
+    source_lesson = models.ForeignKey(
+        'Lesson',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Lesson this row was posted against.",
+    )
+    legacy = models.BooleanField(
+        default=False,
+        help_text="Row predates the source requirement (migration 0074). Never set by ledger.post.",
+    )
 
     history = HistoricalRecords()
 
@@ -1249,6 +1295,16 @@ class CreditTransaction(models.Model):
                 fields=['source_event'],
                 condition=Q(source_event__isnull=False),
                 name='one_credit_per_webhook_event',
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(legacy=True)
+                    | Q(source_event__isnull=False)
+                    | Q(source_invoice__isnull=False)
+                    | Q(source_batch_item__isnull=False)
+                    | Q(source_lesson__isnull=False)
+                ),
+                name='credit_transaction_has_source',
             ),
         ]
 
@@ -1617,6 +1673,15 @@ class PreBillingInvoice(models.Model):
     email_error = models.TextField(
         blank=True,
         help_text="Last email delivery error. Cleared on successful send/resend.",
+    )
+    issued_items = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Line items as issued (written at send time, rewritten on lesson "
+            "removal). A sent/adjusted/paid invoice displays only this snapshot; "
+            "it is never re-projected from current schedules (MAP-186)."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
