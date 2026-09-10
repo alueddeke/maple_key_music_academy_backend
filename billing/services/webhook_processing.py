@@ -39,8 +39,8 @@ from ..models import (
     HelcimWebhookEvent,
     PreBillingInvoice,
     StudentCreditAccount,
-    CreditTransaction,
 )
+from . import ledger
 from .helcim_client import HelcimClient, HelcimAPIError
 
 logger = logging.getLogger(__name__)
@@ -148,12 +148,13 @@ def _process(event):
                 school=invoice.school,
             )
             # Savepoint: an IntegrityError on one_credit_per_webhook_event must
-            # not poison the outer atomic block.
+            # not poison the outer atomic block. ledger.post is the single
+            # balance writer (MAP-186): it writes the row and moves the
+            # balance together, so a rejected row leaves the balance alone.
             try:
                 with transaction.atomic():
-                    CreditTransaction.objects.create(
-                        account=account,
-                        school=invoice.school,
+                    ledger.post(
+                        account,
                         type='pre_billing_payment',
                         amount=event.amount,
                         source_event=event,
@@ -172,8 +173,6 @@ def _process(event):
                 event.save(update_fields=['school', 'processing_status', 'last_error', 'processed_at'])
                 webhook_events_total.labels(outcome='credited').inc()
                 return event
-            account.balance += event.amount
-            account.save()
 
             # Coverage is cumulative across credited events for this invoice
             # number, so two partial payments eventually flip the invoice paid.
