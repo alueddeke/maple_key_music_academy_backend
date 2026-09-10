@@ -502,22 +502,16 @@ class RecurringLessonsSchedule(models.Model):
 
     def save(self, *args, **kwargs):
         """auto-set rates and school if not provided"""
-        from decimal import Decimal
-
         #autoset school from teacher
         if not self.school_id and self.teacher:
             self.school = self.teacher.school
         # autoset rates if not provided (rate locking)
         if self.teacher_rate is None or self.student_rate is None:
-            settings = SchoolSettings.get_settings_for_school(self.school)
+            from billing.services.rates import resolve_rates
+            self.teacher_rate, self.student_rate = resolve_rates(
+                self.school, self.teacher, self.lesson_type
+            )
 
-            if self.lesson_type == 'online':
-                self.teacher_rate = settings.online_teacher_rate
-                self.student_rate = settings.online_student_rate
-            else:
-                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                self.student_rate = settings.inperson_student_rate
-            
         super().save(*args, **kwargs)
 
     def __str__(self):
