@@ -720,7 +720,7 @@ class TestApprovalLedger:
 
         second = self._generate(authenticated_management_client, batch)
 
-        assert second.status_code == 400  # invoice already generated for this batch
+        assert second.status_code == 409  # invoice already generated for this batch
         assert _ledger_rows(account, 'forfeited').count() == 1
         assert _ledger_rows(account, 'forfeited').get().source_batch_item_id == item.id
         assert _invariant_holds(account)
@@ -749,3 +749,50 @@ class TestApprovalLedger:
         assert response.data['forfeited_credits_written'] == 1
         assert _ledger_rows(account, 'forfeited').filter(source_batch_item=recorded).count() == 1
         assert _ledger_rows(account, 'forfeited').filter(source_batch_item=fresh).count() == 1
+
+    @pytest.mark.django_db(transaction=True)
+    def test_concurrent_generate_creates_one_invoice_and_one_rollover_set(
+        self, management_user, teacher_user, student_user, school, school_settings,
+    ):
+        """MAP-183: two generates racing on one approved batch → one payroll invoice,
+        one waived_rollover row per charged waived item, one 200 and one 409."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from django.db import connection
+
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        item = _ledger_item(batch, student_user, school_settings)
+        account = _funded_account(student_user, school, item.student_rate * item.duration)
+        client = APIClient()
+        client.force_authenticate(user=management_user)
+        assert self._approve(client, batch).status_code == 200
+        # Waived after approval → charged at approval → refunded as rollover at generate.
+        item.status = 'waived'
+        item.save(update_fields=['status'])
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        user_id = management_user.id
+        barrier = threading.Barrier(2)
+
+        def _generate():
+            connection.close()
+            thread_client = APIClient()
+            thread_client.force_authenticate(user=User.objects.get(id=user_id))
+            barrier.wait(timeout=10)
+            response = thread_client.post(url, format='json')
+            connection.close()
+            return response.status_code
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            statuses = sorted(f.result(timeout=30) for f in [ex.submit(_generate), ex.submit(_generate)])
+
+        assert statuses == [200, 409], statuses
+        invoices = Invoice.objects.filter(teacher=teacher_user, invoice_type='teacher_payment')
+        assert invoices.count() == 1
+        batch.refresh_from_db()
+        assert batch.invoice_id == invoices.get().id
+        rollovers = _ledger_rows(account, 'waived_rollover')
+        assert rollovers.count() == 1
+        assert rollovers.get().source_batch_item_id == item.id
+        assert _invariant_holds(account)

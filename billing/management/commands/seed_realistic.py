@@ -28,6 +28,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
+from billing.services.invoice_totals import recalculate
 from billing.models import (
     BatchLessonItem,
     BillableContact,
@@ -548,7 +549,7 @@ def _approve_batch(batch, school, items_by_student, mgmt):
         )
         teacher_invoice.save()
         teacher_invoice.lessons.set(all_lessons)
-        teacher_invoice.save()
+        recalculate(teacher_invoice)
 
         batch.invoice = teacher_invoice
         batch.status = 'approved'

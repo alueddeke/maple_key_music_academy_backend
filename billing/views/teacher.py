@@ -11,6 +11,7 @@ from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, TeacherBatchLessonItemSerializer
 )
+from ..services.invoice_totals import recalculate
 from ..services.rates import resolve_rates
 from custom_auth.decorators import (
     teacher_required, management_required, teacher_or_management_required
@@ -370,14 +371,9 @@ def submit_lessons_for_invoice(request):
                 payment_balance=0  # Will be calculated after lessons are added
             )
 
-            # Add lessons to invoice
+            # Add lessons to invoice, then price it — the only writer of totals (MAP-183)
             invoice.lessons.set(created_lessons)
-
-            # Recalculate payment balance and total amount
-            calculated_total = invoice.calculate_payment_balance()
-            invoice.payment_balance = calculated_total
-            invoice.total_amount = calculated_total
-            invoice.save()
+            recalculate(invoice)
 
             # Create student invoices
             # Group lessons by student
