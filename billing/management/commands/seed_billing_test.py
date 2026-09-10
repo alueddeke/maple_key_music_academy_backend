@@ -49,6 +49,7 @@ from django.utils import timezone
 from django.contrib.auth.hashers import make_password
 from django.db import transaction
 
+from billing.services.invoice_totals import recalculate
 from billing.models import (
     User,
     School,
@@ -328,8 +329,7 @@ def _approve_batch(batch, school, items_by_student, management_user):
         )
         teacher_invoice.save()
         teacher_invoice.lessons.set(all_lesson_objs)
-        # Let Invoice.save() recalculate from lessons
-        teacher_invoice.save()
+        recalculate(teacher_invoice)
 
         # Link invoice to batch
         batch.invoice = teacher_invoice
