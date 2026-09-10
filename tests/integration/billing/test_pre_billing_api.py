@@ -522,23 +522,21 @@ def _generate_for_period(client, year, month):
     return client.post(url, {'month': month, 'year': year}, format='json')
 
 
-def _pay_invoice_into_wallet(student, school, amount):
+def _pay_invoice_into_wallet(student, school, invoice):
     """
-    Simulate the parent paying the bill-ahead invoice: credit the period-keyed
-    wallet by the paid amount and write the immutable ledger entry
-    (CreditTransaction type='pre_billing_payment' → balance += amount).
-    This mirrors the payment path the rest of the suite uses; no real Helcim
-    HTTP is involved.
+    Simulate the parent paying the bill-ahead invoice: post the payment to the
+    period-keyed wallet through the ledger (type='pre_billing_payment', sourced
+    to the invoice → balance += amount). No real Helcim HTTP is involved.
     """
+    from django.db import transaction
+    from billing.services import ledger
+
     account, _ = StudentCreditAccount.objects.get_or_create(
         student=student, school=school, defaults={'balance': Decimal('0.00')},
     )
-    account.balance += amount
-    account.save(update_fields=['balance'])
-    CreditTransaction.objects.create(
-        account=account, school=school,
-        type='pre_billing_payment', amount=amount,
-    )
+    with transaction.atomic():
+        ledger.post(account, type='pre_billing_payment', amount=invoice.amount,
+                    source_invoice=invoice)
     return account
 
 
@@ -635,7 +633,7 @@ def test_bill_ahead_pay_then_approve_no_double_charge(
     assert invoice.lessons.count() == 0
 
     # Step 2: parent pays the invoice → wallet funded.
-    _pay_invoice_into_wallet(student, school, invoice.amount)
+    _pay_invoice_into_wallet(student, school, invoice)
     account = StudentCreditAccount.objects.get(student=student, school=school)
     assert account.balance == gross  # paid-in
 
@@ -711,7 +709,7 @@ def test_bill_ahead_with_rollover_credit_nets_correctly(
     assert invoice.amount == expected_draft
 
     # Step 2: parent pays the reduced (rollover-adjusted) amount.
-    _pay_invoice_into_wallet(student, school, invoice.amount)
+    _pay_invoice_into_wallet(student, school, invoice)
     account = StudentCreditAccount.objects.get(student=student, school=school)
     # rollover + (gross − rollover) == gross funded in the wallet.
     assert account.balance == gross
@@ -739,3 +737,116 @@ def test_bill_ahead_with_rollover_credit_nets_correctly(
     assert PreBillingInvoice.objects.filter(
         student=student, school=school, period_start=date(year, month, 1),
     ).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# MAP-186 — a sent invoice is a snapshot of what was issued
+# ---------------------------------------------------------------------------
+
+def _detail(client, invoice):
+    return client.get(reverse('management_pre_billing_detail', kwargs={'invoice_id': invoice.id}))
+
+
+def _send(client, invoice):
+    with patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_post.return_value = _helcim_create_invoice_ok()
+        mock_email.return_value = (True, 'sent')
+        return client.post(
+            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id}),
+            format='json',
+        )
+
+
+@pytest.mark.django_db
+def test_sent_invoice_detail_is_snapshot_after_schedule_change(
+    management_client, school, school_settings, teacher_user, student_with_contact,
+):
+    """
+    Schedule-projected (bill-ahead) invoice: before send the detail follows the
+    schedule; after send it shows the issued line items and nothing else, even
+    when the schedule that produced them changes.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_snapshot_1'
+    contact.save()
+    year, month = _next_period()
+    schedule = _make_active_schedule(student, teacher_user, school, year, month)
+
+    assert _generate_for_period(management_client, year, month).status_code == 200
+    invoice = PreBillingInvoice.objects.get(
+        student=student, school=school, period_start=date(year, month, 1),
+    )
+    draft_view = _detail(management_client, invoice).data
+    assert draft_view['is_projected'] is True
+    assert len(draft_view['lessons']) == len(schedule.generate_lessons_for_month(year, month))
+
+    # Contrast: a DRAFT re-projects — change the rate, the draft follows.
+    schedule.student_rate = schedule.student_rate + Decimal('5.00')
+    schedule.save(update_fields=['student_rate'])
+    draft_after_change = _detail(management_client, invoice).data
+    assert draft_after_change['lessons'] != draft_view['lessons']
+
+    assert _send(management_client, invoice).status_code == 200
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    sent_view = _detail(management_client, invoice).data
+    assert sent_view['lessons'] == draft_after_change['lessons']
+    assert sent_view['is_projected'] is True
+
+    # Now the schedule changes again, and is finally deactivated — the sent
+    # invoice must not move.
+    schedule.student_rate = schedule.student_rate + Decimal('5.00')
+    schedule.day_of_week = (schedule.day_of_week + 1) % 7
+    schedule.is_active = False
+    schedule.save(update_fields=['student_rate', 'day_of_week', 'is_active'])
+
+    after = _detail(management_client, invoice).data
+    assert after['lessons'] == sent_view['lessons']
+    assert after['is_projected'] is True
+    assert after['amount'] == sent_view['amount']
+    # And the list endpoint serves the same snapshot.
+    listed = next(i for i in management_client.get(reverse('management_pre_billing_list')).data
+                  if i['id'] == invoice.id)
+    assert listed['lessons'] == sent_view['lessons']
+
+
+@pytest.mark.django_db
+def test_lesson_backed_send_snapshots_and_removal_updates_the_snapshot(
+    management_client, school, teacher_user, student_with_contact,
+):
+    """
+    Lesson-backed invoice: send writes the snapshot; removing a lesson
+    (void + recreate) rewrites it so the detail matches the replacement invoice.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_snapshot_2'
+    contact.save()
+    invoice = _make_draft_invoice(student, school)
+    lessons = [
+        _make_confirmed_lesson(student, teacher_user, school, lesson_date=d)
+        for d in (date(2026, 6, 3), date(2026, 6, 10))
+    ]
+    invoice.lessons.add(*lessons)
+
+    assert _send(management_client, invoice).status_code == 200
+    sent_view = _detail(management_client, invoice).data
+    assert [l['id'] for l in sent_view['lessons']] == [l.id for l in lessons]
+    assert sent_view['is_projected'] is False
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_put.return_value = _helcim_cancel_invoice_ok()
+        mock_post.return_value = _helcim_create_invoice_ok()
+        mock_email.return_value = (True, 'sent')
+        response = management_client.post(
+            reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id}),
+            data={'lesson_id': lessons[0].id}, format='json',
+        )
+
+    assert response.status_code == 200
+    assert [l['id'] for l in response.data['lessons']] == [lessons[1].id]
+    after = _detail(management_client, invoice).data
+    assert after['status'] == 'adjusted'
+    assert after['lessons'] == response.data['lessons']

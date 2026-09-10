@@ -513,3 +513,239 @@ class TestManagementPutsCannotEscalate:
             assert getattr(user, name) == payload[name], name
         assert user.hourly_rate == Decimal(payload['hourly_rate'])
         assert set(user.assigned_teachers.values_list('id', flat=True)) == {teacher_user.id}
+
+
+# ---------------------------------------------------------------------------
+# MAP-186 — approval and payroll generate post to the ledger
+# ---------------------------------------------------------------------------
+
+from datetime import date, time
+
+from django.db import transaction as db_transaction
+
+from billing.models import (
+    BatchLessonItem,
+    BillableContact,
+    CreditTransaction,
+    PreBillingInvoice,
+    StudentCreditAccount,
+)
+from billing.services import ledger
+
+
+def _funded_account(student, school, amount):
+    """Fresh account funded through the ledger (a paid pre-billing invoice)."""
+    account = StudentCreditAccount.objects.create(
+        student=student, school=school, balance=Decimal('0.00'),
+    )
+    invoice = PreBillingInvoice.objects.create(
+        student=student, school=school, status='paid', amount=amount,
+        period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+    )
+    with db_transaction.atomic():
+        ledger.post(account, type='pre_billing_payment', amount=amount, source_invoice=invoice)
+    return account
+
+
+def _ledger_contact(student, school):
+    return BillableContact.objects.create(
+        student=student, school=school, contact_type='parent',
+        first_name='Ledger', last_name='Contact',
+        email=f'ledger_{student.pk}@management.test', phone='416-555-0100',
+        street_address='1 Ledger St', city='Toronto', province='ON',
+        postal_code='M5H 2N2', is_primary=True,
+    )
+
+
+def _ledger_item(batch, student, school_settings, status='completed', day=15):
+    """Item priced from the school's fixture rate — no literal amounts."""
+    return BatchLessonItem.objects.create(
+        batch=batch, student=student,
+        scheduled_date=date(batch.year, batch.month, day), start_time=time(10, 0),
+        duration=Decimal('1.0'), lesson_type='online',
+        teacher_rate=school_settings.online_teacher_rate,
+        student_rate=school_settings.online_student_rate,
+        status=status,
+    )
+
+
+def _submitted_batch(teacher, school):
+    return MonthlyInvoiceBatch.objects.create(
+        teacher=teacher, school=school, month=6, year=2026, status='submitted',
+    )
+
+
+def _ledger_rows(account, tx_type):
+    return CreditTransaction.objects.filter(account=account, type=tx_type)
+
+
+def _invariant_holds(account):
+    account.refresh_from_db()
+    rows = CreditTransaction.objects.filter(account=account, legacy=False)
+    up = sum((r.amount for r in rows if r.type in ('pre_billing_payment', 'waived_rollover')), Decimal('0.00'))
+    down = sum((r.amount for r in rows if r.type == 'lesson_charge'), Decimal('0.00'))
+    return account.balance == up - down
+
+
+@pytest.mark.django_db
+class TestApprovalLedger:
+    """Approval charges completed and forfeited items alike; never clamps silently."""
+
+    def _approve(self, client, batch):
+        return client.post(reverse('management_approve_batch', kwargs={'batch_id': batch.id}))
+
+    def _generate(self, client, batch):
+        return client.post(
+            reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id}),
+            format='json',
+        )
+
+    def test_insufficient_balance_posts_charge_and_shortfall_and_flags(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        item = _ledger_item(batch, student_user, school_settings)
+        charge = item.student_rate * item.duration
+        uncovered = (charge / 3).quantize(Decimal('0.01'))
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=charge - uncovered,
+        )
+
+        response = self._approve(authenticated_management_client, batch)
+
+        assert response.status_code == 200, response.data
+        lesson_charges = _ledger_rows(account, 'lesson_charge')
+        shortfalls = _ledger_rows(account, 'shortfall')
+        assert lesson_charges.count() == 1
+        assert lesson_charges.get().amount == charge - uncovered
+        assert lesson_charges.get().source_batch_item_id == item.id
+        assert shortfalls.count() == 1
+        assert shortfalls.get().amount == uncovered
+        assert shortfalls.get().source_batch_item_id == item.id
+        account.refresh_from_db()
+        assert account.balance == Decimal('0.00')
+        assert account.needs_attention is True
+
+    def test_sufficient_balance_posts_only_lesson_charge(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        item = _ledger_item(batch, student_user, school_settings)
+        charge = item.student_rate * item.duration
+        surplus = (charge / 2).quantize(Decimal('0.01'))
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=charge + surplus,
+        )
+
+        response = self._approve(authenticated_management_client, batch)
+
+        assert response.status_code == 200, response.data
+        assert _ledger_rows(account, 'lesson_charge').count() == 1
+        assert _ledger_rows(account, 'lesson_charge').get().amount == charge
+        assert _ledger_rows(account, 'shortfall').count() == 0
+        account.refresh_from_db()
+        assert account.balance == surplus
+        assert account.needs_attention is False
+
+    def test_every_approval_row_has_a_source_and_none_is_legacy(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        _ledger_item(batch, student_user, school_settings, day=1)
+        _ledger_item(batch, student_user, school_settings, status='forfeited', day=8)
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('0.00'),
+        )
+
+        assert self._approve(authenticated_management_client, batch).status_code == 200
+
+        rows = CreditTransaction.objects.filter(account=account)
+        assert rows.exists()
+        assert not rows.filter(legacy=True).exists()
+        assert not rows.filter(source_batch_item__isnull=True).exists()
+
+    def test_forfeited_item_charges_at_approval_without_forfeited_row(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        item = _ledger_item(batch, student_user, school_settings, status='forfeited')
+        charge = item.student_rate * item.duration
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=charge,
+        )
+
+        response = self._approve(authenticated_management_client, batch)
+
+        assert response.status_code == 200, response.data
+        assert _ledger_rows(account, 'forfeited').count() == 0
+        assert _ledger_rows(account, 'lesson_charge').count() == 1
+        assert _ledger_rows(account, 'lesson_charge').get().source_batch_item_id == item.id
+        account.refresh_from_db()
+        assert account.balance == Decimal('0.00')
+
+    def test_generate_posts_one_forfeited_row_per_item(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        item = _ledger_item(batch, student_user, school_settings, status='forfeited')
+        account = _funded_account(student_user, school, item.student_rate * item.duration)
+        assert self._approve(authenticated_management_client, batch).status_code == 200
+        balance_after_approval = StudentCreditAccount.objects.get(pk=account.pk).balance
+
+        response = self._generate(authenticated_management_client, batch)
+
+        assert response.status_code == 200, response.data
+        assert response.data['forfeited_credits_written'] == 1
+        forfeited = _ledger_rows(account, 'forfeited')
+        assert forfeited.count() == 1
+        assert forfeited.get().source_batch_item_id == item.id
+        account.refresh_from_db()
+        assert account.balance == balance_after_approval  # informational: balance untouched
+        assert _invariant_holds(account)
+
+    def test_generate_twice_keeps_one_forfeited_row(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        item = _ledger_item(batch, student_user, school_settings, status='forfeited')
+        account = _funded_account(student_user, school, item.student_rate * item.duration)
+        assert self._approve(authenticated_management_client, batch).status_code == 200
+        assert self._generate(authenticated_management_client, batch).status_code == 200
+
+        second = self._generate(authenticated_management_client, batch)
+
+        assert second.status_code == 400  # invoice already generated for this batch
+        assert _ledger_rows(account, 'forfeited').count() == 1
+        assert _ledger_rows(account, 'forfeited').get().source_batch_item_id == item.id
+        assert _invariant_holds(account)
+
+    def test_generate_does_not_repost_forfeited_for_an_item_already_recorded(
+        self, authenticated_management_client, teacher_user, student_user, school, school_settings,
+    ):
+        """Dedup is keyed on the batch item, not the amount."""
+        _ledger_contact(student_user, school)
+        batch = _submitted_batch(teacher_user, school)
+        recorded = _ledger_item(batch, student_user, school_settings, status='forfeited', day=1)
+        fresh = _ledger_item(batch, student_user, school_settings, status='forfeited', day=8)
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school,
+            balance=(recorded.student_rate + fresh.student_rate) * recorded.duration,
+        )
+        assert self._approve(authenticated_management_client, batch).status_code == 200
+        with db_transaction.atomic():
+            ledger.post(account, type='forfeited', amount=recorded.student_rate * recorded.duration,
+                        source_batch_item=recorded)
+
+        response = self._generate(authenticated_management_client, batch)
+
+        assert response.status_code == 200, response.data
+        # Same amount as `recorded`, different item → still written once for `fresh`.
+        assert response.data['forfeited_credits_written'] == 1
+        assert _ledger_rows(account, 'forfeited').filter(source_batch_item=recorded).count() == 1
+        assert _ledger_rows(account, 'forfeited').filter(source_batch_item=fresh).count() == 1

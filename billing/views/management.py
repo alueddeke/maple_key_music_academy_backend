@@ -1319,23 +1319,23 @@ def management_generate_teacher_invoice(request, batch_id):
       1. Creates Invoice(invoice_type='teacher_payment') with total_amount =
          Σ calculate_teacher_payment() over all BatchLessonItems.
       2. Links batch.invoice = invoice (signals batch lock for teacher adjustments, ADJ-07).
-      3. Writes CreditTransaction(waived_rollover) per waived item that was CHARGED at
+      3. Posts ledger waived_rollover (balance +) per waived item that was CHARGED at
          approval (D-05 — deferred from approval): refunds the approval-time charge as
          next-month student credit. Charged-at-approval is determined by membership in a
          StudentInvoice.lesson_items M2M — an item waived while the batch was still a
          draft was excluded from the invoice (never charged), so it gets no rollover.
-      4. Writes CreditTransaction(forfeited) per forfeited item as the audit record for the
-         no-show charge. The student's balance was already decremented at approval (the
-         lesson counted as a 'confirmed' charge then), so balance is NOT touched here —
-         this only records WHY the charge stands. Dedup-guarded so a lesson forfeited
-         before approval (already carrying a 'forfeited' row) is not double-recorded.
+      4. Posts ledger forfeited (balance-neutral, source_batch_item=item) per forfeited
+         item — the single no-show record (MAP-186). The student was charged at
+         approval via lesson_charge/shortfall; this row only records WHY the charge
+         stands. Dedup is keyed on the batch item, so re-running never writes a second
+         row for the same item.
 
     Returns 400 if batch not approved or Invoice already generated.
     Returns 404 if batch not in management's school (T-22-03 school isolation).
     """
-    from collections import Counter
     from django.db import transaction as db_transaction
     from ..models import CreditTransaction, StudentCreditAccount
+    from ..services import ledger
 
     try:
         batch = MonthlyInvoiceBatch.objects.get(
@@ -1404,48 +1404,40 @@ def management_generate_teacher_invoice(request, batch_id):
                 account = StudentCreditAccount.objects.select_for_update().get(
                     student=item.student, school=batch.school
                 )
-                account.balance += lesson_rate
-                account.save()
-                CreditTransaction.objects.create(
-                    account=account,
-                    school=batch.school,
+                ledger.post(
+                    account,
                     type='waived_rollover',
                     amount=lesson_rate,
+                    source_batch_item=item,
                 )
 
-        # Forfeited audit rows (ADJ/REC-04). The student was already charged at
-        # approval (the lesson counted as a 'confirmed' decrement then), so we do NOT
-        # touch balance here — we only write the CreditTransaction(type='forfeited')
-        # that records the no-show. Grouped by (student, charge) and dedup-guarded
-        # against any 'forfeited' row already written at approval, so a lesson that
-        # was forfeited before approval is never double-recorded.
-        forfeited_charges = Counter()
+        # Forfeited no-show records (MAP-186): balance-neutral ledger rows, one per
+        # forfeited item, keyed on the item. The charge itself was posted at
+        # approval (lesson_charge/shortfall).
+        forfeited_credits_written = 0
         for item in batch.lesson_items.filter(status='forfeited'):
             charge = item.student_rate * item.duration
-            if charge > Decimal('0.00'):
-                forfeited_charges[(item.student_id, charge)] += 1
-
-        forfeited_credits_written = 0
-        for (student_id, charge), needed in forfeited_charges.items():
+            if charge <= Decimal('0.00'):
+                continue
+            if CreditTransaction.objects.filter(
+                type='forfeited', source_batch_item=item
+            ).exists():
+                continue
             StudentCreditAccount.objects.get_or_create(
-                student_id=student_id,
+                student=item.student,
                 school=batch.school,
                 defaults={'balance': Decimal('0.00')},
             )
             account = StudentCreditAccount.objects.select_for_update().get(
-                student_id=student_id, school=batch.school
+                student=item.student, school=batch.school
             )
-            existing = CreditTransaction.objects.filter(
-                account=account, type='forfeited', amount=charge
-            ).count()
-            for _ in range(max(0, needed - existing)):
-                CreditTransaction.objects.create(
-                    account=account,
-                    school=batch.school,
-                    type='forfeited',
-                    amount=charge,
-                )
-                forfeited_credits_written += 1
+            ledger.post(
+                account,
+                type='forfeited',
+                amount=charge,
+                source_batch_item=item,
+            )
+            forfeited_credits_written += 1
 
     return Response({
         'status': 'invoice_generated',
@@ -1577,7 +1569,8 @@ def management_approve_batch(request, batch_id):
     If any step fails, entire transaction is rolled back.
     """
     from django.db import transaction
-    from ..models import StudentInvoice, SchoolSettings, StudentCreditAccount, CreditTransaction, PreBillingInvoice
+    from ..models import StudentInvoice, SchoolSettings, StudentCreditAccount, PreBillingInvoice
+    from ..services import ledger
     from collections import defaultdict
     import calendar
     from datetime import date as _date
@@ -1818,22 +1811,37 @@ def management_approve_batch(request, batch_id):
                         student=student, school=batch.school
                     )
 
-                # Confirmed: balance -= amount, NO CreditTransaction (D-01)
-                for item in completed_items_by_student.get(student, []):
+                # MAP-186: completed and forfeited items are charged alike, per item.
+                # charge = min(balance, amount) posts lesson_charge; any uncovered
+                # remainder posts an informational shortfall and flags the account.
+                # Never clamps silently. The forfeited no-show record is written at
+                # payroll generate, not here.
+                charged_items = (
+                    completed_items_by_student.get(student, [])
+                    + forfeited_items_by_student.get(student, [])
+                )
+                for item in charged_items:
                     lesson_amount = item.student_rate * item.duration
-                    account.balance = max(Decimal('0.00'), account.balance - lesson_amount)
-
-                # Forfeited: balance -= amount, CreditTransaction(type='forfeited') written
-                for item in forfeited_items_by_student.get(student, []):
-                    lesson_amount = item.student_rate * item.duration
-                    if lesson_amount > Decimal('0.00'):
-                        account.balance = max(Decimal('0.00'), account.balance - lesson_amount)
-                        CreditTransaction.objects.create(
-                            account=account, school=batch.school,
-                            type='forfeited', amount=lesson_amount,
+                    charge = min(account.balance, lesson_amount)
+                    if charge > Decimal('0.00'):
+                        ledger.post(
+                            account,
+                            type='lesson_charge',
+                            amount=charge,
+                            source_batch_item=item,
                         )
+                    remainder = lesson_amount - charge
+                    if remainder > Decimal('0.00'):
+                        ledger.post(
+                            account,
+                            type='shortfall',
+                            amount=remainder,
+                            source_batch_item=item,
+                        )
+                        account.needs_attention = True
 
-                account.save()
+                if account.needs_attention:
+                    account.save(update_fields=['needs_attention'])
 
             # Phase 20 (D-10, D-11): populate StudentInvoice credit fields via PreBillingInvoice lookup
             period_start = _date(batch.year, batch.month, 1)

@@ -39,6 +39,7 @@ from ..services.helcim_client import HelcimClient, HelcimAPIError, payment_page_
 from ..services.email_service import PreBillingEmailService
 from ..services.invoice_sending import (
     InvoiceSendConflict,
+    issued_line_items as _issued_line_items,
     projected_items as _projected_items,
     send_single_invoice as _send_single_invoice,
 )
@@ -115,11 +116,19 @@ def _serialize_invoice(invoice):
     contact = BillableContact.objects.filter(
         student=invoice.student, is_primary=True
     ).only('email').first()
-    # Bill-ahead invoices (empty M2M) display projected schedule dates with
-    # synthetic negative ids — they are not removable Lesson rows.
-    projected = _projected_items(invoice) if not lessons else []
+    if invoice.status == 'draft':
+        # Bill-ahead drafts (empty M2M) display projected schedule dates with
+        # synthetic negative ids — they are not removable Lesson rows.
+        projected = _projected_items(invoice) if not lessons else []
+        line_items = _issued_line_items(lessons, projected)
+        is_projected = bool(projected) or (not lessons and bool(invoice.excluded_dates))
+    else:
+        # Issued invoices are snapshots (MAP-186): display only what was sent,
+        # never re-project from the current schedules.
+        line_items = invoice.issued_items or []
+        is_projected = not lessons and bool(line_items)
     return {
-        'is_projected': bool(projected) or (not lessons and bool(invoice.excluded_dates)),
+        'is_projected': is_projected,
         'excluded_dates': sorted(invoice.excluded_dates or []),
         'id': invoice.id,
         'status': invoice.status,
@@ -141,34 +150,7 @@ def _serialize_invoice(invoice):
             'email': invoice.student.email,
             'contact_email': contact.email if contact else invoice.student.email,
         },
-        'lessons': [
-            {
-                'id': l.id,
-                'scheduled_date': (
-                    l.scheduled_date.date().isoformat()
-                    if l.scheduled_date is not None
-                    else None
-                ),
-                'duration': str(l.duration),
-                'student_rate': str(l.student_rate),
-                'charge': str(
-                    (Decimal(str(l.student_rate)) * Decimal(str(l.duration)))
-                    .quantize(Decimal('0.01'))
-                ),
-                'teacher_name': l.teacher.get_full_name() if l.teacher else '',
-            }
-            for l in lessons
-        ] + [
-            {
-                'id': -(i + 1),
-                'scheduled_date': item['date'].isoformat(),
-                'duration': str(item['duration']),
-                'student_rate': str(item['rate']),
-                'charge': str((item['rate'] * item['duration']).quantize(Decimal('0.01'))),
-                'teacher_name': item['teacher_name'],
-            }
-            for i, item in enumerate(projected)
-        ],
+        'lessons': line_items,
     }
 
 
@@ -628,6 +610,8 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     # Step 12: Minimal transaction.atomic for ALL DB writes (T-19-04-06)
     with transaction.atomic():
         invoice.lessons.remove(lesson)
+        # The issued snapshot follows the replacement Helcim invoice (MAP-186).
+        invoice.issued_items = _issued_line_items(remaining, [])
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
         invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
         invoice.payment_token = helcim_response['token']
