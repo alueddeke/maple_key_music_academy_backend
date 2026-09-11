@@ -17,6 +17,7 @@ Architectural constraint (STATE.md hard rule, T-19-03-06):
 
 import logging
 import calendar
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -40,6 +41,7 @@ from ..services.email_service import PreBillingEmailService
 from ..services.invoice_sending import (
     InvoiceSendConflict,
     credit_discount as _credit_discount,
+    helcim_invoice_number as _helcim_invoice_number,
     issued_line_items as _issued_line_items,
     projected_items as _projected_items,
     send_single_invoice as _send_single_invoice,
@@ -385,6 +387,11 @@ def management_pre_billing_send(request, invoice_id):
     with one lineItem per lesson date, persist helcim_invoice_id + payment_token,
     set status=sent, and send a Resend email.
 
+    Accepts a draft, or an unresolved earlier attempt (status='sending',
+    send_outcome='unknown') — the manual re-send path (MAP-185, R8):
+    send_single_invoice looks the previous attempt's Helcim number up before
+    creating again.
+
     All Helcim HTTP calls are OUTSIDE transaction.atomic() (T-19-03-06).
     """
     try:
@@ -398,9 +405,12 @@ def management_pre_billing_send(request, invoice_id):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    if invoice.status != 'draft':
+    sendable = invoice.status == 'draft' or (
+        invoice.status == 'sending' and invoice.send_outcome == 'unknown'
+    )
+    if not sendable:
         return Response(
-            {'error': 'Only draft invoices can be sent'},
+            {'error': 'Only draft invoices (or an unresolved send) can be sent'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -574,14 +584,18 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     ]
 
     # Step 7: OUTSIDE transaction — create replacement Helcim invoice with the
-    # credit as a discount (T-19-04-06). Helcim assigns the number (D3;
-    # MAP-185 adds the client number to this path).
+    # credit as a discount (T-19-04-06), under our own number for a fresh
+    # attempt id (MK{pk}-{hex[:8]}, same scheme as send — MAP-185). The
+    # attempt id is persisted with the replacement in Step 9: a create
+    # failure leaves nothing behind (MAP-184).
+    replacement_attempt_id = uuid.uuid4()
     try:
         helcim_response = HelcimClient(school=school).create_invoice(
             currency='CAD',
             line_items=line_items,
             customer_id=contact.helcim_customer_id,
             discount=_credit_discount(line_items, amount),
+            invoice_number=_helcim_invoice_number(invoice.pk, replacement_attempt_id),
         )
     except HelcimAPIError as e:
         # Nothing persisted, old invoice untouched and still live.
@@ -613,6 +627,7 @@ def management_pre_billing_remove_lesson(request, invoice_id):
         invoice.amount = amount
         invoice.revision += 1
         invoice.cancel_outcome = 'pending'
+        invoice.send_attempt_id = replacement_attempt_id
         invoice.save()
 
     # Step 10: OUTSIDE transaction — cancel the previous Helcim invoice
