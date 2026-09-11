@@ -6,13 +6,18 @@ so a crash here can never take down the API, and vice versa.
 Concurrency model: items are claimed one at a time with
 select_for_update(skip_locked) in FIFO order, so running N copies of this
 command is safe — parallelism is an ops decision, not a code change. The
-invoice-level draft->sending conditional UPDATE inside send_single_invoice
-remains the last double-send guard.
+invoice-level conditional UPDATE inside send_single_invoice (draft, or an
+unresolved send whose attempt id the caller read — MAP-185) remains the last
+double-send guard.
 
 Retry policy: transient Helcim failures (network / 5xx) retry in place up to
-MAX_ATTEMPTS with a short backoff; validation-class failures ($0 invoice,
-missing contact, non-draft invoice) fail or skip immediately — retrying can't
-fix them.
+MAX_ATTEMPTS with a short backoff; every retry looks the previous attempt's
+Helcim number up before creating again (send_single_invoice), so a retry
+never produces a second Helcim invoice. Validation-class failures ($0
+invoice, missing contact) fail immediately — retrying can't fix them; an
+invoice that already moved on (sent/adjusted/paid) is skipped. A failed
+item leaves its invoice in sending/unknown, which the next run, a stale
+re-queue, or a manual re-send recovers through the same lookup-first path.
 """
 import logging
 import os
@@ -96,10 +101,14 @@ class Command(BaseCommand):
         """
         Re-queue items a dead worker left in 'sending', keyed on claimed_at —
         runs at startup and on every idle sweep, so a single crash-restart
-        self-heals within STALE_SENDING_MINUTES. A healthy send never lasts
-        that long; if one somehow did and a second worker re-claimed the item,
-        the invoice-level draft->sending CAS in send_single_invoice surfaces
-        InvoiceSendConflict and the duplicate claim is skipped, not re-sent.
+        self-heals within STALE_SENDING_MINUTES. The re-queued item's invoice
+        is usually sending/unknown (the dead worker had claimed it); that is
+        recoverable (MAP-185): _process_item sends it again and
+        send_single_invoice looks the previous attempt's Helcim number up
+        before creating, so the recovery adopts an invoice Helcim already
+        holds instead of duplicating it. If a live worker still holds the
+        claim, the attempt-id check in send_single_invoice surfaces
+        InvoiceSendConflict and the duplicate is skipped, not re-sent.
         """
         cutoff = timezone.now() - timezone.timedelta(minutes=STALE_SENDING_MINUTES)
         recovered = InvoiceSendItem.objects.filter(
@@ -135,12 +144,22 @@ class Command(BaseCommand):
             )
             return item
 
+    @staticmethod
+    def _is_sendable(invoice):
+        """Draft, or an unresolved earlier attempt (MAP-185) — both go through send_single_invoice."""
+        return invoice.status == 'draft' or (
+            invoice.status == 'sending' and invoice.send_outcome == 'unknown'
+        )
+
     def _process_item(self, item):
         invoice = item.invoice
-        if invoice.status != 'draft':
+        if not self._is_sendable(invoice):
             # Sent individually (or otherwise moved on) after the snapshot —
             # nothing to do, and not a failure worth alarming on.
-            self._finalize_item(item, 'skipped', f'Invoice status is {invoice.status}, not draft.')
+            self._finalize_item(
+                item, 'skipped',
+                f'Invoice status is {invoice.status}/{invoice.send_outcome}, not sendable.',
+            )
             return
 
         attempt = 0
