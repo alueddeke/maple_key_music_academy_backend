@@ -5,16 +5,21 @@ Unit tests for pre-billing send hardening:
     payment page charges exactly invoice.amount (net), never gross
   - Double-send guard: concurrent/second send returns 409, no duplicate
     Helcim invoice
-  - Helcim failure releases the 'sending' claim back to draft
+  - Helcim failure leaves the claim in place (sending/unknown, MAP-185); the
+    next attempt looks the previous number up before creating again, and two
+    callers racing an unresolved invoice → exactly one proceeds
   - Email failure is recorded on the invoice (email_sent/email_error)
     and recoverable via the resend-email endpoint
 """
 
+import threading
+import uuid
 from datetime import date
 from decimal import Decimal
 from unittest import mock
 
 import pytest
+from django.db import connection
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -28,6 +33,7 @@ from billing.models import (
     RecurringLessonsSchedule,
 )
 from billing.services.helcim_client import HelcimAPIError
+from billing.services.invoice_sending import InvoiceSendConflict, send_single_invoice
 
 HELCIM_RESPONSE = {'invoiceId': 111, 'invoiceNumber': 'INV900', 'token': 'tok-abc'}
 
@@ -157,20 +163,117 @@ def test_second_send_returns_409_no_duplicate_helcim_invoice(
 
 
 @pytest.mark.django_db
-def test_helcim_failure_releases_claim_back_to_draft(management_client, school, teacher_user):
-    """create_invoice raises → invoice back to draft (not stuck in 'sending')."""
-    student = _student_with_contact(school, 'release')
+def test_helcim_failure_leaves_sending_unknown_then_manual_resend_adopts(
+    management_client, school, teacher_user
+):
+    """
+    create_invoice raises → the claim is NOT released: sending/unknown with the
+    attempt id whose number Helcim may already hold. A manual re-send (guard
+    relaxed) looks that number up, adopts it, and creates nothing.
+    """
+    student = _student_with_contact(school, 'unknown')
     invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+    url = reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
 
     with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
         MockClient.return_value.create_invoice.side_effect = HelcimAPIError('boom', status_code=500)
-        response = management_client.post(
-            reverse('management_pre_billing_send', kwargs={'invoice_id': invoice.id})
-        )
+        MockClient.return_value.get_invoice_by_number.return_value = None
+        response = management_client.post(url)
 
     assert response.status_code == 400
     invoice.refresh_from_db()
-    assert invoice.status == 'draft'
+    assert invoice.status == 'sending'
+    assert invoice.send_outcome == 'unknown'
+    assert invoice.send_attempt_id is not None
+    first_number = MockClient.return_value.create_invoice.call_args.kwargs['invoice_number']
+    assert first_number == f'MK{invoice.pk}-{invoice.send_attempt_id.hex[:8]}'
+    MockClient.return_value.get_invoice_by_number.assert_not_called()  # first attempt: nothing to look up
+
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient2:
+        MockClient2.return_value.get_invoice_by_number.return_value = {
+            'invoiceId': 111, 'invoiceNumber': first_number, 'token': 'tok-abc',
+        }
+        response = management_client.post(url)
+
+    assert response.status_code == 200
+    MockClient2.return_value.get_invoice_by_number.assert_called_once_with(first_number)
+    MockClient2.return_value.create_invoice.assert_not_called()
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.send_outcome == 'sent'
+    assert invoice.helcim_invoice_id == '111'
+    assert invoice.helcim_invoice_number == first_number
+    assert invoice.payment_token == 'tok-abc'
+
+
+def _unresolved_invoice(school, teacher_user, tag):
+    """The state a failed first attempt leaves behind: sending/unknown + attempt id."""
+    student = _student_with_contact(school, tag)
+    invoice = _sendable_invoice(school, teacher_user, student, '120.00')
+    first_attempt = uuid.uuid4()
+    PreBillingInvoice.objects.filter(pk=invoice.pk).update(
+        status='sending', send_outcome='unknown', send_attempt_id=first_attempt,
+    )
+    return invoice, first_attempt
+
+
+@pytest.mark.django_db
+def test_stale_attempt_id_cannot_claim(school, teacher_user):
+    """A caller holding a rotated-away attempt id loses the claim: no lookup, no create."""
+    invoice, first_attempt = _unresolved_invoice(school, teacher_user, 'stale')
+    stale = PreBillingInvoice.objects.get(pk=invoice.pk)  # reads first_attempt
+    PreBillingInvoice.objects.filter(pk=invoice.pk).update(send_attempt_id=uuid.uuid4())
+
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient:
+        with pytest.raises(InvoiceSendConflict):
+            send_single_invoice(stale, school)
+
+    MockClient.return_value.get_invoice_by_number.assert_not_called()
+    MockClient.return_value.create_invoice.assert_not_called()
+    invoice.refresh_from_db()
+    assert invoice.status == 'sending'
+    assert invoice.send_outcome == 'unknown'
+
+
+@pytest.mark.django_db(transaction=True)
+def test_two_racers_on_unknown_invoice_one_proceeds(school, teacher_user):
+    """Two callers race the same unresolved invoice → one sends, one conflicts, one create."""
+    invoice, first_attempt = _unresolved_invoice(school, teacher_user, 'racers')
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def racer(name):
+        try:
+            inv = PreBillingInvoice.objects.get(pk=invoice.pk)
+            barrier.wait()
+            send_single_invoice(inv, inv.school)
+            results[name] = 'sent'
+        except InvoiceSendConflict:
+            results[name] = 'conflict'
+        except Exception as exc:  # noqa: BLE001 — surface in the assertion below
+            results[name] = repr(exc)
+        finally:
+            connection.close()
+
+    with mock.patch('billing.services.invoice_sending.HelcimClient') as MockClient, \
+         mock.patch(
+             'billing.services.invoice_sending.PreBillingEmailService.send_payment_request',
+             return_value=(True, 'sent'),
+         ):
+        MockClient.return_value.get_invoice_by_number.return_value = None
+        MockClient.return_value.create_invoice.return_value = HELCIM_RESPONSE
+        threads = [threading.Thread(target=racer, args=(n,)) for n in ('a', 'b')]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert sorted(results.values()) == ['conflict', 'sent']
+    assert MockClient.return_value.create_invoice.call_count == 1
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.send_outcome == 'sent'
+    assert invoice.send_attempt_id != first_attempt
 
 
 @pytest.mark.django_db

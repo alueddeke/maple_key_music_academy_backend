@@ -32,6 +32,7 @@ from billing.services.helcim_client import (
     HELCIM_TIMEOUT,
     HelcimAPIError,
     HelcimClient,
+    HelcimInvoiceNumberExists,
 )
 
 
@@ -262,3 +263,95 @@ def test_no_django_model_imports():
     assert 'from billing.models' not in source, (
         "D-01 violated: from billing.models import found in helcim_client.py"
     )
+
+
+# ---------------------------------------------------------------------------
+# MAP-185: client-supplied invoice numbers + lookup by number
+# ---------------------------------------------------------------------------
+
+@patch('billing.services.helcim_client.requests.post')
+def test_create_invoice_with_invoice_number(mock_post):
+    """invoice_number rides in the body as invoiceNumber; absent when not given."""
+    mock_post.return_value = _make_response(json_data={'invoiceId': 'INV-3', 'invoiceNumber': 'MK12-abcd1234', 'token': 't'})
+    line_items = [{'description': 'Lesson', 'quantity': 1.0, 'price': 60.00}]
+
+    _make_client().create_invoice('CAD', line_items, invoice_number='MK12-abcd1234')
+    assert mock_post.call_args[1]['json']['invoiceNumber'] == 'MK12-abcd1234'
+
+    _make_client().create_invoice('CAD', line_items)
+    assert 'invoiceNumber' not in mock_post.call_args[1]['json']
+
+
+@patch('billing.services.helcim_client.requests.post')
+def test_create_invoice_duplicate_number_is_typed_error(mock_post):
+    """400 'Invoice Number already existed' → HelcimInvoiceNumberExists (a HelcimAPIError, status 400)."""
+    mock_post.return_value = _make_response(
+        ok=False, status_code=400, text='{"errors":"Invoice Number already existed"}'
+    )
+
+    with pytest.raises(HelcimInvoiceNumberExists) as exc_info:
+        _make_client().create_invoice('CAD', [], invoice_number='MK12-abcd1234')
+
+    assert isinstance(exc_info.value, HelcimAPIError)
+    assert exc_info.value.status_code == 400
+    assert 'already existed' in exc_info.value.raw_response
+
+
+@patch('billing.services.helcim_client.requests.post')
+def test_create_invoice_other_400_stays_plain_error(mock_post):
+    """Any other 400 is the plain HelcimAPIError — only the duplicate-number body is typed."""
+    mock_post.return_value = _make_response(ok=False, status_code=400, text='{"errors":"customer not found"}')
+
+    with pytest.raises(HelcimAPIError) as exc_info:
+        _make_client().create_invoice('CAD', [], invoice_number='MK12-abcd1234')
+
+    assert not isinstance(exc_info.value, HelcimInvoiceNumberExists)
+
+
+@patch('billing.services.helcim_client.requests.get')
+def test_get_invoice_by_number_request_shape_and_exact_match(mock_get):
+    """GET /invoices?invoiceNumber=…, no limit; returns the exact-number match only."""
+    mock_get.return_value = _make_response(json_data=[
+        {'invoiceId': 1, 'invoiceNumber': 'MK12-abcd1234x', 'token': 'wrong'},
+        {'invoiceId': 2, 'invoiceNumber': 'MK12-abcd1234', 'token': 'right'},
+    ])
+
+    result = _make_client().get_invoice_by_number('MK12-abcd1234')
+
+    assert result == {'invoiceId': 2, 'invoiceNumber': 'MK12-abcd1234', 'token': 'right'}
+    mock_get.assert_called_once()
+    args, kwargs = mock_get.call_args
+    assert args[0] == f'{HELCIM_API_BASE}/invoices'
+    assert kwargs['params'] == {'invoiceNumber': 'MK12-abcd1234'}
+    assert 'api-token' in kwargs['headers']
+    assert kwargs['timeout'] == HELCIM_TIMEOUT
+
+
+@patch('billing.services.helcim_client.requests.get')
+def test_get_invoice_by_number_accepts_wrapped_list(mock_get):
+    mock_get.return_value = _make_response(json_data={'data': [
+        {'invoiceId': 3, 'invoiceNumber': 'MK12-abcd1234', 'token': 't'},
+    ]})
+    assert _make_client().get_invoice_by_number('MK12-abcd1234')['invoiceId'] == 3
+
+
+@patch('billing.services.helcim_client.requests.get')
+def test_get_invoice_by_number_empty_returns_none(mock_get):
+    mock_get.return_value = _make_response(json_data=[])
+    assert _make_client().get_invoice_by_number('MK12-abcd1234') is None
+
+
+@patch('billing.services.helcim_client.requests.get')
+def test_get_invoice_by_number_non_2xx_raises(mock_get):
+    mock_get.return_value = _make_response(ok=False, status_code=500, text='boom')
+    with pytest.raises(HelcimAPIError) as exc_info:
+        _make_client().get_invoice_by_number('MK12-abcd1234')
+    assert exc_info.value.status_code == 500
+
+
+@patch('billing.services.helcim_client.requests.get')
+def test_get_invoice_by_number_timeout_raises(mock_get):
+    mock_get.side_effect = requests.Timeout()
+    with pytest.raises(HelcimAPIError) as exc_info:
+        _make_client().get_invoice_by_number('MK12-abcd1234')
+    assert exc_info.value.status_code is None
