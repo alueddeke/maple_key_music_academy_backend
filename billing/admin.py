@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth import get_user_model
@@ -19,9 +21,12 @@ from .models import (
     PreBillingInvoice,
     InvoiceRecipientEmail,
 )
+from .services.helcim_client import HelcimClient, HelcimAPIError
 from .services.webhook_processing import process_webhook_event, RETRYABLE_STATES
 
 #manages admin interface
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -121,12 +126,48 @@ class HelcimWebhookEventAdmin(admin.ModelAdmin):
 @admin.register(PreBillingInvoice)
 class PreBillingInvoiceAdmin(admin.ModelAdmin):
     list_display = ('id', 'student', 'school', 'status', 'amount',
-                    'period_start', 'helcim_invoice_number', 'email_sent', 'updated_at')
-    list_filter = ('status', 'email_sent', 'school', 'period_start')
+                    'period_start', 'helcim_invoice_number', 'revision',
+                    'previous_helcim_invoice_number', 'cancel_outcome',
+                    'email_sent', 'updated_at')
+    list_filter = ('status', 'cancel_outcome', 'email_sent', 'school', 'period_start')
     search_fields = ('student__email', 'student__first_name', 'student__last_name',
-                     'helcim_invoice_number', 'helcim_invoice_id')
+                     'helcim_invoice_number', 'helcim_invoice_id',
+                     'previous_helcim_invoice_number', 'previous_helcim_invoice_id')
     readonly_fields = ('helcim_invoice_id', 'helcim_invoice_number', 'payment_token',
-                       'created_at', 'updated_at')
+                       'previous_helcim_invoice_id', 'previous_helcim_invoice_number',
+                       'revision', 'cancel_outcome', 'created_at', 'updated_at')
+    actions = ['retry_cancel']
+
+    @admin.action(description='Retry cancel of the previous Helcim invoice (failed voids only)')
+    def retry_cancel(self, request, queryset):
+        # MAP-184: a lesson removal persists the replacement first and voids
+        # the previous invoice second; a rejected void leaves cancel_outcome
+        # 'failed'. This re-attempts that void so two live invoices never
+        # stay un-flagged.
+        done = failed = skipped = 0
+        for invoice in queryset:
+            if invoice.cancel_outcome != 'failed':
+                skipped += 1
+                continue
+            try:
+                HelcimClient(school=invoice.school).cancel_invoice(
+                    invoice.previous_helcim_invoice_id
+                )
+            except HelcimAPIError as e:
+                logger.error(
+                    'retry cancel failed for invoice %s (previous helcim_id=%s): %s',
+                    invoice.id, invoice.previous_helcim_invoice_id, e,
+                )
+                failed += 1
+                continue
+            invoice.cancel_outcome = 'done'
+            invoice.save(update_fields=['cancel_outcome', 'updated_at'])
+            done += 1
+        self.message_user(
+            request,
+            f'{done} previous invoice(s) voided, {failed} still failed, '
+            f'{skipped} skipped (cancel_outcome not failed).',
+        )
 
 
 @admin.register(StudentCreditAccount)
