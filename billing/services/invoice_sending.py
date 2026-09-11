@@ -6,13 +6,19 @@ send-run worker and the HTTP views share one implementation. Behavior contract
 unchanged:
 - All HelcimClient HTTP calls stay OUTSIDE any transaction.atomic() block
   (STATE.md / T-19-03-06) — wrapping them orphans Helcim invoices on rollback.
-- The draft -> sending conditional UPDATE is the double-send lock; exactly one
-  caller wins, and a failed send releases the claim.
+- The conditional UPDATE claim is the double-send lock (MAP-185): it accepts
+  a draft, or an unresolved send (sending/unknown) whose attempt id the caller
+  read. Exactly one caller wins. A failed send does NOT release the claim —
+  the row stays sending/unknown and the next attempt looks the previous
+  attempt's Helcim number up before creating again, so one successful send
+  means exactly one Helcim invoice.
 """
 import logging
+import uuid
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 
 from ..models import (
     BillableContact,
@@ -20,7 +26,12 @@ from ..models import (
     RecurringLessonsSchedule,
     StudentCreditAccount,
 )
-from .helcim_client import HelcimClient, HelcimAPIError, payment_page_url
+from .helcim_client import (
+    HelcimClient,
+    HelcimAPIError,
+    HelcimInvoiceNumberExists,
+    payment_page_url,
+)
 from .email_service import PreBillingEmailService
 from billing.metrics import invoices_sent_total
 
@@ -29,6 +40,16 @@ logger = logging.getLogger(__name__)
 
 class InvoiceSendConflict(Exception):
     """Raised when an invoice is not in a sendable state (double-send guard)."""
+
+
+def helcim_invoice_number(invoice_pk, attempt_id):
+    """
+    Client-supplied Helcim invoiceNumber for one send attempt (MAP-185):
+    MK{pk}-{uuid hex[:8]}. The uuid slice keeps numbers unique across the
+    shared test account every local dev DB talks to; the number is visible
+    to parents (accepted).
+    """
+    return f"MK{invoice_pk}-{attempt_id.hex[:8]}"
 
 
 
@@ -131,18 +152,28 @@ def credit_discount(line_items, amount):
 
 def send_single_invoice(invoice, school):
     """
-    Send a single draft PreBillingInvoice via Helcim and email.
+    Send a PreBillingInvoice via Helcim and email — a draft, or an unresolved
+    earlier attempt (status='sending', send_outcome='unknown').
 
     All HelcimClient HTTP calls are OUTSIDE any transaction.atomic() block
     per the hard architectural constraint (STATE.md / T-19-03-06).
 
+    MAP-185 contract:
+    - The claim records a fresh attempt id; the Helcim number for the attempt
+      is derived from it. A failure of unknown outcome never returns the row
+      to draft.
+    - Every retry first looks the previous attempt's number up at Helcim and
+      adopts it if present; only if absent does it create, under the new
+      number. A 400 "Invoice Number already existed" on create is "found".
+
     Args:
-        invoice: PreBillingInvoice instance (status='draft')
+        invoice: PreBillingInvoice instance
         school: School instance (for URL assembly + email sign-off)
 
     Raises:
+        InvoiceSendConflict: another caller holds the claim
         BillableContact.DoesNotExist: if no primary contact found
-        HelcimAPIError: if Helcim create_customer or create_invoice fails
+        HelcimAPIError: if Helcim create_customer / lookup / create_invoice fails
     """
     # Re-assert school isolation (belt-and-suspenders; caller already enforces this)
     assert invoice.school_id == school.id, (
@@ -173,8 +204,9 @@ def send_single_invoice(invoice, school):
 
     # Schedule-sourced drafts: schedules (or credit) may have changed since
     # the draft was generated — recompute so stored amount, email, and the
-    # Helcim page all agree at the moment of sending. Persisted with the
-    # final save inside the claim; a failed send never writes it.
+    # Helcim page all agree at the moment of sending. The claim below writes
+    # it, so every later attempt of this send uses the amount the Helcim
+    # invoice was created with (MAP-185).
     if projected and invoice.status == 'draft':
         gross_projected = sum(
             (item['rate'] * item['duration'] for item in projected),
@@ -195,16 +227,42 @@ def send_single_invoice(invoice, school):
             status_code=400,
         )
 
-    # Atomically claim the invoice (draft → sending) so two concurrent send
-    # requests cannot both create Helcim invoices + emails. The conditional
-    # UPDATE is the lock; exactly one request wins.
+    # Claim (MAP-185): one conditional UPDATE accepts a draft, or an
+    # unresolved send whose attempt id is the one this caller read. Rotating
+    # the id in the same statement is what makes a second concurrent re-send
+    # lose. Exactly one caller wins; the loser gets a conflict.
+    previous_attempt_id = invoice.send_attempt_id
+    previous_number = (
+        helcim_invoice_number(invoice.pk, previous_attempt_id)
+        if previous_attempt_id is not None
+        else None
+    )
+    new_attempt_id = uuid.uuid4()
+    claimable = Q(status='draft')
+    if previous_attempt_id is not None:
+        claimable |= Q(
+            status='sending',
+            send_outcome='unknown',
+            send_attempt_id=previous_attempt_id,
+        )
     claimed = PreBillingInvoice.objects.filter(
-        pk=invoice.pk, status='draft'
-    ).update(status='sending')
+        Q(pk=invoice.pk) & claimable
+    ).update(
+        status='sending',
+        send_outcome='unknown',
+        send_attempt_id=new_attempt_id,
+        amount=invoice.amount,
+    )
     if not claimed:
         raise InvoiceSendConflict(
             'This invoice is already being sent or was already sent.'
         )
+    # Mirror the claim on the instance so the final save() cannot write
+    # stale values back over it.
+    invoice.status = 'sending'
+    invoice.send_outcome = 'unknown'
+    invoice.send_attempt_id = new_attempt_id
+    number = helcim_invoice_number(invoice.pk, new_attempt_id)
 
     try:
         # Lazy customer creation — OUTSIDE transaction (Helcim HTTP call must not be wrapped)
@@ -248,18 +306,37 @@ def send_single_invoice(invoice, school):
                 for l in lessons
             ]
 
-        # Create Helcim invoice — OUTSIDE transaction
-        helcim_response = HelcimClient(school=school).create_invoice(
-            currency='CAD',
-            line_items=line_items,
-            customer_id=contact.helcim_customer_id,
-            discount=credit_discount(line_items, invoice.amount),
-        )
+        client = HelcimClient(school=school)
+        helcim_response = None
+
+        # Lookup-first (MAP-185): a previous attempt may have created the
+        # invoice without our hearing back. Adopt it rather than create twice.
+        # A first send from draft has no previous attempt and goes straight
+        # to create.
+        if previous_number is not None:
+            helcim_response = client.get_invoice_by_number(previous_number)
+            if helcim_response is not None:
+                number = previous_number
+
+        if helcim_response is None:
+            # Create Helcim invoice — OUTSIDE transaction
+            try:
+                helcim_response = client.create_invoice(
+                    currency='CAD',
+                    line_items=line_items,
+                    customer_id=contact.helcim_customer_id,
+                    discount=credit_discount(line_items, invoice.amount),
+                    invoice_number=number,
+                )
+            except HelcimInvoiceNumberExists:
+                # Helcim already holds this number: the create we never heard
+                # back from went through. Treat as found — look it up, adopt.
+                helcim_response = client.get_invoice_by_number(number)
+                if helcim_response is None:
+                    raise
     except Exception:
-        # Release the claim so the invoice stays sendable after a failure.
-        PreBillingInvoice.objects.filter(
-            pk=invoice.pk, status='sending'
-        ).update(status='draft')
+        # The claim is NOT released (MAP-185): the row stays sending/unknown
+        # and the next attempt looks the number up before creating again.
         invoices_sent_total.labels(result='failed').inc()
         raise
 
@@ -269,11 +346,13 @@ def send_single_invoice(invoice, school):
     # Minimal atomic block ONLY for the DB write
     with transaction.atomic():
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
+        # Our number for this attempt (MK{pk}-{attempt}; Helcim echoes it).
         # Payment/webhook responses reference invoiceNumber, not invoiceId —
         # webhook reconciliation matches on this field.
-        invoice.helcim_invoice_number = str(helcim_response.get('invoiceNumber', ''))
+        invoice.helcim_invoice_number = number
         invoice.payment_token = helcim_response['token']
         invoice.status = 'sent'
+        invoice.send_outcome = 'sent'
         # Snapshot the issued line items (MAP-186): from here on the invoice
         # displays these, never a re-projection of the current schedules.
         invoice.issued_items = issued_line_items(lessons, projected)
