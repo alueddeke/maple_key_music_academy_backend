@@ -28,6 +28,18 @@ class HelcimAPIError(Exception):
         self.raw_response = raw_response
 
 
+class HelcimInvoiceNumberExists(HelcimAPIError):
+    """
+    POST /v2/invoices rejected a client-supplied invoiceNumber Helcim already
+    holds (400 "Invoice Number already existed", sandbox probe 2026-09-08).
+    For the send pipeline this means "the create you never heard back from
+    went through" — look the number up and adopt it (MAP-185).
+    """
+
+
+DUPLICATE_INVOICE_NUMBER_MARKER = 'already existed'
+
+
 def helcim_subdomain_for(school=None):
     """
     Resolve the Helcim account subdomain used to build hosted-payment URLs.
@@ -77,7 +89,8 @@ class HelcimClient:
             'Content-Type': 'application/json',
         }
 
-    def create_invoice(self, currency, line_items, customer_id=None, discount=None):
+    def create_invoice(self, currency, line_items, customer_id=None, discount=None,
+                       invoice_number=None):
         """
         POST /v2/invoices
 
@@ -89,12 +102,16 @@ class HelcimClient:
                 subtracts it from the invoice total (amountDue = lineItems − discount).
                 Line-item prices must be non-negative; a negative "credit" line
                 item is rejected by the API, so credit rides here instead.
+            invoice_number: optional client-supplied invoiceNumber (MAP-185).
+                Helcim echoes it back and rejects a second create under the
+                same number with 400 "Invoice Number already existed".
 
         Returns:
             dict with invoiceId, invoiceNumber, token (for hosted payment page), etc.
 
         Raises:
-            HelcimAPIError: on non-2xx response or timeout
+            HelcimInvoiceNumberExists: 400 duplicate invoiceNumber
+            HelcimAPIError: any other non-2xx response or timeout
         """
         payload = {
             'currency': currency,
@@ -104,6 +121,8 @@ class HelcimClient:
             payload['customerId'] = customer_id
         if discount is not None:
             payload['discount'] = discount
+        if invoice_number is not None:
+            payload['invoiceNumber'] = invoice_number
 
         try:
             response = requests.post(
@@ -123,13 +142,66 @@ class HelcimClient:
                 response.status_code,
                 response.text,
             )
-            raise HelcimAPIError(
+            error_cls = HelcimAPIError
+            if (
+                response.status_code == 400
+                and DUPLICATE_INVOICE_NUMBER_MARKER in (response.text or '').lower()
+            ):
+                error_cls = HelcimInvoiceNumberExists
+            raise error_cls(
                 f'Helcim create_invoice failed: {response.status_code}',
                 status_code=response.status_code,
                 raw_response=response.text,
             )
 
         return response.json()
+
+    def get_invoice_by_number(self, invoice_number):
+        """
+        GET /v2/invoices?invoiceNumber={invoice_number}
+
+        Lookup-first for the send pipeline (MAP-185): before a retry creates
+        again, ask Helcim whether the previous attempt's number already
+        exists. `limit` is ignored on this endpoint (sandbox probe), so the
+        match is made client-side on the exact invoiceNumber.
+
+        Returns:
+            the invoice dict (invoiceId, invoiceNumber, token, ...) or None
+
+        Raises:
+            HelcimAPIError: on non-2xx response or timeout
+        """
+        try:
+            response = requests.get(
+                f'{HELCIM_API_BASE}/invoices',
+                params={'invoiceNumber': invoice_number},
+                headers=self._headers(),
+                timeout=HELCIM_TIMEOUT,
+            )
+        except requests.Timeout:
+            logger.error('Helcim %s timeout after %ds', 'get_invoice_by_number', HELCIM_TIMEOUT)
+            raise HelcimAPIError('Helcim get_invoice_by_number timeout', status_code=None)
+
+        if not response.ok:
+            logger.error(
+                'Helcim %s failed: status=%s body=%s',
+                'get_invoice_by_number',
+                response.status_code,
+                response.text,
+            )
+            raise HelcimAPIError(
+                f'Helcim get_invoice_by_number failed: {response.status_code}',
+                status_code=response.status_code,
+                raw_response=response.text,
+            )
+
+        data = response.json()
+        # Helcim returns either a bare list or an object wrapping one.
+        rows = data if isinstance(data, list) else data.get('data', [])
+        for row in rows:
+            if str(row.get('invoiceNumber', '')) == invoice_number:
+                return row
+        return None
 
     def create_customer(self, contact_name, billing_address=None):
         """
