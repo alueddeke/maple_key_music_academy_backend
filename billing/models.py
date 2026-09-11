@@ -1687,6 +1687,31 @@ class PreBillingInvoice(models.Model):
         default='none',
         help_text="Outcome of voiding previous_helcim_invoice_id after the last removal (MAP-184).",
     )
+    send_attempt_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Attempt id written by the send claim (MAP-185). The Helcim "
+            "invoiceNumber for that attempt is MK{pk}-{hex[:8]}; a retry looks "
+            "the previous attempt's number up before creating again."
+        ),
+    )
+    SEND_OUTCOME_CHOICES = [
+        ('none', 'None'),        # no send attempt yet
+        ('unknown', 'Unknown'),  # claimed; Helcim create not confirmed either way
+        ('failed', 'Failed'),    # declared by MAP-185; no transition writes it yet
+        ('sent', 'Sent'),        # Helcim invoice confirmed and stored
+    ]
+    send_outcome = models.CharField(
+        max_length=10,
+        choices=SEND_OUTCOME_CHOICES,
+        default='none',
+        help_text=(
+            "Where the last send attempt got to. Never returns to 'none' once "
+            "an attempt started; 'unknown' means look the number up before "
+            "creating again (MAP-185)."
+        ),
+    )
     payment_token = models.CharField(
         max_length=255,
         blank=True,
@@ -1861,8 +1886,9 @@ class InvoiceSendItem(models.Model):
     """
     One invoice inside an InvoiceSendRun. FIFO by ``position``; the worker
     claims items with select_for_update(skip_locked), so adding parallel
-    workers later needs no schema change. The invoice-level draft->sending
-    conditional UPDATE in invoice_sending remains the last double-send guard.
+    workers later needs no schema change. The invoice-level conditional
+    UPDATE in invoice_sending (draft, or an unresolved send whose attempt id
+    the caller read — MAP-185) remains the last double-send guard.
     """
 
     STATUS_CHOICES = [
