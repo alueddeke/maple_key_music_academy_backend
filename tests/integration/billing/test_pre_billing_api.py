@@ -437,37 +437,285 @@ def test_remove_lesson(management_client, school, teacher_user, student_with_con
 @pytest.mark.django_db
 def test_void_failure_inline_error(management_client, school, teacher_user, student_with_contact):
     """
-    POST remove-lesson returns 400 with 'Cannot void' error when cancel fails.
-    BILL-09: void failure must return inline error, invoice status unchanged.
+    MAP-184 order: validate → create replacement → persist → cancel old.
+    When the cancel fails AFTER a successful create, the DB already points at
+    the replacement, the failed void is flagged (cancel_outcome='failed') so
+    admin can retry, and the 200 response carries the inline warning.
     """
     student, contact = student_with_contact
     contact.helcim_customer_id = 'cust_existing_77'
     contact.save()
 
+    invoice, lessons = _make_sent_invoice_with_lessons(
+        student, school, teacher_user, [date(2026, 6, 3), date(2026, 6, 10)],
+    )
+    expected_amount = _charge(lessons[1])
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_put.return_value = _helcim_cancel_invoice_fail()
+        mock_post.return_value = _helcim_create_invoice_ok()
+        mock_email.return_value = (True, 'sent')
+
+        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
+        response = management_client.post(url, data={'lesson_id': lessons[0].id}, format='json')
+
+    assert response.status_code == 200
+    assert response.data['warning'] == (
+        'Replacement created; previous invoice INV-OLD-456 could not be voided — retry from admin'
+    )
+    assert response.data['helcim_invoice_id'] == 'inv_test_123'
+
+    mock_post.assert_called_once()
+    mock_put.assert_called_once()
+    assert mock_put.call_args.args[0].endswith('/invoices/inv_old_456')
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'adjusted'
+    assert invoice.amount == expected_amount
+    assert invoice.helcim_invoice_id == 'inv_test_123'
+    assert invoice.helcim_invoice_number == '001'
+    assert invoice.previous_helcim_invoice_id == 'inv_old_456'
+    assert invoice.previous_helcim_invoice_number == 'INV-OLD-456'
+    assert invoice.cancel_outcome == 'failed'
+    assert invoice.revision == 1
+    assert invoice.lessons.count() == 1
+
+
+def _charge(lesson):
+    return (Decimal(str(lesson.student_rate)) * Decimal(str(lesson.duration))).quantize(Decimal('0.01'))
+
+
+def _make_billable_lessons(student, teacher, school, lesson_dates):
+    """
+    Confirmed lessons that carry the real student rate. Lesson.save() marks a
+    student's first-ever lesson as a $0 trial, so seed one completed lesson
+    first (same pattern as the conftest student_user fixture).
+    """
+    Lesson.objects.create(
+        teacher=teacher, student=student, school=school, lesson_type='online',
+        is_trial=True, teacher_rate=Decimal('45.00'), student_rate=Decimal('0.00'),
+        scheduled_date=date(2026, 5, 6), duration=1.0, status='completed',
+    )
+    return [_make_confirmed_lesson(student, teacher, school, lesson_date=d) for d in lesson_dates]
+
+
+def _make_sent_invoice_with_lessons(student, school, teacher, lesson_dates, applied_credit=Decimal('0.00')):
+    """
+    Sent invoice pointing at an old Helcim invoice, with billable lessons.
+    amount = gross − applied_credit, exactly as send computes it.
+    """
+    lessons = _make_billable_lessons(student, teacher, school, lesson_dates)
+    gross = sum((_charge(l) for l in lessons), Decimal('0.00'))
     invoice = PreBillingInvoice.objects.create(
         student=student,
         school=school,
         status='sent',
-        amount=Decimal('120.00'),
+        amount=gross - applied_credit,
         period_start=date(2026, 6, 1),
         period_end=date(2026, 6, 30),
-        helcim_invoice_id='inv_settled_321',
-        payment_token='tok_settled_abc',
+        helcim_invoice_id='inv_old_456',
+        helcim_invoice_number='INV-OLD-456',
+        payment_token='tok_old_xyz',
     )
-    lesson = _make_confirmed_lesson(student, teacher_user, school)
-    invoice.lessons.add(lesson)
+    invoice.lessons.add(*lessons)
+    return invoice, lessons
+
+
+@pytest.mark.django_db
+def test_remove_lesson_preserves_applied_credit(management_client, school, teacher_user, student_with_contact):
+    """
+    MAP-184 credit rule: original_credit = original_gross − amount;
+    new_credit = min(original_credit, new_gross); amount = new_gross − new_credit;
+    the replacement is created with discount == new_credit. The wallet is never
+    touched by an adjustment — credit no longer applied stays in the balance.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_existing_88'
+    contact.save()
+    wallet_balance = Decimal('100.00')
+    wallet = StudentCreditAccount.objects.create(
+        student=student, school=school, balance=wallet_balance,
+    )
+
+    applied_credit = wallet_balance
+    invoice, lessons = _make_sent_invoice_with_lessons(
+        student, school, teacher_user, [date(2026, 6, 3), date(2026, 6, 10)],
+        applied_credit=applied_credit,
+    )
+    original_gross = sum((_charge(l) for l in lessons), Decimal('0.00'))
+    assert original_gross > applied_credit > Decimal('0.00')  # fixture sanity: credit partially covers
+
+    removed, kept = lessons
+    new_gross = _charge(kept)
+    original_credit = original_gross - invoice.amount
+    expected_credit = min(original_credit, new_gross)
+    expected_amount = new_gross - expected_credit
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_put.return_value = _helcim_cancel_invoice_ok()
+        mock_post.return_value = _helcim_create_invoice_ok()
+        mock_email.return_value = (True, 'sent')
+
+        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
+        response = management_client.post(url, data={'lesson_id': removed.id}, format='json')
+
+    assert response.status_code == 200
+    assert 'warning' not in response.data
+
+    payload = mock_post.call_args.kwargs['json']
+    assert payload['discount'] == {'amount': float(expected_credit), 'details': 'Account credit applied'}
+    assert sum(li['price'] for li in payload['lineItems']) == float(new_gross)
+    mock_put.assert_called_once()
+    assert mock_put.call_args.args[0].endswith('/invoices/inv_old_456')
+
+    invoice.refresh_from_db()
+    assert invoice.amount == expected_amount
+    assert invoice.status == 'adjusted'
+    assert invoice.helcim_invoice_id == 'inv_test_123'
+    assert invoice.helcim_invoice_number == '001'
+    assert invoice.previous_helcim_invoice_id == 'inv_old_456'
+    assert invoice.previous_helcim_invoice_number == 'INV-OLD-456'
+    assert invoice.cancel_outcome == 'done'
+    assert invoice.revision == 1
+    assert [item['id'] for item in invoice.issued_items] == [kept.id]
+
+    wallet.refresh_from_db()
+    assert wallet.balance == wallet_balance
+    assert CreditTransaction.objects.filter(account=wallet).count() == 0
+
+
+@pytest.mark.django_db
+def test_remove_last_lesson_rejected_before_any_provider_call(management_client, school, teacher_user, student_with_contact):
+    """All validation completes before any remote call: last-lesson → 400, Helcim untouched."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_existing_66'
+    contact.save()
+    invoice, lessons = _make_sent_invoice_with_lessons(
+        student, school, teacher_user, [date(2026, 6, 3)],
+    )
+    original_amount = invoice.amount
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post:
+        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
+        response = management_client.post(url, data={'lesson_id': lessons[0].id}, format='json')
+
+    assert response.status_code == 400
+    assert 'Cannot remove last lesson' in response.data['error']
+    mock_post.assert_not_called()
+    mock_put.assert_not_called()
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.helcim_invoice_id == 'inv_old_456'
+    assert invoice.amount == original_amount
+    assert invoice.revision == 0
+    assert invoice.cancel_outcome == 'none'
+    assert invoice.lessons.count() == 1
+
+
+@pytest.mark.django_db
+def test_replacement_create_failure_leaves_invoice_untouched(management_client, school, teacher_user, student_with_contact):
+    """Provider create raising → nothing persisted, old invoice live, no cancel call, 502 inline."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_existing_55'
+    contact.save()
+    invoice, lessons = _make_sent_invoice_with_lessons(
+        student, school, teacher_user, [date(2026, 6, 3), date(2026, 6, 10)],
+    )
+    original_amount = invoice.amount
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_post.return_value = Mock(ok=False, status_code=500, text='helcim down', json=lambda: {})
+        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
+        response = management_client.post(url, data={'lesson_id': lessons[0].id}, format='json')
+
+    assert response.status_code == 502
+    assert 'Replacement invoice creation failed' in response.data['error']
+    mock_put.assert_not_called()
+    mock_email.assert_not_called()
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.helcim_invoice_id == 'inv_old_456'
+    assert invoice.helcim_invoice_number == 'INV-OLD-456'
+    assert invoice.previous_helcim_invoice_id == ''
+    assert invoice.previous_helcim_invoice_number == ''
+    assert invoice.amount == original_amount
+    assert invoice.revision == 0
+    assert invoice.cancel_outcome == 'none'
+    assert invoice.lessons.count() == 2
+
+
+def _failed_cancel_invoice(student, school):
+    return PreBillingInvoice.objects.create(
+        student=student,
+        school=school,
+        status='adjusted',
+        amount=Decimal('60.00'),
+        period_start=date(2026, 6, 1),
+        period_end=date(2026, 6, 30),
+        helcim_invoice_id='inv_new_789',
+        helcim_invoice_number='INV-NEW-789',
+        previous_helcim_invoice_id='inv_old_456',
+        previous_helcim_invoice_number='INV-OLD-456',
+        cancel_outcome='failed',
+        revision=1,
+    )
+
+
+def _admin_retry_cancel(school, invoice):
+    from django.test import Client
+    staff = User.objects.create_superuser(
+        email='staff@prebilling.test', password='testpass123',
+        first_name='Staff', last_name='Admin', school=school,
+    )
+    client = Client()
+    client.force_login(staff)
+    return client.post(
+        reverse('admin:billing_prebillinginvoice_changelist'),
+        {'action': 'retry_cancel', '_selected_action': [invoice.id]},
+    )
+
+
+@pytest.mark.django_db
+def test_admin_retry_cancel_flips_failed_to_done(school, student_with_contact):
+    """Admin "Retry cancel" voids previous_helcim_invoice_id and flips cancel_outcome to done."""
+    student, _ = student_with_contact
+    invoice = _failed_cancel_invoice(student, school)
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put:
+        mock_put.return_value = _helcim_cancel_invoice_ok()
+        response = _admin_retry_cancel(school, invoice)
+
+    assert response.status_code == 302
+    mock_put.assert_called_once()
+    assert mock_put.call_args.args[0].endswith('/invoices/inv_old_456')
+    invoice.refresh_from_db()
+    assert invoice.cancel_outcome == 'done'
+    assert invoice.helcim_invoice_id == 'inv_new_789'
+
+
+@pytest.mark.django_db
+def test_admin_retry_cancel_keeps_failed_when_provider_rejects(school, student_with_contact):
+    """A retry that Helcim rejects leaves cancel_outcome='failed' — still visible, still retryable."""
+    student, _ = student_with_contact
+    invoice = _failed_cancel_invoice(student, school)
 
     with patch('billing.services.helcim_client.requests.put') as mock_put:
         mock_put.return_value = _helcim_cancel_invoice_fail()
+        response = _admin_retry_cancel(school, invoice)
 
-        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
-        response = management_client.post(url, data={'lesson_id': lesson.id}, format='json')
-
-    assert response.status_code == 400
-    assert 'Cannot void' in response.data['error']
-
+    assert response.status_code == 302
+    mock_put.assert_called_once()
     invoice.refresh_from_db()
-    assert invoice.status == 'sent'  # unchanged
+    assert invoice.cancel_outcome == 'failed'
 
 
 # ---------------------------------------------------------------------------

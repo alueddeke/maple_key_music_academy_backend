@@ -119,6 +119,18 @@ def _process(event):
                 return locked
             event = locked
 
+            # A number an adjustment superseded (MAP-184) is never credited,
+            # whether or not the void succeeded — the parent paid a cancelled
+            # invoice and someone has to look. Terminal, so the retry
+            # scheduler never picks it up again.
+            if PreBillingInvoice.objects.filter(
+                previous_helcim_invoice_number=event.invoice_id
+            ).exists():
+                return _finalize(
+                    event, 'needs_attention',
+                    f'payment on superseded invoiceNumber={event.invoice_id} — not credited, review in admin',
+                )
+
             # filter().order_by('-id').first() guards MultipleObjectsReturned —
             # helcim_invoice_number has no unique constraint. Match on
             # helcim_invoice_number: payment payloads carry invoiceNumber

@@ -105,6 +105,30 @@ def issued_line_items(lessons, projected):
 
 
 
+def credit_discount(line_items, amount):
+    """
+    Wallet credit as a Helcim invoice-level discount, or None.
+
+    `amount` is net of wallet credit but the line items are gross — without a
+    discount Helcim would charge the parent MORE than the emailed amount.
+    Credit rides as an invoice-level discount (negative line-item prices are
+    rejected by the API), keeping Helcim's amountDue == amount == emailed
+    amount. Shared by the send pipeline and the remove-lesson adjustment
+    (MAP-184), so both paths apply credit the same way.
+    """
+    gross = sum(
+        (Decimal(str(li['price'])) for li in line_items),
+        Decimal('0.00'),
+    ).quantize(Decimal('0.01'))
+    credit_applied = gross - amount
+    if credit_applied > Decimal('0.00'):
+        return {
+            'amount': float(credit_applied),
+            'details': 'Account credit applied',
+        }
+    return None
+
+
 def send_single_invoice(invoice, school):
     """
     Send a single draft PreBillingInvoice via Helcim and email.
@@ -224,29 +248,12 @@ def send_single_invoice(invoice, school):
                 for l in lessons
             ]
 
-        # invoice.amount is net of wallet credit (generate: max(0, gross − credit)),
-        # but line items are gross — without a discount Helcim would charge the
-        # parent MORE than the emailed amount. Credit rides as an invoice-level
-        # discount (negative line-item prices are rejected by the API), keeping
-        # Helcim's amountDue == invoice.amount == emailed amount.
-        gross = sum(
-            (Decimal(str(li['price'])) for li in line_items),
-            Decimal('0.00'),
-        ).quantize(Decimal('0.01'))
-        credit_applied = gross - invoice.amount
-        discount = None
-        if credit_applied > Decimal('0.00'):
-            discount = {
-                'amount': float(credit_applied),
-                'details': 'Account credit applied',
-            }
-
         # Create Helcim invoice — OUTSIDE transaction
         helcim_response = HelcimClient(school=school).create_invoice(
             currency='CAD',
             line_items=line_items,
             customer_id=contact.helcim_customer_id,
-            discount=discount,
+            discount=credit_discount(line_items, invoice.amount),
         )
     except Exception:
         # Release the claim so the invoice stays sendable after a failure.

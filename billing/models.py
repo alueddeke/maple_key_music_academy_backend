@@ -1365,6 +1365,9 @@ class HelcimWebhookEvent(models.Model):
         ('no_invoice', 'No matching invoice'),     # retryable
         ('no_account', 'No credit account'),       # retryable
         ('enrichment_failed', 'Enrichment failed'),  # secondary GET failed — retryable
+        # Payment arrived on an invoice number an adjustment superseded
+        # (MAP-184). Terminal — never credited, never retried; admin review.
+        ('needs_attention', 'Needs attention'),
     ]
     processing_status = models.CharField(
         max_length=30,
@@ -1589,7 +1592,8 @@ class PreBillingInvoice(models.Model):
     Pre-billing invoice sent to a parent/guardian before Helcim charges.
 
     Tracks the full lifecycle: draft → sent → adjusted → paid.
-    Locks the amount at draft generation (D-11). Status transitions are
+    `amount` is net of the wallet credit applied at send; a lesson removal
+    recomputes it and re-applies the credit (MAP-184). Status transitions are
     audited via HistoricalRecords. No card data stored — only helcim_invoice_id
     and payment_token (the Helcim hosted-payment URL token, not a PAN).
 
@@ -1629,7 +1633,11 @@ class PreBillingInvoice(models.Model):
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        help_text="Invoice amount locked at draft generation. Floor at 0 enforced in view layer (D-05).",
+        help_text=(
+            "Amount the parent is asked to pay: gross of the issued lessons minus "
+            "applied wallet credit. Recomputed on lesson removal (MAP-184). "
+            "Floor at 0 enforced in view layer (D-05)."
+        ),
     )
     period_start = models.DateField()
     period_end = models.DateField()
@@ -1646,6 +1654,38 @@ class PreBillingInvoice(models.Model):
             "Payment/webhook responses reference invoiceNumber, not invoiceId — "
             "this is the field webhook reconciliation matches on."
         ),
+    )
+    previous_helcim_invoice_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Helcim invoice ID this invoice replaced on the last lesson removal "
+            "(MAP-184). The one cancel_outcome refers to."
+        ),
+    )
+    previous_helcim_invoice_number = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Helcim invoiceNumber this invoice replaced. A payment webhook on "
+            "this number is finalized needs_attention and never credited."
+        ),
+    )
+    revision = models.PositiveIntegerField(
+        default=0,
+        help_text="Incremented on every lesson removal (replacement Helcim invoice).",
+    )
+    CANCEL_OUTCOME_CHOICES = [
+        ('none', 'None'),        # never adjusted
+        ('pending', 'Pending'),  # replacement persisted, cancel not yet attempted
+        ('done', 'Done'),        # previous Helcim invoice voided
+        ('failed', 'Failed'),    # void rejected — retry from admin
+    ]
+    cancel_outcome = models.CharField(
+        max_length=10,
+        choices=CANCEL_OUTCOME_CHOICES,
+        default='none',
+        help_text="Outcome of voiding previous_helcim_invoice_id after the last removal (MAP-184).",
     )
     payment_token = models.CharField(
         max_length=255,
