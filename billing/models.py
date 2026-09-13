@@ -73,6 +73,14 @@ class School(models.Model):
         max_length=255, blank=True,
         help_text="Base64 webhook verifier token. Blank = use HELCIM_WEBHOOK_SECRET env setting.",
     )
+    helcim_last_synced_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            "sync_helcim_payments checkpoint (MAP-154): the newest Helcim "
+            "dateCreated reconciled for this school. Null = never synced; the "
+            "first run looks back 30 days."
+        ),
+    )
     payment_terms_days = models.PositiveIntegerField(default=7)
     cancellation_notice_hours = models.PositiveIntegerField(default=24)
 
