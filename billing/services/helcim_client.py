@@ -304,21 +304,33 @@ class HelcimClient:
 
         return response.json()
 
-    def list_card_transactions(self, limit=50):
+    def list_card_transactions(self, limit=50, date_from=None):
         """
-        GET /v2/card-transactions?limit={limit}
+        GET /v2/card-transactions?limit={limit}[&dateFrom=YYYY-MM-DD]
 
         Used by sync_helcim_payments to reconcile payments whose webhooks
         never arrived (endpoint down longer than Helcim's ~10h retry window,
         or dev tunnel offline). Returns the raw list of transaction dicts.
 
+        Both parameters are honoured on this endpoint (R10 probe 2026-09-10):
+        `limit` caps the page; `dateFrom` is inclusive at day granularity and
+        accepts YYYY-MM-DD only (a datetime → 400). The default page size when
+        `limit` is omitted is unknown — always pass it explicitly.
+
+        Args:
+            limit: page size
+            date_from: optional datetime.date — sent as dateFrom
+
         Raises:
             HelcimAPIError: on non-2xx response or timeout
         """
+        params = {'limit': limit}
+        if date_from is not None:
+            params['dateFrom'] = date_from.isoformat()
         try:
             response = requests.get(
                 f'{HELCIM_API_BASE}/card-transactions',
-                params={'limit': limit},
+                params=params,
                 headers=self._headers(),
                 timeout=HELCIM_TIMEOUT,
             )
