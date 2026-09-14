@@ -213,6 +213,11 @@ class User(AbstractUser):
         limit_choices_to={'user_type': 'teacher'},
         blank=True
     )
+    # Stamped on password reset and on management deactivation (MAP-141).
+    # Access tokens issued before it are rejected by
+    # custom_auth.authentication.JWTAuthentication; refresh tokens are
+    # blacklisted at the same moment.
+    password_changed_at = models.DateTimeField(null=True, blank=True)
     # Override to use email as username
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name', 'user_type']

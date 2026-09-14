@@ -210,6 +210,25 @@ class TestJWTLogout:
 
 @pytest.mark.django_db
 class TestUserProfile:
+    def test_token_issued_before_password_change_is_rejected(self, api_client, teacher_user):
+        """MAP-141: an access token whose iat precedes password_changed_at → 401; one at/after it → 200."""
+        from datetime import timedelta
+        from django.utils import timezone
+
+        access = str(RefreshToken.for_user(teacher_user).access_token)
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
+        url = reverse('user_profile')
+
+        User.objects.filter(pk=teacher_user.pk).update(
+            password_changed_at=timezone.now() + timedelta(seconds=2)
+        )
+        assert api_client.get(url).status_code == status.HTTP_401_UNAUTHORIZED
+
+        User.objects.filter(pk=teacher_user.pk).update(
+            password_changed_at=timezone.now() - timedelta(seconds=2)
+        )
+        assert api_client.get(url).status_code == status.HTTP_200_OK
+
     """Integration tests for GET /api/auth/user/ (user_profile)."""
 
     def test_authenticated_user_returns_200_with_profile(self, api_client, teacher_user):

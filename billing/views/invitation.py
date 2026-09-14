@@ -2,6 +2,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 import logging
 
@@ -71,6 +73,20 @@ def setup_account_with_invitation(request, token):
                 'error': 'First name, last name, and password are required'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Every password-setting path runs the configured validators
+        # (MAP-141). An unsaved User carries the invitee's attributes so the
+        # similarity validator can compare against them (D5b).
+        try:
+            validate_password(
+                password,
+                User(email=invitation.email, first_name=first_name, last_name=last_name),
+            )
+        except ValidationError as e:
+            return Response({
+                'error': 'Password validation failed',
+                'details': e.messages,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Create user account — derive school from invitation chain (never use School.objects.first())
         school = getattr(getattr(getattr(invitation, 'approved_email', None), 'approved_by', None), 'school', None)
         if school is None:
@@ -84,7 +100,7 @@ def setup_account_with_invitation(request, token):
             )
         user = User.objects.create_user(
             email=invitation.email,
-            password=password if password else None,  # Password is optional (for OAuth users)
+            password=password,
             first_name=first_name,
             last_name=last_name,
             user_type=invitation.user_type,

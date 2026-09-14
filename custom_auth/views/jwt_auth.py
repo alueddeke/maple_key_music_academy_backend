@@ -1,14 +1,17 @@
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 import logging
+
+from ..throttling import LoginIPThrottle, LoginEmailThrottle
 
 logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([LoginIPThrottle, LoginEmailThrottle])
 def get_jwt_token(request):
     """
     Get JWT token endpoint for username/password authentication
@@ -122,6 +125,7 @@ def get_jwt_token(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([LoginIPThrottle])  # per IP only (A5): the body carries no email
 def refresh_jwt_token(request):
     """
     Refresh JWT token endpoint

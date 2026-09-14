@@ -14,6 +14,7 @@ from ..serializers import (
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
     BatchRejectionSnapshotSerializer
 )
+from custom_auth.authentication import revoke_user_tokens
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
@@ -553,9 +554,10 @@ def management_student_detail(request, pk):
                 "Historical data will be preserved."
             )
 
-        # Perform soft delete
+        # Perform soft delete, then revoke the student's tokens (MAP-141)
         student.is_active = False
         student.save()
+        revoke_user_tokens(student)
 
         return Response({
             'message': 'Student deleted successfully',
@@ -1040,9 +1042,10 @@ def management_delete_teacher(request, pk):
             "Historical data will be preserved."
         )
 
-    # Perform soft delete
+    # Perform soft delete, then revoke the teacher's tokens (MAP-141)
     teacher.is_active = False
     teacher.save()
+    revoke_user_tokens(teacher)
 
     return Response({
         'message': 'Teacher deleted successfully',
