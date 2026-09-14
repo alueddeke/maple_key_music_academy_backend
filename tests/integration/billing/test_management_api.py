@@ -13,6 +13,7 @@ from decimal import Decimal
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
 from billing.models import GlobalRateSettings, Lesson, Invoice, MonthlyInvoiceBatch
 from django.contrib.auth import get_user_model
 from faker import Faker
@@ -796,3 +797,51 @@ class TestApprovalLedger:
         assert rollovers.count() == 1
         assert rollovers.get().source_batch_item_id == item.id
         assert _invariant_holds(account)
+
+
+# ---------------------------------------------------------------------------
+# MAP-141: management deactivation revokes the user's tokens
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestDeactivationRevokesTokens:
+    @staticmethod
+    def _tokens(user):
+        refresh = RefreshToken.for_user(user)
+        access = refresh.access_token
+        # Issued a few seconds before the deactivation (whole-second iat, D5).
+        access['iat'] = int(access['iat']) - 5
+        return str(access), str(refresh)
+
+    @staticmethod
+    def _assert_revoked(access, refresh):
+        # A fresh, unauthenticated client: the management fixture
+        # force-authenticates the shared api_client, which would mask the header.
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
+        assert client.get(reverse('user_profile')).status_code == status.HTTP_401_UNAUTHORIZED
+        client.credentials()
+        response = client.post(reverse('refresh_jwt_token'), {'refresh': refresh}, format='json')
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_student_delete_revokes_tokens(self, authenticated_management_client, student_user):
+        access, refresh = self._tokens(student_user)
+        response = authenticated_management_client.delete(
+            reverse('management_student_detail', kwargs={'pk': student_user.id})
+        )
+        assert response.status_code == status.HTTP_200_OK
+        student_user.refresh_from_db()
+        assert student_user.is_active is False
+        assert student_user.password_changed_at is not None
+        self._assert_revoked(access, refresh)
+
+    def test_teacher_delete_revokes_tokens(self, authenticated_management_client, teacher_user):
+        access, refresh = self._tokens(teacher_user)
+        response = authenticated_management_client.delete(
+            reverse('management_delete_teacher', kwargs={'pk': teacher_user.id})
+        )
+        assert response.status_code == status.HTTP_200_OK
+        teacher_user.refresh_from_db()
+        assert teacher_user.is_active is False
+        assert teacher_user.password_changed_at is not None
+        self._assert_revoked(access, refresh)
