@@ -294,7 +294,9 @@ CORS_ALLOW_HEADERS = [
 # Django REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',  # JWT token authentication
+        # simplejwt subclass that also rejects access tokens issued before the
+        # user's last password change / deactivation (MAP-141).
+        'custom_auth.authentication.JWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',  # Session-based authentication (for admin/built in django auth)
     ],
     'DEFAULT_PERMISSION_CLASSES': [
@@ -307,6 +309,10 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'registration': '5/hour',
         'client_errors': '30/hour',
+        # MAP-141: login, refresh and password-reset per IP; login and
+        # password-reset additionally per email.
+        'login': '10/min',
+        'login_email': '5/min',
     },
     # Nginx fronts the app in prod and sets X-Forwarded-For; key throttles on
     # the real client IP, not the proxy's. Requests that bypass nginx (local
