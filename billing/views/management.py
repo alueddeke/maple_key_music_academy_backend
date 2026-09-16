@@ -712,6 +712,9 @@ def recurring_schedule_detail(request, student_id, schedule_id):
         serializer = RecurringScheduleSerializer(schedule, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            # An edit that narrows the projection (day, time, interval_weeks — MAP-208)
+            # must leave open teacher batches too; the teacher batch sync only ever adds.
+            reconcile_open_batches_for_student(student, request.user.school)
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
