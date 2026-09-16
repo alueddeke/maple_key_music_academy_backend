@@ -1060,6 +1060,40 @@ def test_sent_invoice_detail_is_snapshot_after_schedule_change(
 
 
 @pytest.mark.django_db
+def test_draft_detail_lists_only_alternate_weeks_for_biweekly_schedule(
+    management_client, school, school_settings, teacher_user, student_with_contact,
+):
+    """
+    MAP-208: a bill-ahead draft for an every-2-weeks schedule lists exactly the
+    dates on the start_date cadence — fewer than every occurrence of the weekday
+    — and its amount is rate × duration × that count.
+    """
+    import calendar as _cal
+    student, _ = student_with_contact
+    year, month = _next_period()
+    schedule = _make_active_schedule(student, teacher_user, school, year, month)
+    schedule.interval_weeks = 2
+    schedule.save(update_fields=['interval_weeks'])
+
+    assert _generate_for_period(management_client, year, month).status_code == 200
+    invoice = PreBillingInvoice.objects.get(
+        student=student, school=school, period_start=date(year, month, 1),
+    )
+    view = _detail(management_client, invoice).data
+    assert view['is_projected'] is True
+
+    projected = schedule.generate_lessons_for_month(year, month)
+    last = _cal.monthrange(year, month)[1]
+    every_occurrence = [date(year, month, n) for n in range(1, last + 1)
+                        if date(year, month, n).weekday() == schedule.day_of_week]
+    assert 0 < len(projected) < len(every_occurrence)
+    assert [l['scheduled_date'] for l in view['lessons']] == [d.isoformat() for d in projected]
+    assert Decimal(str(view['amount'])) == (
+        Decimal(str(schedule.student_rate)) * Decimal(str(schedule.duration)) * len(projected)
+    )
+
+
+@pytest.mark.django_db
 def test_lesson_backed_send_snapshots_and_removal_updates_the_snapshot(
     management_client, school, teacher_user, student_with_contact,
 ):

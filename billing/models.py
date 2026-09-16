@@ -455,7 +455,7 @@ class Lesson(models.Model):
         return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}{trial_indicator}"
     
 class RecurringLessonsSchedule(models.Model):
-    """Weekly recurring lesson schedule for teacher-student pairs"""
+    """Recurring lesson schedule for teacher-student pairs — weekly or every 2 weeks (MAP-208)"""
     DAYS_OF_WEEK = [
         (0, 'Monday'),
         (1, 'Tuesday'),
@@ -465,6 +465,10 @@ class RecurringLessonsSchedule(models.Model):
         (5, 'Saturday'),
         (6, 'Sunday'),
     ]
+    INTERVAL_CHOICES = [
+        (1, 'Weekly'),
+        (2, 'Every 2 weeks'),
+    ]
 
     # Relationships
     teacher = models.ForeignKey(User,on_delete=models.CASCADE, related_name='teaching_schedules', limit_choices_to={'user_type':'teacher'})
@@ -472,7 +476,11 @@ class RecurringLessonsSchedule(models.Model):
     school = models.ForeignKey('School',on_delete=models.PROTECT, related_name='recurring_lesson_schedules')
 
     # Schedule Details
-    day_of_week = models.IntegerField(choices=DAYS_OF_WEEK) 
+    day_of_week = models.IntegerField(choices=DAYS_OF_WEEK)
+    interval_weeks = models.PositiveSmallIntegerField(
+        choices=INTERVAL_CHOICES, default=1,
+        help_text="1 = every week, 2 = every other week, counted from start_date",
+    )
     start_time = models.TimeField(help_text="Lesson start time (eg. 15:00)")
     duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0, help_text="Duration in hours")
 
@@ -534,7 +542,10 @@ class RecurringLessonsSchedule(models.Model):
         """
         Calculate which dates this schedule would occur in given month.
         Return list of date objects(does NOT create the lesson records).
-        Example: "every monday", returns all mondays in that month
+        Example: "every monday", returns all mondays in that month;
+        "every 2 weeks on monday" returns the mondays a whole multiple of
+        2 weeks after start_date — the cadence anchor. It does not reset at
+        a month boundary and a pause window does not shift it (MAP-208).
         """
         import calendar 
         from datetime import date, timedelta
@@ -556,7 +567,12 @@ class RecurringLessonsSchedule(models.Model):
 
         while current_date <= month_end:
             if current_date >= self.start_date:
-                if self.end_date is None or current_date <= self.end_date:
+                # Cadence is anchored to start_date (MAP-208): keep only dates a
+                # whole multiple of interval_weeks weeks after it. The 7-day step
+                # below is unchanged — the filter, not the step, carries the interval.
+                weeks_from_start = (current_date - self.start_date).days // 7
+                on_cadence = weeks_from_start % self.interval_weeks == 0
+                if on_cadence and (self.end_date is None or current_date <= self.end_date):
                     # Exclude dates inside the pause window (inclusive both ends;
                     # open-ended when pause_end is None)
                     in_pause = (

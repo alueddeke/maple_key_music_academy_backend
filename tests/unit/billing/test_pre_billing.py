@@ -349,6 +349,40 @@ class TestBillAheadGeneration:
         assert invoice.amount == expected_amount
         assert invoice.amount > 0
 
+    def test_future_period_biweekly_schedule_projects_alternate_weeks(
+        self, management_client, school, teacher_user
+    ):
+        """
+        interval_weeks=2 (MAP-208): the draft amount follows the dates on the
+        start_date cadence — fewer than every occurrence of the weekday.
+        """
+        import calendar as _cal
+        student, _ = _make_student_with_contact(school)
+        year, month = self._future_year_month()
+        sched = _make_schedule(teacher_user, student, school, day_of_week=0,
+                               student_rate=Decimal('60.00'),
+                               duration=Decimal('1.00'))
+        sched.interval_weeks = 2
+        sched.save(update_fields=['interval_weeks'])
+
+        resp = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': month, 'year': year}, format='json',
+        )
+        assert resp.status_code == 200, resp.content
+
+        invoice = PreBillingInvoice.objects.get(student=student, school=school)
+        projected = sched.generate_lessons_for_month(year, month)
+        last = _cal.monthrange(year, month)[1]
+        every_monday = [date(year, month, n) for n in range(1, last + 1)
+                        if date(year, month, n).weekday() == 0]
+        assert projected == [d for d in every_monday
+                             if ((d - sched.start_date).days // 7) % 2 == 0]
+        assert 0 < len(projected) < len(every_monday)
+        assert invoice.amount == (
+            Decimal(str(sched.student_rate)) * Decimal(str(sched.duration))
+        ) * len(projected)
+
     def test_no_schedule_student_skipped_with_count(self, management_client, school):
         """
         A student with a contact but NO schedule and NO lessons in a future month
