@@ -32,13 +32,6 @@ urlpatterns = [
     path('invite/<str:token>/validate/', views.validate_invitation_token, name='validate_invitation_token'),
     path('invite/<str:token>/setup/', views.setup_account_with_invitation, name='setup_account_with_invitation'),
 
-    # Management endpoints for invoice management
-    path('management/invoices/', views.management_all_invoices, name='management_all_invoices'),
-    path('management/invoices/<int:pk>/update/', views.management_update_invoice, name='management_update_invoice'),
-    path('management/invoices/<int:pk>/status/', views.management_update_invoice_status, name='management_update_invoice_status'),
-    path('management/invoices/<int:pk>/recalculate/', views.management_recalculate_invoice, name='management_recalculate_invoice'),
-    path('management/invoices/<int:pk>/reject/', views.management_reject_invoice, name='management_reject_invoice'),
-
     # Management endpoints for system settings
     path('management/waive-policy/', views.waive_policy_settings, name='waive_policy_settings'),
     path('students/<int:student_id>/waive-usage/', views.student_waive_usage, name='student_waive_usage'),
@@ -134,8 +127,6 @@ urlpatterns = [
     path('management/pre-billing/<int:invoice_id>/restore-date/', views.management_pre_billing_restore_date, name='management_pre_billing_restore_date'),
 
     # Phase 21: Billing Dashboard (DASH-01 through DASH-04)
-    # NOTE: management/invoices/<int:pk>/ (PATCH) is separate from the existing
-    # management/invoices/<int:pk>/update/ (PUT) — different method + different URL path.
     path('management/dashboard/batches/', views.management_dashboard_batches, name='management_dashboard_batches'),
     path('management/dashboard/<int:batch_id>/', views.management_dashboard_data, name='management_dashboard_data'),
     path('management/invoices/<int:pk>/', views.management_patch_invoice, name='management_patch_invoice'),

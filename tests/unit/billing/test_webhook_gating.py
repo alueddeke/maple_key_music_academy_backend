@@ -276,3 +276,51 @@ def test_process_event_direct_no_invoice_is_retryable_then_recovers(school, stud
     assert event.processing_status == "credited"
     account.refresh_from_db()
     assert account.balance == Decimal("60.00")
+
+
+@pytest.mark.parametrize("cancel_outcome", ["failed", "done"])
+@pytest.mark.django_db
+def test_payment_on_superseded_invoice_number_needs_attention_never_credits(
+    api_client, school, student_user, cancel_outcome,
+):
+    """
+    MAP-184: a payment on a number the adjustment superseded is never credited,
+    regardless of whether the void succeeded. The event lands in the terminal
+    needs_attention state (not retryable) so the scheduler never re-tries it.
+    """
+    invoice, account = _invoice_and_account(school, student_user, "INV-GATE-NEW", "60.00")
+    invoice.status = "adjusted"
+    invoice.previous_helcim_invoice_id = "inv_old"
+    invoice.previous_helcim_invoice_number = "INV-GATE-OLD"
+    invoice.cancel_outcome = cancel_outcome
+    invoice.revision = 1
+    invoice.save()
+    tx_id = f"tx-superseded-{cancel_outcome}"
+    mock_tx = {"invoiceNumber": "INV-GATE-OLD", "amount": "60.00",
+               "status": "APPROVED", "type": "purchase"}
+
+    with mock.patch(PATCH_TARGET, return_value=mock_tx):
+        response = make_helcim_signed_request(
+            api_client, {"id": tx_id, "type": "cardTransaction"}, f"msg-{tx_id}"
+        )
+
+    assert response.status_code == 200
+    event = HelcimWebhookEvent.objects.get(helcim_transaction_id=tx_id)
+    assert event.processing_status == "needs_attention"
+    assert CreditTransaction.objects.count() == 0
+    account.refresh_from_db()
+    assert account.balance == Decimal("0.00")
+    invoice.refresh_from_db()
+    assert invoice.status == "adjusted"
+
+    # Terminal: neither the retry command nor direct re-processing touches it.
+    out = StringIO()
+    with mock.patch(PATCH_TARGET, return_value=mock_tx):
+        call_command("retry_webhook_events", stdout=out)
+        process_webhook_event(event)
+
+    event.refresh_from_db()
+    assert event.processing_status == "needs_attention"
+    assert CreditTransaction.objects.count() == 0
+    account.refresh_from_db()
+    assert account.balance == Decimal("0.00")

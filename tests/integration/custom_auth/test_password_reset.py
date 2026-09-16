@@ -15,6 +15,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
 from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
 
@@ -132,6 +133,45 @@ class TestPasswordResetConfirm:
             'confirm_password': 'AnotherPass!2',
         }, format='json')
         assert second_response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_reset_revokes_existing_tokens(self, api_client, teacher_user):
+        """
+        MAP-141: after a reset the old access token and the old refresh token
+        are rejected; a login right after the reset (same second) works.
+        """
+        old_refresh = RefreshToken.for_user(teacher_user)
+        old_access_token = old_refresh.access_token
+        # Issued a few seconds ago — the reset happens later this second, and
+        # the whole-second comparison (D5) only rejects strictly older tokens.
+        old_access_token['iat'] = int(old_access_token['iat']) - 5
+        old_access = str(old_access_token)
+        profile_url = reverse('user_profile')
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {old_access}')
+        assert api_client.get(profile_url).status_code == status.HTTP_200_OK
+        api_client.credentials()
+
+        uid = urlsafe_base64_encode(force_bytes(teacher_user.pk))
+        token = default_token_generator.make_token(teacher_user)
+        response = api_client.post(reverse('password_reset_confirm'), {
+            'uid': uid, 'token': token,
+            'password': 'NewSecure!Pass1', 'confirm_password': 'NewSecure!Pass1',
+        }, format='json')
+        assert response.status_code == status.HTTP_200_OK
+
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {old_access}')
+        assert api_client.get(profile_url).status_code == status.HTTP_401_UNAUTHORIZED
+        api_client.credentials()
+        refresh_response = api_client.post(
+            reverse('refresh_jwt_token'), {'refresh': str(old_refresh)}, format='json',
+        )
+        assert refresh_response.status_code == status.HTTP_401_UNAUTHORIZED
+
+        login = api_client.post(reverse('get_jwt_token'), {
+            'email': teacher_user.email, 'password': 'NewSecure!Pass1',
+        }, format='json')
+        assert login.status_code == status.HTTP_200_OK
+        api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access_token']}")
+        assert api_client.get(profile_url).status_code == status.HTTP_200_OK
 
     def test_password_mismatch_returns_400(self, api_client, teacher_user):
         """Mismatched passwords return 400 and old password remains valid."""

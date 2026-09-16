@@ -211,11 +211,27 @@ def test_database_rejects_second_credit_for_same_event(school, student_user):
 
 
 @pytest.mark.django_db
-def test_credits_without_source_event_are_not_constrained(school, student_user):
-    """Forfeits / rollovers carry no event; several NULL source_event rows coexist."""
+def test_batch_item_sourced_rows_coexist(school, teacher_user, student_user):
+    """
+    Forfeits / rollovers carry no event — they are sourced to a batch item
+    (MAP-186). one_credit_per_webhook_event only constrains source_event, so
+    several NULL-source_event rows coexist, each with its own item source.
+    """
+    from datetime import date, time
+    from billing.models import BatchLessonItem, MonthlyInvoiceBatch
+
     invoice, account = _invoice_and_account(school, student_user, "INV-IDEMP-6")
-    for _ in range(2):
+    batch = MonthlyInvoiceBatch.objects.create(teacher=teacher_user, school=school, month=8, year=2026)
+    for day in (3, 10):
+        item = BatchLessonItem.objects.create(
+            batch=batch, student=student_user, scheduled_date=date(2026, 8, day),
+            start_time=time(10, 0), duration=Decimal("1.0"), lesson_type="online",
+            teacher_rate=Decimal("1.00"), student_rate=Decimal("1.00"), status="waived",
+        )
         CreditTransaction.objects.create(
             account=account, school=school, type="waived_rollover", amount=Decimal("5.00"),
+            source_batch_item=item,
         )
-    assert CreditTransaction.objects.filter(source_event__isnull=True).count() == 2
+    rows = CreditTransaction.objects.filter(account=account, source_event__isnull=True)
+    assert rows.count() == 2
+    assert rows.filter(source_batch_item__isnull=True).count() == 0

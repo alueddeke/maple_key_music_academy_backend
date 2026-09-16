@@ -18,7 +18,7 @@ from billing.models import (
     PreBillingInvoice,
 )
 from billing.models import Lesson
-from billing.services.helcim_client import HelcimAPIError
+from billing.services.helcim_client import HelcimAPIError, HelcimInvoiceNumberExists
 
 pytestmark = pytest.mark.django_db
 
@@ -72,10 +72,12 @@ def run_with_two_invoices(school, management_user, teacher_user, django_user_mod
     return run, invoices
 
 
-def _mock_helcim(create_invoice=None):
+def _mock_helcim(create_invoice=None, lookup=None):
     client = mock.Mock()
     client.create_invoice.side_effect = create_invoice or (lambda **kw: HELCIM_OK)
     client.create_customer.return_value = {'id': 999}
+    # Lookup-first (MAP-185): default "Helcim holds nothing under that number".
+    client.get_invoice_by_number.side_effect = lookup or (lambda number: None)
     return mock.patch(
         'billing.services.invoice_sending.HelcimClient', return_value=client
     ), client
@@ -127,9 +129,12 @@ def test_validation_failure_is_terminal_and_counted(run_with_two_invoices):
     failed = run.items.get(status='failed')
     assert failed.attempts == 1  # 4xx never retries
     assert 'customer rejected' in failed.last_error
-    # The failed invoice's claim was released — sendable again individually
+    # The claim is NOT released (MAP-185): the row stays sending/unknown with
+    # its attempt id, so the next attempt looks the number up before creating.
     failed.invoice.refresh_from_db()
-    assert failed.invoice.status == 'draft'
+    assert failed.invoice.status == 'sending'
+    assert failed.invoice.send_outcome == 'unknown'
+    assert failed.invoice.send_attempt_id is not None
 
 
 def test_transient_failure_retries_then_succeeds(run_with_two_invoices, monkeypatch):
@@ -226,3 +231,177 @@ def test_orphaned_sending_item_recovers_and_processes(run_with_two_invoices):
     assert run.sent_count == 2
     orphan.refresh_from_db()
     assert orphan.status == 'sent'
+
+
+# ---------------------------------------------------------------------------
+# MAP-185: sends are reconciled, never duplicated, never stranded
+# ---------------------------------------------------------------------------
+
+def _single_item_run(run_with_two_invoices):
+    """Trim the fixture to one item so 'exactly one create across the run' is unambiguous."""
+    run, invoices = run_with_two_invoices
+    run.items.filter(invoice=invoices[1]).delete()
+    InvoiceSendRun.objects.filter(pk=run.pk).update(item_count=1)
+    return run, invoices[0]
+
+
+def _accepted_store():
+    """
+    Simulates Helcim's side: every create records the number it was given.
+    Lookups answer from that store — a create we 'never heard back from' is
+    still there.
+    """
+    accepted = {}
+
+    def lookup(number):
+        return accepted.get(number)
+
+    return accepted, lookup
+
+
+def _new_run_for(invoice, management_user):
+    run = InvoiceSendRun.objects.create(
+        school=invoice.school, period_start=invoice.period_start,
+        created_by=management_user, item_count=1,
+    )
+    InvoiceSendItem.objects.create(run=run, invoice=invoice, position=0)
+    return run
+
+
+def test_retry_after_create_raised_adopts_via_lookup(run_with_two_invoices, monkeypatch):
+    """
+    Helcim accepted the create but we never heard back (timeout). The worker's
+    in-place retry looks the previous attempt's number up, adopts it, and
+    creates nothing — one Helcim invoice, sent with the first id.
+    """
+    monkeypatch.setattr('billing.management.commands.process_invoice_send_runs.RETRY_BACKOFF_SECONDS', 0)
+    run, invoice = _single_item_run(run_with_two_invoices)
+    accepted, lookup = _accepted_store()
+
+    def create_invoice(**kwargs):
+        number = kwargs['invoice_number']
+        accepted[number] = {'invoiceId': 7001, 'invoiceNumber': number, 'token': 'tok_7001'}
+        raise HelcimAPIError('timeout after Helcim accepted', status_code=None)
+
+    helcim_patch, client = _mock_helcim(create_invoice, lookup)
+    with helcim_patch, _mock_email():
+        call_command('process_invoice_send_runs', '--once')
+
+    run.refresh_from_db()
+    assert run.status == 'done'
+    assert run.sent_count == 1
+    assert run.failed_count == 0
+    assert client.create_invoice.call_count == 1
+    (first_number,) = accepted
+    client.get_invoice_by_number.assert_called_once_with(first_number)
+    assert first_number.startswith(f'MK{invoice.pk}-')
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.send_outcome == 'sent'
+    assert invoice.helcim_invoice_id == '7001'
+    assert invoice.helcim_invoice_number == first_number
+    assert invoice.payment_token == 'tok_7001'
+    assert run.items.get().attempts == 2
+
+
+def test_duplicate_number_error_adopts_existing(run_with_two_invoices):
+    """Helcim answers 'Invoice Number already existed' → treated as found: lookup + adopt."""
+    run, invoice = _single_item_run(run_with_two_invoices)
+    accepted, lookup = _accepted_store()
+
+    def create_invoice(**kwargs):
+        number = kwargs['invoice_number']
+        accepted[number] = {'invoiceId': 7002, 'invoiceNumber': number, 'token': 'tok_7002'}
+        raise HelcimInvoiceNumberExists('Invoice Number already existed', status_code=400)
+
+    helcim_patch, client = _mock_helcim(create_invoice, lookup)
+    with helcim_patch, _mock_email():
+        call_command('process_invoice_send_runs', '--once')
+
+    run.refresh_from_db()
+    assert run.sent_count == 1
+    assert run.failed_count == 0
+    assert client.create_invoice.call_count == 1
+    assert client.get_invoice_by_number.call_count == 1
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.helcim_invoice_id == '7002'
+    assert invoice.helcim_invoice_number in accepted
+    assert run.items.get().attempts == 1
+
+
+def test_lookup_empty_creates_under_new_number(run_with_two_invoices, monkeypatch):
+    """Previous attempt left nothing at Helcim → retry creates again, under a different number."""
+    monkeypatch.setattr('billing.management.commands.process_invoice_send_runs.RETRY_BACKOFF_SECONDS', 0)
+    run, invoice = _single_item_run(run_with_two_invoices)
+    numbers = []
+
+    def create_invoice(**kwargs):
+        numbers.append(kwargs['invoice_number'])
+        if len(numbers) == 1:
+            raise HelcimAPIError('Helcim server error', status_code=500)
+        return {'invoiceId': 7003, 'invoiceNumber': kwargs['invoice_number'], 'token': 'tok_7003'}
+
+    helcim_patch, client = _mock_helcim(create_invoice)  # lookup → None
+    with helcim_patch, _mock_email():
+        call_command('process_invoice_send_runs', '--once')
+
+    run.refresh_from_db()
+    assert run.sent_count == 1
+    assert client.create_invoice.call_count == 2
+    client.get_invoice_by_number.assert_called_once_with(numbers[0])
+    assert numbers[0] != numbers[1]
+    assert all(n.startswith(f'MK{invoice.pk}-') for n in numbers)
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.helcim_invoice_number == numbers[1]
+    assert invoice.helcim_invoice_number == f'MK{invoice.pk}-{invoice.send_attempt_id.hex[:8]}'
+
+
+def test_crash_after_create_recovers_on_next_run(run_with_two_invoices, management_user):
+    """
+    Crash between the Helcim create and our persist: the run reports the
+    failure and the invoice stays sending/unknown (never back to draft). The
+    next run recovers it through lookup-first — sent with the first id, no
+    second create.
+    """
+    run, invoice = _single_item_run(run_with_two_invoices)
+    accepted, lookup = _accepted_store()
+
+    def create_invoice(**kwargs):
+        number = kwargs['invoice_number']
+        accepted[number] = {'invoiceId': 7004, 'invoiceNumber': number, 'token': 'tok_7004'}
+        # Helcim answered, but our side blew up before persisting (no token).
+        return {'invoiceId': 7004, 'invoiceNumber': number}
+
+    helcim_patch, client = _mock_helcim(create_invoice, lookup)
+    with helcim_patch, _mock_email():
+        call_command('process_invoice_send_runs', '--once')
+
+    run.refresh_from_db()
+    assert run.status == 'done'
+    assert run.failed_count == 1
+    assert run.items.get().status == 'failed'
+    invoice.refresh_from_db()
+    assert invoice.status == 'sending'
+    assert invoice.send_outcome == 'unknown'
+    first_attempt = invoice.send_attempt_id
+    assert first_attempt is not None
+    assert client.create_invoice.call_count == 1
+
+    run2 = _new_run_for(invoice, management_user)
+    with helcim_patch, _mock_email():
+        call_command('process_invoice_send_runs', '--once')
+
+    run2.refresh_from_db()
+    assert run2.status == 'done'
+    assert run2.sent_count == 1
+    assert run2.failed_count == 0
+    assert client.create_invoice.call_count == 1
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.send_outcome == 'sent'
+    assert invoice.helcim_invoice_id == '7004'
+    assert invoice.helcim_invoice_number == f'MK{invoice.pk}-{first_attempt.hex[:8]}'
+    assert invoice.send_attempt_id != first_attempt  # the claim rotated it

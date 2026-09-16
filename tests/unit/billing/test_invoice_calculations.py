@@ -323,3 +323,76 @@ class TestInvoicePaymentBalance:
 
         total = invoice.calculate_payment_balance()
         assert total == Decimal("0.00")
+
+
+@pytest.mark.django_db
+class TestInvoiceTotalsService:
+    """MAP-183: totals move only when invoice_totals.recalculate is called explicitly."""
+
+    def _lesson(self, teacher_user, student_user, school_settings):
+        return Lesson.objects.create(
+            teacher=teacher_user,
+            student=student_user,
+            school=teacher_user.school,
+            teacher_rate=school_settings.online_teacher_rate,
+            student_rate=school_settings.online_student_rate,
+            duration=Decimal("1.5"),
+            scheduled_date=datetime.now(),
+            status="completed",
+            lesson_type="online",
+        )
+
+    def test_add_then_remove_lesson_changes_total_only_through_recalculate(
+        self, teacher_user, student_user, school_settings
+    ):
+        from billing.services.invoice_totals import recalculate
+
+        invoice = Invoice.objects.create(
+            invoice_type="teacher_payment",
+            teacher=teacher_user,
+            school=teacher_user.school,
+            payment_balance=Decimal("0.00"),
+            total_amount=Decimal("0.00"),
+            due_date=datetime.now() + timedelta(days=30),
+            status="pending",
+        )
+        lesson = self._lesson(teacher_user, student_user, school_settings)
+        expected = lesson.teacher_rate * lesson.duration
+
+        invoice.lessons.add(lesson)
+        invoice.save()
+        invoice.refresh_from_db()
+        assert invoice.total_amount == Decimal("0.00"), "save() must not recompute totals"
+        assert invoice.payment_balance == Decimal("0.00")
+
+        assert recalculate(invoice) == expected
+        invoice.refresh_from_db()
+        assert invoice.total_amount == expected
+        assert invoice.payment_balance == expected
+
+        invoice.lessons.remove(lesson)
+        invoice.save()
+        invoice.refresh_from_db()
+        assert invoice.total_amount == expected, "removing a lesson must not silently change the row"
+
+        assert recalculate(invoice) == Decimal("0.00")
+        invoice.refresh_from_db()
+        assert invoice.total_amount == Decimal("0.00")
+        assert invoice.payment_balance == Decimal("0.00")
+
+    def test_payroll_invoice_save_keeps_its_amount(self, teacher_user, school_settings):
+        """A payroll invoice (no lessons) keeps its stored total across save()."""
+        total = school_settings.online_teacher_rate * 4
+        invoice = Invoice.objects.create(
+            invoice_type="teacher_payment",
+            teacher=teacher_user,
+            school=teacher_user.school,
+            payment_balance=total,
+            total_amount=total,
+            status="pending",
+        )
+        invoice.status = "paid"
+        invoice.save()
+        invoice.refresh_from_db()
+        assert invoice.total_amount == total
+        assert invoice.payment_balance == total

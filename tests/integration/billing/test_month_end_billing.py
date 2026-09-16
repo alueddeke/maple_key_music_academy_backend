@@ -408,30 +408,33 @@ class TestGenerateTeacherInvoiceEndpoint:
     ):
         """
         Regression (Bug 2): a lesson forfeited AFTER approval was already charged to
-        the student at approval (as a 'confirmed' decrement). Generation must record
-        the no-show with a CreditTransaction(type='forfeited') for the audit trail,
-        but must NOT decrement the balance again (no double charge).
+        the student at approval (lesson_charge). Generation records the no-show with
+        one balance-neutral 'forfeited' row sourced to the batch item (MAP-186) and
+        must NOT touch the balance (no double charge).
         """
         account = StudentCreditAccount.objects.create(
             student=student_user, school=school, balance=Decimal('500.00')
         )
         batch = _make_approved_batch(teacher_user, school)
-        # 1 completed (billable) + 1 forfeited @ student_rate 60 x 1.0 = 60.00 audit row
+        # 1 completed (billable) + 1 forfeited → one no-show record for the forfeited item
         _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed',
                    teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
-        _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='forfeited',
-                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        forfeited = _make_item(batch, student_user, scheduled_date=date(2026, 6, 8),
+                               status='forfeited',
+                               teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
 
         url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
         response = management_client.post(url, format='json')
 
         assert response.status_code == status.HTTP_200_OK
-        # one forfeited audit row written
+        # one forfeited record written, keyed on the item
         assert response.data['forfeited_credits_written'] == 1
         forfeited_txns = CreditTransaction.objects.filter(type='forfeited', account=account)
         assert forfeited_txns.count() == 1
-        assert forfeited_txns.first().amount == Decimal('60.00')
-        # balance unchanged — the charge happened at approval, not again here
+        assert forfeited_txns.get().amount == forfeited.student_rate * forfeited.duration
+        assert forfeited_txns.get().source_batch_item_id == forfeited.id
+        assert forfeited_txns.get().legacy is False
+        # balance unchanged — forfeited is informational; the charge happened at approval
         account.refresh_from_db()
         assert account.balance == Decimal('500.00')
 
@@ -439,26 +442,40 @@ class TestGenerateTeacherInvoiceEndpoint:
         self, management_client, teacher_user, student_user, school, school_settings, management_user
     ):
         """
-        A lesson forfeited BEFORE approval already carries a 'forfeited' row written
-        at approval. Generation must not write a second one for the same charge.
+        Dedup is keyed on the batch item (MAP-186): an item that already carries a
+        'forfeited' row is not recorded again, while another forfeited item with the
+        SAME amount still gets its own row.
         """
+        from django.db import transaction
+        from billing.services import ledger
+
         account = StudentCreditAccount.objects.create(
             student=student_user, school=school, balance=Decimal('100.00')
         )
         batch = _make_approved_batch(teacher_user, school)
-        _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='forfeited',
-                   teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
-        # Simulate the approval-time forfeited row already existing
-        CreditTransaction.objects.create(
-            account=account, school=school, type='forfeited', amount=Decimal('60.00')
-        )
+        recorded = _make_item(batch, student_user, scheduled_date=date(2026, 6, 1),
+                              status='forfeited',
+                              teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        fresh = _make_item(batch, student_user, scheduled_date=date(2026, 6, 8),
+                           status='forfeited',
+                           teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+        # The first item already carries its no-show record.
+        with transaction.atomic():
+            ledger.post(account, type='forfeited',
+                        amount=recorded.student_rate * recorded.duration,
+                        source_batch_item=recorded)
 
         url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
         response = management_client.post(url, format='json')
 
         assert response.status_code == status.HTTP_200_OK
-        assert response.data['forfeited_credits_written'] == 0
-        assert CreditTransaction.objects.filter(type='forfeited', account=account).count() == 1
+        assert response.data['forfeited_credits_written'] == 1
+        rows = CreditTransaction.objects.filter(type='forfeited', account=account)
+        assert rows.count() == 2
+        assert rows.filter(source_batch_item=recorded).count() == 1
+        assert rows.filter(source_batch_item=fresh).count() == 1
+        account.refresh_from_db()
+        assert account.balance == Decimal('100.00')
 
 
 # ---------------------------------------------------------------------------

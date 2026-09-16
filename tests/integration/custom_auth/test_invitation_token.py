@@ -78,6 +78,33 @@ class TestInvitationTokenValidate:
 
 @pytest.mark.django_db
 class TestInvitationTokenSetup:
+    def test_weak_password_rejected_with_validator_messages(self, api_client, management_user):
+        """MAP-141: a password failing any configured validator → 400 listing the messages; no user created."""
+        inv = _make_invitation('weak@example.com', management_user)
+        url = reverse('setup_account_with_invitation', kwargs={'token': inv.token})
+        response = api_client.post(url, {
+            'first_name': 'Weak', 'last_name': 'Pass', 'password': '12345678',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data['error'] == 'Password validation failed'
+        assert isinstance(response.data['details'], list) and response.data['details']
+        assert not User.objects.filter(email='weak@example.com').exists()
+        inv.refresh_from_db()
+        assert inv.is_used is False
+
+    def test_password_similar_to_email_rejected(self, api_client, management_user):
+        """The similarity validator sees the invitee's email (unsaved User instance, D5b)."""
+        inv = _make_invitation('similar.person@example.com', management_user)
+        url = reverse('setup_account_with_invitation', kwargs={'token': inv.token})
+        response = api_client.post(url, {
+            'first_name': 'Sim', 'last_name': 'Person', 'password': 'similar.person',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert any('similar' in m.lower() for m in response.data['details'])
+        assert not User.objects.filter(email='similar.person@example.com').exists()
+
     """Tests for POST /api/billing/invite/<token>/setup/ (setup_account_with_invitation)."""
 
     def test_valid_setup_creates_user_and_returns_jwt(self, api_client, management_user):
