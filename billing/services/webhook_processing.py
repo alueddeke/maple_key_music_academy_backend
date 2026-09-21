@@ -10,9 +10,14 @@ Money-safety rules enforced here:
   - Credit is applied ONLY for transactions with status=APPROVED and
     type=purchase/capture. Declined attempts and refunds/reversals must
     never increase a student's wallet.
-  - The invoice is marked paid only when the approved amount covers
+  - The invoice is marked paid only when the credited amounts cover
     invoice.amount; a short payment still credits the wallet (the money is
     real) but leaves the invoice open and flags the event credited_partial.
+  - The wallet is credited with at most what the invoice still owed
+    (MAP-216). Anything above that (e.g. Helcim's card convenience fee) is
+    stored on the event as fee_amount and never reaches the balance; a
+    payment on an already-covered invoice posts nothing and lands in
+    needs_attention.
   - Re-running is safe: terminal states are never re-processed, and the
     'credited*' write happens in the same atomic block that stamps the state.
   - Concurrency (MAP-180): inside the credit transaction the event row is
@@ -30,7 +35,7 @@ import logging
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import F, Sum
 from django.utils import timezone
 
 from billing.metrics import webhook_events_total
@@ -93,6 +98,17 @@ def _process(event):
         event.transaction_status = str(tx.get('status', ''))
         event.transaction_type = str(tx.get('type', ''))
         event.save(update_fields=['invoice_id', 'amount', 'transaction_status', 'transaction_type'])
+        # If Helcim reports the fee as its own field, log it for comparison
+        # with the computed fee_amount. The cap below is the rule either way.
+        reported_fees = {
+            key: tx[key] for key in tx
+            if 'fee' in key.lower() or 'surcharge' in key.lower()
+        }
+        if reported_fees:
+            logger.info(
+                'Webhook event %s: Helcim fee fields %s',
+                event.helcim_transaction_id, reported_fees,
+            )
 
     # Gating — strict: anything not an approved purchase/capture never credits.
     tx_status = event.transaction_status.upper()
@@ -159,6 +175,39 @@ def _process(event):
                 student=invoice.student,
                 school=invoice.school,
             )
+            # Coverage is cumulative across credited events for this invoice
+            # number, so two partial payments eventually flip the invoice paid.
+            # Sum what was credited (amount − fee_amount), not gross: a fee on
+            # an earlier payment never reduces what the invoice still owes.
+            prior = (
+                HelcimWebhookEvent.objects
+                .filter(
+                    invoice_id=event.invoice_id,
+                    processing_status__in=('credited', 'credited_partial'),
+                )
+                .exclude(pk=event.pk)
+                .aggregate(total=Sum(F('amount') - F('fee_amount')))['total']
+            ) or Decimal('0.00')
+
+            # The wallet gets at most what the invoice still owed (MAP-216).
+            # Anything above that — e.g. Helcim's card convenience fee — is
+            # recorded on the event and never reaches the balance.
+            remaining = max(invoice.amount - prior, Decimal('0.00'))
+            credit = min(event.amount, remaining)
+            fee = event.amount - credit
+            if credit == Decimal('0.00'):
+                return _finalize(
+                    event, 'needs_attention',
+                    f'payment on an already-covered invoice invoiceNumber={event.invoice_id} '
+                    f'— {event.amount} not credited, review in admin',
+                )
+            event.fee_amount = fee
+            if fee > Decimal('0.00'):
+                logger.info(
+                    'Webhook event %s: received %s, credited %s, fee %s (invoice %s)',
+                    event.helcim_transaction_id, event.amount, credit, fee, invoice.id,
+                )
+
             # Savepoint: an IntegrityError on one_credit_per_webhook_event must
             # not poison the outer atomic block. ledger.post is the single
             # balance writer (MAP-186): it writes the row and moves the
@@ -168,7 +217,7 @@ def _process(event):
                     ledger.post(
                         account,
                         type='pre_billing_payment',
-                        amount=event.amount,
+                        amount=credit,
                         source_event=event,
                     )
             except IntegrityError:
@@ -182,22 +231,13 @@ def _process(event):
                 event.processing_status = 'credited'
                 event.last_error = ''
                 event.processed_at = timezone.now()
-                event.save(update_fields=['school', 'processing_status', 'last_error', 'processed_at'])
+                event.save(update_fields=[
+                    'school', 'fee_amount', 'processing_status', 'last_error', 'processed_at',
+                ])
                 webhook_events_total.labels(outcome='credited').inc()
                 return event
 
-            # Coverage is cumulative across credited events for this invoice
-            # number, so two partial payments eventually flip the invoice paid.
-            prior = (
-                HelcimWebhookEvent.objects
-                .filter(
-                    invoice_id=event.invoice_id,
-                    processing_status__in=('credited', 'credited_partial'),
-                )
-                .exclude(pk=event.pk)
-                .aggregate(total=Sum('amount'))['total']
-            ) or Decimal('0.00')
-            covered = (prior + event.amount) >= invoice.amount
+            covered = (prior + credit) >= invoice.amount
             if covered and invoice.status != 'paid':
                 invoice.status = 'paid'
                 invoice.save(update_fields=['status', 'updated_at'])
@@ -205,10 +245,12 @@ def _process(event):
             event.school = invoice.school
             event.processing_status = 'credited' if covered else 'credited_partial'
             event.last_error = '' if covered else (
-                f'paid {event.amount} of {invoice.amount} — invoice left {invoice.status}'
+                f'credited {prior + credit} of {invoice.amount} — invoice left {invoice.status}'
             )
             event.processed_at = timezone.now()
-            event.save(update_fields=['school', 'processing_status', 'last_error', 'processed_at'])
+            event.save(update_fields=[
+                'school', 'fee_amount', 'processing_status', 'last_error', 'processed_at',
+            ])
             webhook_events_total.labels(outcome=event.processing_status).inc()
             if not covered:
                 logger.warning(
