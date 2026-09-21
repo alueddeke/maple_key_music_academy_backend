@@ -1,14 +1,18 @@
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 import logging
+
+from ..authentication import revoke_user_tokens
+from ..throttling import LoginIPThrottle, LoginEmailThrottle
 
 logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([LoginIPThrottle, LoginEmailThrottle])
 def password_reset_request(request):
     """
     Request password reset endpoint
@@ -98,6 +102,7 @@ Maple Key Music Academy Team
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([LoginIPThrottle, LoginEmailThrottle])
 def password_reset_validate_token(request):
     """
     Validate password reset token endpoint
@@ -155,6 +160,7 @@ def password_reset_validate_token(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([LoginIPThrottle, LoginEmailThrottle])
 def password_reset_confirm(request):
     """
     Confirm password reset endpoint
@@ -221,9 +227,12 @@ def password_reset_confirm(request):
             'details': e.messages
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    # Set new password
+    # Set new password, then kill every existing session: access tokens
+    # issued before now are rejected, outstanding refresh tokens are
+    # blacklisted (MAP-141).
     user.set_password(password)
     user.save()
+    revoke_user_tokens(user)
 
     logger.info('Password reset successful for user %s', user.email)
 

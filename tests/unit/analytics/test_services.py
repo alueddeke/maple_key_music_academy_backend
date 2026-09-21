@@ -35,6 +35,21 @@ class TestMonthRows:
         rows = compute_month_rows(school, months=1, today=JUNE)
         assert rows[0]['mrr'] == '0.00'
 
+    def test_mrr_biweekly_schedule_counts_anchored_mondays_only(self, school, active_schedule):
+        """MAP-208: interval_weeks=2 projects the Mondays on the start_date cadence, not all five."""
+        active_schedule.interval_weeks = 2
+        active_schedule.save(update_fields=['interval_weeks'])
+        active_schedule.refresh_from_db()
+        count = len(active_schedule.generate_lessons_for_month(JUNE.year, JUNE.month))
+        assert 0 < count < 5
+        expected = (
+            count
+            * Decimal(str(active_schedule.duration))
+            * Decimal(str(active_schedule.student_rate))
+        )
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        assert rows[0]['mrr'] == f"{expected:.2f}"
+
     def test_expenses_summed_by_period(self, school, active_schedule):
         SchoolExpenseItem.objects.create(
             school=school,

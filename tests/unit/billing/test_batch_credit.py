@@ -1,13 +1,15 @@
 """
 Unit tests for Phase 20 batch approval credit reconciliation.
 
-Coverage (REC-02 through REC-06):
-  - Forfeited lesson: Lesson.forfeited created, added to StudentInvoice, balance -= amount,
-    CreditTransaction(type='forfeited') written
-  - Waived lesson: Lesson.waived created, NOT in StudentInvoice, balance += lesson_rate,
-    CreditTransaction(type='waived_rollover') written
-  - Confirmed lesson: balance -= amount, no CreditTransaction written (D-01)
-  - Balance floor: confirmed + forfeited deductions floor at 0 (D-02)
+Coverage (REC-02 through REC-06, ledger semantics per MAP-186):
+  - Forfeited lesson: Lesson.forfeited created, added to StudentInvoice, charged at
+    approval through the ledger (lesson_charge / shortfall) — no 'forfeited' row at
+    approval; that record is written at payroll generate
+  - Waived lesson: Lesson.waived created, NOT in StudentInvoice; rollover deferred to
+    payroll generate
+  - Confirmed lesson: one lesson_charge row per item, sourced to the batch item
+  - Uncovered remainder: recorded as an informational shortfall row and the account is
+    flagged needs_attention — the balance is never clamped silently
   - StudentInvoice.credit_applied + amount_after_credit populated (D-10, D-11)
   - No PreBillingInvoice for student → credit_applied=0, amount_after_credit=invoice.amount (D-11)
   - select_for_update() used: concurrent approval does not double-apply credit (REC-02)
@@ -110,10 +112,9 @@ class TestBatchApprovalConfirmed:
         self, school, teacher_user, student_user, management_user, school_settings
     ):
         """
-        Confirmed lesson at batch approval: balance decremented by lesson amount,
-        no CreditTransaction written (D-01).
-
-        RED until Plan 04 adds credit deduction logic to management_approve_batch.
+        Confirmed lesson at batch approval: balance decremented by the lesson amount
+        through exactly one ledger row — a lesson_charge sourced to the batch item
+        (MAP-186). No shortfall when the balance covers the charge.
         """
         _setup_billable_contact(student_user, school)
         account = StudentCreditAccount.objects.create(
@@ -125,7 +126,7 @@ class TestBatchApprovalConfirmed:
         # Set status directly to submitted so approval is allowed
         batch.status = 'submitted'
         batch.save()
-        _make_batch_lesson_item(
+        item = _make_batch_lesson_item(
             batch, student_user, status='completed',
             student_rate=Decimal('45.00'), duration=Decimal('1.0'),
         )
@@ -135,17 +136,21 @@ class TestBatchApprovalConfirmed:
 
         account.refresh_from_db()
         assert account.balance == Decimal('55.00')
-        assert CreditTransaction.objects.filter(type='pre_billing_payment').count() == 0
-        assert CreditTransaction.objects.count() == 0
+        charges = CreditTransaction.objects.filter(account=account, type='lesson_charge')
+        assert charges.count() == 1
+        assert charges.get().amount == item.student_rate * item.duration
+        assert charges.get().source_batch_item_id == item.id
+        assert CreditTransaction.objects.filter(account=account).count() == 1
+        assert not CreditTransaction.objects.filter(account=account, type='shortfall').exists()
+        assert account.needs_attention is False
 
     def test_confirmed_lesson_balance_floors_at_zero_when_deduction_exceeds_balance(
         self, school, teacher_user, student_user, management_user, school_settings
     ):
         """
-        Deduction exceeds balance → balance floors at Decimal('0.00') (D-02 max(0,...)).
-        No IntegrityError raised from DB CHECK constraint.
-
-        RED until Plan 04 implements the max(0,...) floor.
+        Deduction exceeds balance → the covered part posts as lesson_charge, the
+        uncovered remainder as an informational shortfall, balance ends at 0 and
+        the account is flagged needs_attention (MAP-186: never clamped silently).
         """
         _setup_billable_contact(student_user, school)
         account = StudentCreditAccount.objects.create(
@@ -156,16 +161,25 @@ class TestBatchApprovalConfirmed:
         batch = _make_batch(teacher_user, school, batch_number='BATCH-20-01-C2')
         batch.status = 'submitted'
         batch.save()
-        _make_batch_lesson_item(
+        item = _make_batch_lesson_item(
             batch, student_user, status='completed',
             student_rate=Decimal('45.00'), duration=Decimal('1.0'),
         )
+        opening = account.balance
+        lesson_amount = item.student_rate * item.duration
 
         response = _approve_batch(management_user, batch)
         assert response.status_code == 200
 
         account.refresh_from_db()
         assert account.balance == Decimal('0.00')
+        assert account.needs_attention is True
+        charge = CreditTransaction.objects.get(account=account, type='lesson_charge')
+        shortfall = CreditTransaction.objects.get(account=account, type='shortfall')
+        assert charge.amount == opening
+        assert shortfall.amount == lesson_amount - opening
+        assert charge.source_batch_item_id == item.id
+        assert shortfall.source_batch_item_id == item.id
 
 
 # ---------------------------------------------------------------------------
@@ -240,10 +254,9 @@ class TestBatchApprovalForfeited:
         self, school, teacher_user, student_user, management_user, school_settings
     ):
         """
-        Forfeited lesson: balance -= lesson_amount, CreditTransaction(type='forfeited')
-        written (D-09).
-
-        RED until Plan 04 implements forfeited credit deduction.
+        Forfeited lesson is charged at approval exactly like a completed one: one
+        lesson_charge sourced to the item, balance -= lesson_amount, and NO
+        'forfeited' row — that record is written once, at payroll generate (MAP-186).
         """
         _setup_billable_contact(student_user, school)
         account = StudentCreditAccount.objects.create(
@@ -252,7 +265,7 @@ class TestBatchApprovalForfeited:
         batch = _make_batch(teacher_user, school, batch_number='BATCH-20-02-F3')
         batch.status = 'submitted'
         batch.save()
-        _make_batch_lesson_item(
+        item = _make_batch_lesson_item(
             batch, student_user, status='forfeited',
             student_rate=Decimal('45.00'), duration=Decimal('1.0'),
         )
@@ -262,9 +275,11 @@ class TestBatchApprovalForfeited:
 
         account.refresh_from_db()
         assert account.balance == Decimal('55.00')
-        assert CreditTransaction.objects.filter(
-            type='forfeited', amount=Decimal('45.00'),
-        ).count() == 1
+        assert CreditTransaction.objects.filter(account=account, type='forfeited').count() == 0
+        charges = CreditTransaction.objects.filter(account=account, type='lesson_charge')
+        assert charges.count() == 1
+        assert charges.get().amount == item.student_rate * item.duration
+        assert charges.get().source_batch_item_id == item.id
 
     def test_forfeited_recalculates_student_invoice_amount_after_m2m_add(
         self, school, teacher_user, student_user, management_user, school_settings
@@ -384,10 +399,9 @@ class TestBatchApprovalWaived:
 
         After batch approval:
         - CreditTransaction.objects.filter(type='waived_rollover').count() == 0
-        - Account balance reflects NO waived increment; confirmed deduction floors at 0
-
-        RED until Plan 02 removes the waived credit block from management_approve_batch
-        (billing/views/management.py lines 1532-1540).
+        - Account balance reflects NO waived increment; the completed item's charge is
+          uncovered (balance 0) so it is recorded as a shortfall and the account is
+          flagged (MAP-186) — nothing is clamped silently.
         """
         _setup_billable_contact(student_user, school)
         account = StudentCreditAccount.objects.create(
@@ -396,11 +410,11 @@ class TestBatchApprovalWaived:
         batch = _make_batch(teacher_user, school, batch_number='BATCH-20-03-W3')
         batch.status = 'submitted'
         batch.save()
-        _make_batch_lesson_item(
+        completed = _make_batch_lesson_item(
             batch, student_user, status='completed',
             student_rate=Decimal('45.00'), duration=Decimal('1.0'),
         )
-        _make_batch_lesson_item(
+        waived = _make_batch_lesson_item(
             batch, student_user, status='waived',
             student_rate=Decimal('45.00'), duration=Decimal('1.0'),
         )
@@ -411,9 +425,15 @@ class TestBatchApprovalWaived:
         # Phase 22: waived_rollover is NO LONGER written at approval time (D-05)
         # Credit is deferred to management_generate_teacher_invoice
         assert CreditTransaction.objects.filter(type='waived_rollover').count() == 0
-        # Balance: start=0; confirmed deduction (-45) floors at 0; waived has no effect here
+        assert not CreditTransaction.objects.filter(source_batch_item=waived).exists()
+        # Balance: start=0 → nothing to charge; the whole completed amount is a shortfall.
         account.refresh_from_db()
         assert account.balance == Decimal('0.00')
+        assert account.needs_attention is True
+        assert not CreditTransaction.objects.filter(account=account, type='lesson_charge').exists()
+        shortfall = CreditTransaction.objects.get(account=account, type='shortfall')
+        assert shortfall.amount == completed.student_rate * completed.duration
+        assert shortfall.source_batch_item_id == completed.id
 
     def test_waived_teacher_payment_is_zero_via_calculate_teacher_payment(
         self, school, teacher_user, student_user

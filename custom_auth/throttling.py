@@ -27,3 +27,24 @@ class RegistrationThrottle(SharedAnonRateThrottle):
 
 class ClientErrorThrottle(SharedAnonRateThrottle):
     scope = 'client_errors'
+
+
+class LoginIPThrottle(SharedAnonRateThrottle):
+    """Per-IP rate for login, refresh and the password-reset endpoints (MAP-141)."""
+    scope = 'login'
+
+
+class LoginEmailThrottle(SharedAnonRateThrottle):
+    """
+    Per-email rate for login and password-reset (MAP-141): a credential-
+    stuffing run against one account from many IPs hits this one. Requests
+    that carry no email (validate/confirm, malformed bodies) return None and
+    fall through to the IP throttle.
+    """
+    scope = 'login_email'
+
+    def get_cache_key(self, request, view):
+        email = str(request.data.get('email', '') or '').strip().lower()
+        if not email:
+            return None
+        return f'throttle_login_email_{email}'

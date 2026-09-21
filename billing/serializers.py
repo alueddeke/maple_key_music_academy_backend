@@ -160,12 +160,15 @@ class RecurringScheduleSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
+    interval_weeks_display = serializers.CharField(source='get_interval_weeks_display', read_only=True)
 
     class Meta:
         model = RecurringLessonsSchedule
         fields = [
             'id', 'teacher', 'teacher_name', 'student', 'student_name',
-            'day_of_week', 'day_of_week_display', 'start_time', 'duration',
+            'day_of_week', 'day_of_week_display',
+            'interval_weeks', 'interval_weeks_display',
+            'start_time', 'duration',
             'lesson_type', 'teacher_rate', 'student_rate',
             'is_active', 'start_date', 'end_date',
             'pause_start', 'pause_end',

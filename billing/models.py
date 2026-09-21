@@ -73,6 +73,14 @@ class School(models.Model):
         max_length=255, blank=True,
         help_text="Base64 webhook verifier token. Blank = use HELCIM_WEBHOOK_SECRET env setting.",
     )
+    helcim_last_synced_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            "sync_helcim_payments checkpoint (MAP-154): the newest Helcim "
+            "dateCreated reconciled for this school. Null = never synced; the "
+            "first run looks back 30 days."
+        ),
+    )
     payment_terms_days = models.PositiveIntegerField(default=7)
     cancellation_notice_hours = models.PositiveIntegerField(default=24)
 
@@ -205,6 +213,11 @@ class User(AbstractUser):
         limit_choices_to={'user_type': 'teacher'},
         blank=True
     )
+    # Stamped on password reset and on management deactivation (MAP-141).
+    # Access tokens issued before it are rejected by
+    # custom_auth.authentication.JWTAuthentication; refresh tokens are
+    # blacklisted at the same moment.
+    password_changed_at = models.DateTimeField(null=True, blank=True)
     # Override to use email as username
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name', 'user_type']
@@ -341,8 +354,8 @@ class Lesson(models.Model):
     # Lesson details
     lesson_type = models.CharField(max_length=20, choices=LESSON_TYPES, default='in_person')
     is_trial = models.BooleanField(default=False, help_text="Trial lesson - student not charged, teacher still paid")
-    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate paid to teacher for this lesson")
-    student_rate = models.DecimalField(max_digits=6, decimal_places=2, default=100.00, validators=[MinValueValidator(Decimal('0'))], help_text="Rate billed to student for this lesson")
+    teacher_rate = models.DecimalField(max_digits=6, decimal_places=2, null=True, validators=[MinValueValidator(Decimal('0'))], help_text="Rate paid to teacher for this lesson")
+    student_rate = models.DecimalField(max_digits=6, decimal_places=2, null=True, validators=[MinValueValidator(Decimal('0'))], help_text="Rate billed to student for this lesson")
     scheduled_date = models.DateTimeField(null=True, blank=True)
     completed_date = models.DateTimeField(null=True, blank=True)
     duration = models.DecimalField(max_digits=6, decimal_places=2, default=1.0)
@@ -424,37 +437,15 @@ class Lesson(models.Model):
                     self.is_trial = True
 
 
-        # Auto-set teacher_rate and student_rate if not already set (rate locking at creation)
-        # Only set rates for new lessons (pk is None) and if both rates are still at model defaults
-        if not self.pk and (self.teacher_rate == Decimal('50.00') and self.student_rate == Decimal('100.00')):
-            # find school settings
-            settings = None
-            # try to get rates from teacher's school
-            if self.teacher and getattr(self.teacher, 'school', None):
-                settings = SchoolSettings.get_settings_for_school(self.teacher.school)
+        # Rate locking: rates are resolved once, at creation, and never re-derived (MAP-182).
+        if self.pk is None and (self.teacher_rate is None or self.student_rate is None):
+            from billing.services.rates import resolve_rates
+            self.teacher_rate, self.student_rate = resolve_rates(
+                self.teacher.school, self.teacher, self.lesson_type
+            )
 
-            if not settings:
-                try:
-                    # using legacy rate settings
-                    settings = GlobalRateSettings.get_settings()
-                except:
-                    settings = None
-
-            # Determine rates based on lesson type
-            if self.lesson_type == 'online':
-                # Use settings rates if found, legacy otherwise
-                self.teacher_rate = settings.online_teacher_rate if settings else Decimal('45.00')
-                base_student_rate = settings.online_student_rate if settings else Decimal('60.00')
-            else:
-                # In-person lesson rates, individual to teacher per school
-                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                base_student_rate = settings.inperson_student_rate if settings else Decimal('100.00')
-
-            # if lesson is trial, student pays $0
-            self.student_rate = Decimal('0.00') if self.is_trial else base_student_rate
-
-        # If lesson is marked as trial after rates were set, update student_rate to $0
-        elif self.is_trial and self.student_rate != Decimal('0.00'):
+        # Trial lesson: student pays $0, teacher still paid.
+        if self.is_trial and self.student_rate != Decimal('0.00'):
             self.student_rate = Decimal('0.00')
 
         super().save(*args, **kwargs)
@@ -464,7 +455,7 @@ class Lesson(models.Model):
         return f"{self.student.get_full_name()} - {self.teacher.get_full_name()} - {self.scheduled_date}{trial_indicator}"
     
 class RecurringLessonsSchedule(models.Model):
-    """Weekly recurring lesson schedule for teacher-student pairs"""
+    """Recurring lesson schedule for teacher-student pairs — weekly or every 2 weeks (MAP-208)"""
     DAYS_OF_WEEK = [
         (0, 'Monday'),
         (1, 'Tuesday'),
@@ -474,6 +465,10 @@ class RecurringLessonsSchedule(models.Model):
         (5, 'Saturday'),
         (6, 'Sunday'),
     ]
+    INTERVAL_CHOICES = [
+        (1, 'Weekly'),
+        (2, 'Every 2 weeks'),
+    ]
 
     # Relationships
     teacher = models.ForeignKey(User,on_delete=models.CASCADE, related_name='teaching_schedules', limit_choices_to={'user_type':'teacher'})
@@ -481,7 +476,11 @@ class RecurringLessonsSchedule(models.Model):
     school = models.ForeignKey('School',on_delete=models.PROTECT, related_name='recurring_lesson_schedules')
 
     # Schedule Details
-    day_of_week = models.IntegerField(choices=DAYS_OF_WEEK) 
+    day_of_week = models.IntegerField(choices=DAYS_OF_WEEK)
+    interval_weeks = models.PositiveSmallIntegerField(
+        choices=INTERVAL_CHOICES, default=1,
+        help_text="1 = every week, 2 = every other week, counted from start_date",
+    )
     start_time = models.TimeField(help_text="Lesson start time (eg. 15:00)")
     duration = models.DecimalField(max_digits=4, decimal_places=2, default=1.0, help_text="Duration in hours")
 
@@ -524,22 +523,16 @@ class RecurringLessonsSchedule(models.Model):
 
     def save(self, *args, **kwargs):
         """auto-set rates and school if not provided"""
-        from decimal import Decimal
-
         #autoset school from teacher
         if not self.school_id and self.teacher:
             self.school = self.teacher.school
         # autoset rates if not provided (rate locking)
         if self.teacher_rate is None or self.student_rate is None:
-            settings = SchoolSettings.get_settings_for_school(self.school)
+            from billing.services.rates import resolve_rates
+            self.teacher_rate, self.student_rate = resolve_rates(
+                self.school, self.teacher, self.lesson_type
+            )
 
-            if self.lesson_type == 'online':
-                self.teacher_rate = settings.online_teacher_rate
-                self.student_rate = settings.online_student_rate
-            else:
-                self.teacher_rate = self.teacher.hourly_rate if self.teacher else Decimal('50.00')
-                self.student_rate = settings.inperson_student_rate
-            
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -549,7 +542,10 @@ class RecurringLessonsSchedule(models.Model):
         """
         Calculate which dates this schedule would occur in given month.
         Return list of date objects(does NOT create the lesson records).
-        Example: "every monday", returns all mondays in that month
+        Example: "every monday", returns all mondays in that month;
+        "every 2 weeks on monday" returns the mondays a whole multiple of
+        2 weeks after start_date — the cadence anchor. It does not reset at
+        a month boundary and a pause window does not shift it (MAP-208).
         """
         import calendar 
         from datetime import date, timedelta
@@ -571,7 +567,12 @@ class RecurringLessonsSchedule(models.Model):
 
         while current_date <= month_end:
             if current_date >= self.start_date:
-                if self.end_date is None or current_date <= self.end_date:
+                # Cadence is anchored to start_date (MAP-208): keep only dates a
+                # whole multiple of interval_weeks weeks after it. The 7-day step
+                # below is unchanged — the filter, not the step, carries the interval.
+                weeks_from_start = (current_date - self.start_date).days // 7
+                on_cadence = weeks_from_start % self.interval_weeks == 0
+                if on_cadence and (self.end_date is None or current_date <= self.end_date):
                     # Exclude dates inside the pause window (inclusive both ends;
                     # open-ended when pause_end is None)
                     in_pause = (
@@ -714,12 +715,8 @@ class Invoice(models.Model):
         elif self.invoice_type == 'student_billing' and self.teacher:
             self.teacher = None
 
-        # Calculate payment balance and total_amount
-        if self.pk:  # Only if instance already exists (has lessons)
-            calculated_total = self.calculate_payment_balance()
-            self.payment_balance = calculated_total
-            self.total_amount = calculated_total
-
+        # Totals are never recomputed here — billing.services.invoice_totals.recalculate
+        # is the only writer of total_amount / payment_balance (MAP-183).
         if not self.invoice_number:
             # Outer atomic ensures the select_for_update() lock inside
             # generate_invoice_number() is held until super().save() inserts
@@ -778,10 +775,10 @@ class MonthlyInvoiceBatch(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
 
-    # linked invoice
-    invoice = models.ForeignKey(
+    # linked invoice — one payroll invoice per batch, enforced by the database (MAP-183)
+    invoice = models.OneToOneField(
         Invoice,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name='source_batch',
@@ -1198,6 +1195,13 @@ class StudentCreditAccount(models.Model):
         default=Decimal('0.00'),
         help_text="Current credit balance in dollars. Always >= 0 (DB enforced).",
     )
+    needs_attention = models.BooleanField(
+        default=False,
+        help_text=(
+            "Set when a batch approval could not be fully covered by the balance "
+            "(a 'shortfall' ledger row was posted). Cleared manually."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     history = HistoricalRecords()
@@ -1219,17 +1223,28 @@ class StudentCreditAccount(models.Model):
 
 class CreditTransaction(models.Model):
     """
-    Immutable ledger entry for student credit account movements.
-    Amount is ALWAYS positive; direction is implied by type:
+    Immutable ledger entry. Every change to StudentCreditAccount.balance is one
+    row, posted by billing.services.ledger.post (the single writer) with a
+    non-null source reference (MAP-186).
+
+    Amount is ALWAYS positive; the balance effect is implied by type:
       pre_billing_payment → balance += amount
-      forfeited           → balance -= amount
       waived_rollover     → balance += amount
+      lesson_charge       → balance -= amount
+      forfeited           → informational, balance unchanged
+      shortfall           → informational, balance unchanged
+    Invariant: balance == Σ(pre_billing_payment + waived_rollover) − Σ(lesson_charge).
     Never use signed amounts (D-09: guards against sign-flip bugs).
+
+    `legacy=True` marks rows that existed before the source constraint was
+    introduced (migration 0074); ledger.post never sets it.
     """
     TRANSACTION_TYPES = [
         ('pre_billing_payment', 'Pre-Billing Payment'),
         ('forfeited', 'Forfeited'),
         ('waived_rollover', 'Waived Rollover'),
+        ('lesson_charge', 'Lesson Charge'),
+        ('shortfall', 'Shortfall'),
     ]
 
     account = models.ForeignKey(
@@ -1261,6 +1276,34 @@ class CreditTransaction(models.Model):
         related_name='credit_transactions',
         help_text="Webhook event that posted this credit; at most one credit per event.",
     )
+    source_invoice = models.ForeignKey(
+        'PreBillingInvoice',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Pre-billing invoice this row was posted against.",
+    )
+    source_batch_item = models.ForeignKey(
+        'BatchLessonItem',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Batch lesson item this row was posted against (approval charge, forfeit, rollover).",
+    )
+    source_lesson = models.ForeignKey(
+        'Lesson',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='credit_transactions',
+        help_text="Lesson this row was posted against.",
+    )
+    legacy = models.BooleanField(
+        default=False,
+        help_text="Row predates the source requirement (migration 0074). Never set by ledger.post.",
+    )
 
     history = HistoricalRecords()
 
@@ -1277,6 +1320,16 @@ class CreditTransaction(models.Model):
                 fields=['source_event'],
                 condition=Q(source_event__isnull=False),
                 name='one_credit_per_webhook_event',
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(legacy=True)
+                    | Q(source_event__isnull=False)
+                    | Q(source_invoice__isnull=False)
+                    | Q(source_batch_item__isnull=False)
+                    | Q(source_lesson__isnull=False)
+                ),
+                name='credit_transaction_has_source',
             ),
         ]
 
@@ -1341,6 +1394,9 @@ class HelcimWebhookEvent(models.Model):
         ('no_invoice', 'No matching invoice'),     # retryable
         ('no_account', 'No credit account'),       # retryable
         ('enrichment_failed', 'Enrichment failed'),  # secondary GET failed — retryable
+        # Payment arrived on an invoice number an adjustment superseded
+        # (MAP-184). Terminal — never credited, never retried; admin review.
+        ('needs_attention', 'Needs attention'),
     ]
     processing_status = models.CharField(
         max_length=30,
@@ -1565,7 +1621,8 @@ class PreBillingInvoice(models.Model):
     Pre-billing invoice sent to a parent/guardian before Helcim charges.
 
     Tracks the full lifecycle: draft → sent → adjusted → paid.
-    Locks the amount at draft generation (D-11). Status transitions are
+    `amount` is net of the wallet credit applied at send; a lesson removal
+    recomputes it and re-applies the credit (MAP-184). Status transitions are
     audited via HistoricalRecords. No card data stored — only helcim_invoice_id
     and payment_token (the Helcim hosted-payment URL token, not a PAN).
 
@@ -1605,7 +1662,11 @@ class PreBillingInvoice(models.Model):
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        help_text="Invoice amount locked at draft generation. Floor at 0 enforced in view layer (D-05).",
+        help_text=(
+            "Amount the parent is asked to pay: gross of the issued lessons minus "
+            "applied wallet credit. Recomputed on lesson removal (MAP-184). "
+            "Floor at 0 enforced in view layer (D-05)."
+        ),
     )
     period_start = models.DateField()
     period_end = models.DateField()
@@ -1621,6 +1682,63 @@ class PreBillingInvoice(models.Model):
             "Helcim invoiceNumber (e.g. INV1791) from create_invoice response. "
             "Payment/webhook responses reference invoiceNumber, not invoiceId — "
             "this is the field webhook reconciliation matches on."
+        ),
+    )
+    previous_helcim_invoice_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Helcim invoice ID this invoice replaced on the last lesson removal "
+            "(MAP-184). The one cancel_outcome refers to."
+        ),
+    )
+    previous_helcim_invoice_number = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Helcim invoiceNumber this invoice replaced. A payment webhook on "
+            "this number is finalized needs_attention and never credited."
+        ),
+    )
+    revision = models.PositiveIntegerField(
+        default=0,
+        help_text="Incremented on every lesson removal (replacement Helcim invoice).",
+    )
+    CANCEL_OUTCOME_CHOICES = [
+        ('none', 'None'),        # never adjusted
+        ('pending', 'Pending'),  # replacement persisted, cancel not yet attempted
+        ('done', 'Done'),        # previous Helcim invoice voided
+        ('failed', 'Failed'),    # void rejected — retry from admin
+    ]
+    cancel_outcome = models.CharField(
+        max_length=10,
+        choices=CANCEL_OUTCOME_CHOICES,
+        default='none',
+        help_text="Outcome of voiding previous_helcim_invoice_id after the last removal (MAP-184).",
+    )
+    send_attempt_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Attempt id written by the send claim (MAP-185). The Helcim "
+            "invoiceNumber for that attempt is MK{pk}-{hex[:8]}; a retry looks "
+            "the previous attempt's number up before creating again."
+        ),
+    )
+    SEND_OUTCOME_CHOICES = [
+        ('none', 'None'),        # no send attempt yet
+        ('unknown', 'Unknown'),  # claimed; Helcim create not confirmed either way
+        ('failed', 'Failed'),    # declared by MAP-185; no transition writes it yet
+        ('sent', 'Sent'),        # Helcim invoice confirmed and stored
+    ]
+    send_outcome = models.CharField(
+        max_length=10,
+        choices=SEND_OUTCOME_CHOICES,
+        default='none',
+        help_text=(
+            "Where the last send attempt got to. Never returns to 'none' once "
+            "an attempt started; 'unknown' means look the number up before "
+            "creating again (MAP-185)."
         ),
     )
     payment_token = models.CharField(
@@ -1645,6 +1763,15 @@ class PreBillingInvoice(models.Model):
     email_error = models.TextField(
         blank=True,
         help_text="Last email delivery error. Cleared on successful send/resend.",
+    )
+    issued_items = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Line items as issued (written at send time, rewritten on lesson "
+            "removal). A sent/adjusted/paid invoice displays only this snapshot; "
+            "it is never re-projected from current schedules (MAP-186)."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1788,8 +1915,9 @@ class InvoiceSendItem(models.Model):
     """
     One invoice inside an InvoiceSendRun. FIFO by ``position``; the worker
     claims items with select_for_update(skip_locked), so adding parallel
-    workers later needs no schema change. The invoice-level draft->sending
-    conditional UPDATE in invoice_sending remains the last double-send guard.
+    workers later needs no schema change. The invoice-level conditional
+    UPDATE in invoice_sending (draft, or an unresolved send whose attempt id
+    the caller read — MAP-185) remains the last double-send guard.
     """
 
     STATUS_CHOICES = [
