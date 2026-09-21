@@ -117,7 +117,7 @@ jobs:
             set -e
 
             # Login to Docker Hub
-            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+            echo '${{ secrets.DOCKER_PASSWORD }}' | docker login -u '${{ secrets.DOCKER_USERNAME }}' --password-stdin
 
             # Ensure volumes and network exist
             docker volume create postgres_data || true
@@ -125,7 +125,7 @@ jobs:
             docker network create maple-key-network || true
 
             # Pull new image BEFORE touching any running container
-            docker pull ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
+            docker pull '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest
 
             # ===== ENSURE POSTGRES IS RUNNING =====
             # Reuse the existing container if healthy — don't restart it unnecessarily.
@@ -137,9 +137,9 @@ jobs:
                 --name postgres \
                 --restart unless-stopped \
                 --network maple-key-network \
-                -e POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
-                -e POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
-                -e POSTGRES_DB="${{ secrets.POSTGRES_DB }}" \
+                -e POSTGRES_USER='${{ secrets.POSTGRES_USER }}' \
+                -e POSTGRES_PASSWORD='${{ secrets.POSTGRES_PASSWORD }}' \
+                -e POSTGRES_DB='${{ secrets.POSTGRES_DB }}' \
                 -v postgres_data:/var/lib/postgresql/data \
                 postgres:15
               echo "Waiting for PostgreSQL to be ready..."
@@ -150,7 +150,7 @@ jobs:
 
             # Verify postgres is reachable
             docker run --rm --network maple-key-network postgres:15 \
-              pg_isready -h postgres -U ${{ secrets.POSTGRES_USER }} \
+              pg_isready -h postgres -U '${{ secrets.POSTGRES_USER }}' \
               || { echo "❌ Cannot reach PostgreSQL — aborting"; exit 1; }
 
             # ===== BACKUP FIRST =====
@@ -165,7 +165,7 @@ jobs:
             mkdir -p "$BACKUP_DIR"
             BACKUP_FILE="$BACKUP_DIR/pre-deploy-$(date -u +%Y%m%d-%H%M%S).sql.gz"
             docker exec postgres pg_dump \
-              -U "${{ secrets.POSTGRES_USER }}" "${{ secrets.POSTGRES_DB }}" \
+              -U '${{ secrets.POSTGRES_USER }}' '${{ secrets.POSTGRES_DB }}' \
               | gzip > "$BACKUP_FILE"
             if [ ! -s "$BACKUP_FILE" ]; then
               echo "❌ Backup file is empty — aborting deploy"
@@ -183,23 +183,23 @@ jobs:
             echo "========================================="
             if ! docker run --rm \
               --network maple-key-network \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+              -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
               -e DEBUG="False" \
               -e MAPLEKEY_ENV=prod \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-              -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
-              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+              -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+              -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+              -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py migrate; then
               echo "========================================="
               echo "❌ MIGRATION FAILED — deploy aborted"
@@ -212,23 +212,23 @@ jobs:
             # Verify no unapplied migrations remain
             if ! docker run --rm \
               --network maple-key-network \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+              -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
               -e DEBUG="False" \
               -e MAPLEKEY_ENV=prod \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-              -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
-              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+              -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+              -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+              -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py migrate --check; then
               echo "❌ Unapplied migrations detected after migrate run — deploy aborted"
               exit 1
@@ -243,24 +243,24 @@ jobs:
             # Collect static files (throwaway container, postgres still running)
             docker run --rm \
               --network maple-key-network \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+              -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
               -e DEBUG="False" \
               -e MAPLEKEY_ENV=prod \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-              -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
+              -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+              -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+              -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+              -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
               -v static_volume:/app/staticfiles \
-              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py collectstatic --noinput
 
             # Create log directory on host (survives container restarts)
@@ -279,25 +279,25 @@ jobs:
               --health-retries 3 \
               --network maple-key-network \
               -p 127.0.0.1:8001:8000 \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+              -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
               -e DEBUG="False" \
               -e MAPLEKEY_ENV=prod \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-              -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
+              -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+              -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+              -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+              -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
               -v /var/log/maple-key:/var/log/maple-key \
               -v static_volume:/app/staticfiles \
-              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest
+              '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest
 
             # ===== HEALTH CHECK WITH ROLLBACK =====
             # Poll /api/auth/user/ directly on port 8001 (loopback-bound, bypasses nginx).
@@ -329,22 +329,22 @@ jobs:
                   --name maple-key-backend \
                   --restart unless-stopped \
                   --network maple-key-network \
-                  -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-                  -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+                  -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+                  -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
                   -e DEBUG="False" \
                   -e MAPLEKEY_ENV=prod \
-                  -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-                  -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-                  -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-                  -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-                  -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-                  -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-                  -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-                  -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
+                  -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+                  -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+                  -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+                  -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+                  -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+                  -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+                  -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+                  -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
                   -v /var/log/maple-key:/var/log/maple-key \
                   -v static_volume:/app/staticfiles \
                   "$OLD_IMAGE"
@@ -370,24 +370,24 @@ jobs:
               --restart unless-stopped \
               --stop-timeout 60 \
               --network maple-key-network \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+              -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
               -e DEBUG="False" \
               -e MAPLEKEY_ENV=prod \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-              -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
+              -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+              -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+              -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+              -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
               -v /var/log/maple-key:/var/log/maple-key \
-              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python3 manage.py process_invoice_send_runs
 
             sleep 5
@@ -411,25 +411,25 @@ jobs:
               --name maple-key-scheduler \
               --restart unless-stopped \
               --network maple-key-network \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}" \
-              -e SECRET_KEY="${{ secrets.DJANGO_SECRET_KEY }}" \
+              -e DATABASE_URL='postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}' \
+              -e SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY }}' \
               -e DEBUG="False" \
               -e MAPLEKEY_ENV=prod \
-              -e ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -e GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              -e PLATFORM_ADMIN_EMAILS="${{ secrets.PLATFORM_ADMIN_EMAILS }}" \
-              -e FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-              -e RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              -e DEFAULT_FROM_EMAIL="${{ secrets.DEFAULT_FROM_EMAIL }}" \
-              -e HELCIM_API_TOKEN="${{ secrets.HELCIM_API_TOKEN }}" \
-              -e HELCIM_TERMINAL_ID="${{ secrets.HELCIM_TERMINAL_ID }}" \
-              -e HELCIM_WEBHOOK_SECRET="${{ secrets.HELCIM_WEBHOOK_SECRET }}" \
-              -e HELCIM_SUBDOMAIN="${{ secrets.HELCIM_SUBDOMAIN }}" \
+              -e ALLOWED_HOSTS='${{ secrets.ALLOWED_HOSTS }}' \
+              -e GOOGLE_CLIENT_ID='${{ secrets.GOOGLE_CLIENT_ID }}' \
+              -e GOOGLE_CLIENT_SECRET='${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              -e CORS_ALLOWED_ORIGINS='${{ secrets.CORS_ALLOWED_ORIGINS }}' \
+              -e PLATFORM_ADMIN_EMAILS='${{ secrets.PLATFORM_ADMIN_EMAILS }}' \
+              -e FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              -e RESEND_API_KEY='${{ secrets.RESEND_API_KEY }}' \
+              -e DEFAULT_FROM_EMAIL='${{ secrets.DEFAULT_FROM_EMAIL }}' \
+              -e HELCIM_API_TOKEN='${{ secrets.HELCIM_API_TOKEN }}' \
+              -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
+              -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
+              -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
               -e SCHEDULER_METRICS_PORT=9103 \
               -v /var/log/maple-key:/var/log/maple-key \
-              ${{ secrets.DOCKER_USERNAME }}/maple-key-backend:latest \
+              '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python3 manage.py run_scheduler
 
             sleep 5
@@ -566,7 +566,7 @@ jobs:
                 --non-interactive \
                 --agree-tos \
                 --redirect \
-                --email ${{ secrets.CERTBOT_EMAIL }} \
+                --email '${{ secrets.CERTBOT_EMAIL }}' \
                 -d api.maplekeymusic.com
               echo "✅ SSL certificate obtained and configured!"
             else
