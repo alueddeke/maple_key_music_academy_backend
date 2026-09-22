@@ -199,8 +199,6 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
-              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
-              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py migrate; then
               echo "========================================="
@@ -230,8 +228,6 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
-              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
-              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py migrate --check; then
               echo "❌ Unapplied migrations detected after migrate run — deploy aborted"
@@ -263,8 +259,6 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
-              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
-              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               -v static_volume:/app/staticfiles \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py collectstatic --noinput
