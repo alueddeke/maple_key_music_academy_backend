@@ -1375,6 +1375,12 @@ class HelcimWebhookEvent(models.Model):
         default=Decimal('0.00'),
         help_text="Payment amount. Always use Decimal(str(value)) when converting from Helcim JSON.",
     )
+    fee_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Part of amount above what the invoice still owed (e.g. card convenience fee). Never credited to the wallet (MAP-216).",
+    )
     # Gating fields from the secondary GET /v2/card-transactions/{id} call.
     # Credit is applied ONLY for status=APPROVED, type=purchase/capture.
     transaction_status = models.CharField(

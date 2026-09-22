@@ -92,13 +92,13 @@ class UserRegistrationRequestAdmin(admin.ModelAdmin):
 
 @admin.register(HelcimWebhookEvent)
 class HelcimWebhookEventAdmin(admin.ModelAdmin):
-    list_display = ('helcim_transaction_id', 'invoice_id', 'amount',
+    list_display = ('helcim_transaction_id', 'invoice_id', 'amount', 'fee_amount',
                     'transaction_status', 'transaction_type',
                     'processing_status', 'school', 'received_at')
     list_filter = ('processing_status', 'transaction_status', 'transaction_type', 'school')
     search_fields = ('helcim_transaction_id', 'invoice_id')
     readonly_fields = ('helcim_transaction_id', 'raw_payload', 'invoice_id', 'amount',
-                       'transaction_status', 'transaction_type', 'processing_status',
+                       'fee_amount', 'transaction_status', 'transaction_type', 'processing_status',
                        'last_error', 'processed_at', 'received_at', 'school')
     actions = ['retry_processing']
 
