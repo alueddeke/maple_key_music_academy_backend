@@ -14,7 +14,7 @@ from ..serializers import (
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
     BatchRejectionSnapshotSerializer
 )
-from custom_auth.authentication import revoke_user_tokens
+from custom_auth.authentication import release_email, revoke_user_tokens
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
@@ -554,8 +554,10 @@ def management_student_detail(request, pk):
                 "Historical data will be preserved."
             )
 
-        # Perform soft delete, then revoke the student's tokens (MAP-141)
+        # Perform soft delete, release the address (MAP-220), then revoke
+        # the student's tokens (MAP-141)
         student.is_active = False
+        release_email(student)
         student.save()
         revoke_user_tokens(student)
 
@@ -1031,6 +1033,20 @@ def management_delete_teacher(request, pk):
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
 
+    # An open payroll batch would be orphaned mid-cycle (MAP-220).
+    open_batches = (
+        MonthlyInvoiceBatch.objects
+        .filter(teacher=teacher, status__in=['draft', 'submitted'])
+        .order_by('year', 'month')
+        .values_list('year', 'month')
+    )
+    if open_batches:
+        months = ', '.join(f'{year}-{month:02d}' for year, month in open_batches)
+        return Response(
+            {'error': f'Teacher has open payroll batches: {months}'},
+            status=status.HTTP_409_CONFLICT,
+        )
+
     # Check for lessons/invoices
     has_lessons = Lesson.objects.filter(teacher=teacher).exists()
     has_invoices = Invoice.objects.filter(teacher=teacher).exists()
@@ -1045,8 +1061,10 @@ def management_delete_teacher(request, pk):
             "Historical data will be preserved."
         )
 
-    # Perform soft delete, then revoke the teacher's tokens (MAP-141)
+    # Perform soft delete, release the address (MAP-220), then revoke the
+    # teacher's tokens (MAP-141)
     teacher.is_active = False
+    release_email(teacher)
     teacher.save()
     revoke_user_tokens(teacher)
 
