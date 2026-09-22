@@ -147,6 +147,7 @@ def _serialize_invoice(invoice):
         ),
         'email_sent': invoice.email_sent,
         'email_error': invoice.email_error,
+        'send_outcome': invoice.send_outcome,
         'student': {
             'id': invoice.student_id,
             'full_name': invoice.student.get_full_name(),
