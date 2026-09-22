@@ -199,6 +199,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py migrate; then
               echo "========================================="
@@ -228,6 +230,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py migrate --check; then
               echo "❌ Unapplied migrations detected after migrate run — deploy aborted"
@@ -259,6 +263,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               -v static_volume:/app/staticfiles \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python manage.py collectstatic --noinput
@@ -295,6 +301,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               -v /var/log/maple-key:/var/log/maple-key \
               -v static_volume:/app/staticfiles \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest
@@ -345,6 +353,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
                   -v /var/log/maple-key:/var/log/maple-key \
                   -v static_volume:/app/staticfiles \
                   "$OLD_IMAGE"
@@ -386,6 +396,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               -v /var/log/maple-key:/var/log/maple-key \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
               python3 manage.py process_invoice_send_runs
@@ -427,6 +439,8 @@ jobs:
               -e HELCIM_TERMINAL_ID='${{ secrets.HELCIM_TERMINAL_ID }}' \
               -e HELCIM_WEBHOOK_SECRET='${{ secrets.HELCIM_WEBHOOK_SECRET }}' \
               -e HELCIM_SUBDOMAIN='${{ secrets.HELCIM_SUBDOMAIN }}' \
+              -e ANALYTICS_EXCLUDE_TEST_DATA=True \
+              -e TEST_ACCOUNT_EMAILS='a.lueddeke@hotmail.com' \
               -e SCHEDULER_METRICS_PORT=9103 \
               -v /var/log/maple-key:/var/log/maple-key \
               '${{ secrets.DOCKER_USERNAME }}'/maple-key-backend:latest \
