@@ -4,6 +4,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator
 from django.db.models import Count, Sum, Q
+from custom_auth.authentication import removed_account_message
 from .models import (
     Lesson, Invoice, ApprovedEmail, UserRegistrationRequest,
     InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
@@ -72,6 +73,21 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'date_joined', 'last_login', 'user_type_display', 'school_name',
             'user_type', 'school', 'is_approved', 'is_active',
         ]
+        # Uniqueness is checked in validate_email so a collision with a
+        # removed (inactive) account can name it (MAP-220).
+        extra_kwargs = {'email': {'validators': []}}
+
+    def validate_email(self, value):
+        exclude_pk = self.instance.pk if self.instance is not None else None
+        holders = User.objects.filter(email__iexact=value)
+        if exclude_pk is not None:
+            holders = holders.exclude(pk=exclude_pk)
+        if holders.exists():
+            raise serializers.ValidationError(
+                removed_account_message(value, exclude_pk=exclude_pk)
+                or 'A user with this email already exists'
+            )
+        return value
 
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
@@ -771,9 +787,11 @@ class StudentCreateSerializer(serializers.Serializer):
     billing_contact = BillingContactInputSerializer(required=False)
 
     def validate_email(self, value):
-        """Check if email already exists"""
+        """Check if email already exists; name a removed holder (MAP-220)."""
         if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("A user with this email already exists")
+            raise serializers.ValidationError(
+                removed_account_message(value) or "A user with this email already exists"
+            )
         return value
 
     def validate_assigned_teachers(self, value):
