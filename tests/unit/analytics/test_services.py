@@ -203,3 +203,26 @@ class TestTestDataFilter:
         teacher_user.save(update_fields=['email'])
         current = compute_current_metrics(school, today=JUNE)
         assert current['active_teachers'] == 0
+
+    def test_listed_email_excluded_when_flag_on(self, school, active_schedule, settings):
+        """MAP-218: an exact address in TEST_ACCOUNT_EMAILS is hidden like a test domain."""
+        settings.ANALYTICS_EXCLUDE_TEST_DATA = True
+        settings.TEST_ACCOUNT_EMAIL_DOMAINS = ['maplekeytest.com']
+        settings.TEST_ACCOUNT_EMAILS = [
+            active_schedule.student.email.upper(),   # case-insensitive match
+            active_schedule.teacher.email,
+        ]
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        current = compute_current_metrics(school, today=JUNE)
+        assert rows[0]['mrr'] == '0.00'
+        assert current['active_teachers'] == 0
+
+    def test_listed_email_included_when_flag_off(self, school, active_schedule, settings):
+        settings.ANALYTICS_EXCLUDE_TEST_DATA = False
+        settings.TEST_ACCOUNT_EMAILS = [
+            active_schedule.student.email, active_schedule.teacher.email,
+        ]
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        current = compute_current_metrics(school, today=JUNE)
+        assert rows[0]['mrr'] == '300.00'
+        assert current['active_teachers'] == 1

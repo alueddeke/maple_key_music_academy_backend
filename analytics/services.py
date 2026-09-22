@@ -41,16 +41,21 @@ CPA_WINDOW_MONTHS = 6
 
 
 def _test_data_filter_active():
-    """MAP-113: True when analytics should hide test-account rows (prod)."""
+    """MAP-113/MAP-218: True when analytics should hide test-account rows (prod)."""
     return bool(
         getattr(settings, 'ANALYTICS_EXCLUDE_TEST_DATA', False)
-        and getattr(settings, 'TEST_ACCOUNT_EMAIL_DOMAINS', [])
+        and (
+            getattr(settings, 'TEST_ACCOUNT_EMAIL_DOMAINS', [])
+            or getattr(settings, 'TEST_ACCOUNT_EMAILS', [])
+        )
     )
 
 
 def _exclude_test(qs, email_field):
     """
-    Exclude rows whose linked account email belongs to a test domain.
+    Exclude rows whose linked account email belongs to a test domain or is
+    one of the exact TEST_ACCOUNT_EMAILS (MAP-218: a kept test login on a
+    real domain).
 
     No-op unless ANALYTICS_EXCLUDE_TEST_DATA is enabled, so dev/UAT
     dashboards still show test data. `email_field` is the ORM path to the
@@ -58,8 +63,10 @@ def _exclude_test(qs, email_field):
     """
     if not _test_data_filter_active():
         return qs
-    for domain in settings.TEST_ACCOUNT_EMAIL_DOMAINS:
+    for domain in getattr(settings, 'TEST_ACCOUNT_EMAIL_DOMAINS', []):
         qs = qs.exclude(**{f'{email_field}__iendswith': f'@{domain}'})
+    for email in getattr(settings, 'TEST_ACCOUNT_EMAILS', []):
+        qs = qs.exclude(**{f'{email_field}__iexact': email})
     return qs
 
 
