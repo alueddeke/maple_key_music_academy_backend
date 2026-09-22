@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from custom_auth.authentication import removed_account_message
 import logging
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,8 @@ def setup_account_with_invitation(request, token):
         # Check if user already exists
         if User.objects.filter(email=invitation.email).exists():
             return Response({
-                'error': 'An account with this email already exists'
+                'error': removed_account_message(invitation.email)
+                or 'An account with this email already exists'
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Get user data from request

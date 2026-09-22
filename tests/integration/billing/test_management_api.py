@@ -13,6 +13,7 @@ from decimal import Decimal
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
 from billing.models import GlobalRateSettings, Lesson, Invoice, MonthlyInvoiceBatch
 from django.contrib.auth import get_user_model
@@ -845,3 +846,170 @@ class TestDeactivationRevokesTokens:
         assert teacher_user.is_active is False
         assert teacher_user.password_changed_at is not None
         self._assert_revoked(access, refresh)
+
+
+@pytest.mark.django_db
+class TestRemovalReleasesEmail:
+    """MAP-220: soft-deleting a user frees the address for reuse; the original
+    stays readable in the rewritten email and in history; open payroll batches
+    block teacher removal."""
+
+    STUDENT_PAYLOAD = {
+        'first_name': 'New', 'last_name': 'Student',
+        'billing_contact': {
+            'contact_type': 'parent', 'first_name': 'Parent', 'last_name': 'Name',
+            'email': 'parent-reuse@test.com', 'phone': '416-555-0101',
+            'street_address': '456 Main St', 'city': 'Toronto', 'province': 'ON',
+            'postal_code': 'M4B 1B3',
+        },
+    }
+
+    def test_delete_teacher_releases_email_and_allows_reuse(
+        self, authenticated_management_client, teacher_user
+    ):
+        original = teacher_user.email
+        refresh = RefreshToken.for_user(teacher_user)
+
+        response = authenticated_management_client.delete(
+            reverse('management_delete_teacher', kwargs={'pk': teacher_user.id})
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        teacher_user.refresh_from_db()
+        assert teacher_user.is_active is False
+        assert teacher_user.email != original
+        assert original.split('@')[0] in teacher_user.email
+        assert str(teacher_user.id) in teacher_user.email
+        assert teacher_user.history.first().email == teacher_user.email
+        assert teacher_user.history.filter(email=original).exists()
+        assert BlacklistedToken.objects.filter(token__jti=refresh['jti']).exists()
+
+        created = authenticated_management_client.post(
+            '/api/billing/management/students/',
+            {**self.STUDENT_PAYLOAD, 'email': original}, format='json',
+        )
+        assert created.status_code == status.HTTP_201_CREATED
+        assert User.objects.filter(email=original, is_active=True).count() == 1
+
+    def test_delete_student_releases_email_and_allows_reuse(
+        self, authenticated_management_client, student_user
+    ):
+        original = student_user.email
+
+        response = authenticated_management_client.delete(
+            reverse('management_student_detail', kwargs={'pk': student_user.id})
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        student_user.refresh_from_db()
+        assert student_user.is_active is False
+        assert student_user.email != original
+        assert original.split('@')[0] in student_user.email
+        created = authenticated_management_client.post(
+            '/api/billing/management/students/',
+            {**self.STUDENT_PAYLOAD, 'email': original}, format='json',
+        )
+        assert created.status_code == status.HTTP_201_CREATED
+
+    def test_delete_is_idempotent_on_the_email(self, authenticated_management_client, teacher_user):
+        url = reverse('management_delete_teacher', kwargs={'pk': teacher_user.id})
+        authenticated_management_client.delete(url)
+        teacher_user.refresh_from_db()
+        once = teacher_user.email
+
+        authenticated_management_client.delete(url)
+
+        teacher_user.refresh_from_db()
+        assert teacher_user.email == once
+
+    def test_delete_teacher_with_open_batch_returns_409_and_changes_nothing(
+        self, authenticated_management_client, teacher_user, school
+    ):
+        original = teacher_user.email
+        MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=9, year=2026, status='submitted',
+        )
+        MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=10, year=2026, status='draft',
+        )
+        MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=8, year=2026, status='approved',
+        )
+
+        response = authenticated_management_client.delete(
+            reverse('management_delete_teacher', kwargs={'pk': teacher_user.id})
+        )
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert '2026-09' in response.data['error'] and '2026-10' in response.data['error']
+        assert '2026-08' not in response.data['error']
+        teacher_user.refresh_from_db()
+        assert teacher_user.is_active is True
+        assert teacher_user.email == original
+        assert teacher_user.password_changed_at is None
+
+    def test_delete_teacher_other_school_404(
+        self, authenticated_management_client, teacher_user, second_school
+    ):
+        teacher_user.school = second_school
+        teacher_user.save(update_fields=['school'])
+
+        response = authenticated_management_client.delete(
+            reverse('management_delete_teacher', kwargs={'pk': teacher_user.id})
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        teacher_user.refresh_from_db()
+        assert teacher_user.is_active is True
+
+    def test_create_with_a_pre_release_inactive_email_names_the_removed_account(
+        self, authenticated_management_client, teacher_user
+    ):
+        # A row soft-deleted before MAP-220 still holds its address.
+        teacher_user.is_active = False
+        teacher_user.save(update_fields=['is_active'])
+
+        created = authenticated_management_client.post(
+            '/api/billing/management/students/',
+            {**self.STUDENT_PAYLOAD, 'email': teacher_user.email}, format='json',
+        )
+
+        assert created.status_code == status.HTTP_400_BAD_REQUEST
+        assert created.data['email'] == [
+            f'This email belongs to a removed account (id {teacher_user.id})'
+        ]
+
+    def test_update_teacher_email_to_a_pre_release_inactive_email_names_the_removed_account(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        student_user.is_active = False
+        student_user.save(update_fields=['is_active'])
+
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'email': student_user.email}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data['email'] == [
+            f'This email belongs to a removed account (id {student_user.id})'
+        ]
+
+    def test_update_teacher_email_to_an_active_email_is_a_plain_collision(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'email': student_user.email}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'email' in response.data
+        assert 'removed account' not in response.data['email'][0]
+
+    def test_update_teacher_keeps_own_email(self, authenticated_management_client, teacher_user):
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'email': teacher_user.email, 'first_name': 'Same'}, format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK

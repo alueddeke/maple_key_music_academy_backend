@@ -42,3 +42,39 @@ def revoke_user_tokens(user):
     user.save(update_fields=['password_changed_at'])
     for outstanding in OutstandingToken.objects.filter(user=user):
         BlacklistedToken.objects.get_or_create(token=outstanding)
+
+
+# MAP-220: a soft-deleted user must not keep its unique address hostage.
+REMOVED_EMAIL_DOMAIN = 'removed.maplekeymusic.internal'
+_EMAIL_MAX_LENGTH = 254
+
+
+def release_email(user):
+    """
+    Rewrite a removed user's email to
+    ``removed+{id}+{original_local}@removed.maplekeymusic.internal`` so the
+    original address can be reused, while staying readable in the new value
+    and in HistoricalUser. Idempotent; does not save.
+    """
+    if user.email.lower().endswith('@' + REMOVED_EMAIL_DOMAIN):
+        return user.email
+    original_local = user.email.split('@', 1)[0]
+    suffix = '@' + REMOVED_EMAIL_DOMAIN
+    local = f'removed+{user.id}+{original_local}'[: _EMAIL_MAX_LENGTH - len(suffix)]
+    user.email = local + suffix
+    return user.email
+
+
+def removed_account_message(email, exclude_pk=None):
+    """
+    If `email` is held by an INACTIVE user (a row removed before MAP-220
+    released addresses), return the validation message naming it; else None.
+    """
+    from django.contrib.auth import get_user_model
+    qs = get_user_model().objects.filter(email__iexact=email, is_active=False)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    holder = qs.only('id').first()
+    if holder is None:
+        return None
+    return f'This email belongs to a removed account (id {holder.id})'
