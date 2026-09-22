@@ -15,7 +15,10 @@ Mocked Helcim HTTP patterns follow test_helcim_client.py approach
 import pytest
 from decimal import Decimal
 from datetime import date, time
+import logging
 from unittest.mock import patch, Mock
+
+import requests
 
 from django.urls import reverse
 from rest_framework.test import APIClient
@@ -631,8 +634,11 @@ def test_replacement_create_failure_leaves_invoice_untouched(management_client, 
 
     with patch('billing.services.helcim_client.requests.put') as mock_put, \
          patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.helcim_client.requests.get') as mock_get, \
          patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
         mock_post.return_value = Mock(ok=False, status_code=500, text='helcim down', json=lambda: {})
+        # MAP-213 lookup-first: Helcim reachable, number genuinely absent.
+        mock_get.return_value = Mock(ok=True, status_code=200, json=lambda: [], text='[]')
         url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
         response = management_client.post(url, data={'lesson_id': lessons[0].id}, format='json')
 
@@ -650,6 +656,99 @@ def test_replacement_create_failure_leaves_invoice_untouched(management_client, 
     assert invoice.amount == original_amount
     assert invoice.revision == 0
     assert invoice.cancel_outcome == 'none'
+    assert invoice.lessons.count() == 2
+
+
+@pytest.mark.django_db
+def test_replacement_create_timeout_adopts_the_invoice_helcim_created(
+    management_client, school, teacher_user, student_with_contact
+):
+    """MAP-213: create timed out after Helcim accepted → the number we sent is
+    looked up and adopted; the removal completes exactly as a clean create."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_existing_55'
+    contact.save()
+    invoice, lessons = _make_sent_invoice_with_lessons(
+        student, school, teacher_user, [date(2026, 6, 3), date(2026, 6, 10)],
+    )
+    adopted = {'invoiceId': 'inv_adopted_901', 'token': 'tok_adopted_901'}
+
+    def lookup(url, params=None, **kwargs):
+        # Answer only for the number the POST body carried.
+        sent_number = mock_post.call_args.kwargs['json']['invoiceNumber']
+        rows = [{**adopted, 'invoiceNumber': sent_number}] if params.get('invoiceNumber') == sent_number else []
+        return Mock(ok=True, status_code=200, json=lambda: rows, text='')
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.helcim_client.requests.get') as mock_get, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_post.side_effect = requests.Timeout()
+        mock_get.side_effect = lookup
+        mock_put.return_value = _helcim_cancel_invoice_ok()
+        mock_email.return_value = (True, 'sent')
+        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
+        response = management_client.post(url, data={'lesson_id': lessons[0].id}, format='json')
+
+    assert response.status_code == 200
+    assert mock_post.call_count == 1
+    sent_number = mock_post.call_args.kwargs['json']['invoiceNumber']
+    assert sent_number.startswith(f'MK{invoice.pk}-')
+    invoice.refresh_from_db()
+    assert invoice.status == 'adjusted'
+    assert invoice.helcim_invoice_id == adopted['invoiceId']
+    assert invoice.helcim_invoice_number == sent_number
+    assert invoice.payment_token == adopted['token']
+    assert invoice.previous_helcim_invoice_id == 'inv_old_456'
+    assert invoice.lessons.count() == 1
+    assert mock_put.call_count == 1
+    assert 'inv_old_456' in mock_put.call_args.args[0]
+    assert mock_email.call_count == 1
+    assert f"token={adopted['token']}" in str(mock_email.call_args)
+
+
+@pytest.mark.django_db
+def test_replacement_create_unconfirmed_when_lookup_also_fails(
+    management_client, school, teacher_user, student_with_contact, caplog
+):
+    """MAP-213: Helcim unreachable for create AND lookup → 502 naming the
+    number, nothing persisted, no cancel, no email, one error log with the number."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_existing_55'
+    contact.save()
+    invoice, lessons = _make_sent_invoice_with_lessons(
+        student, school, teacher_user, [date(2026, 6, 3), date(2026, 6, 10)],
+    )
+    original_amount = invoice.amount
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.helcim_client.requests.get') as mock_get, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email, \
+         caplog.at_level(logging.ERROR, logger='billing.views.pre_billing'):
+        mock_post.side_effect = requests.Timeout()
+        mock_get.side_effect = requests.Timeout()
+        url = reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id})
+        response = management_client.post(url, data={'lesson_id': lessons[0].id}, format='json')
+
+    assert response.status_code == 502
+    assert 'unconfirmed' in response.data['error']
+    assert f'MK{invoice.pk}-' in response.data['error']
+    sent_number = mock_post.call_args.kwargs['json']['invoiceNumber']
+    assert sent_number in response.data['error']
+    mock_put.assert_not_called()
+    mock_email.assert_not_called()
+    view_errors = [r for r in caplog.records
+                   if r.name == 'billing.views.pre_billing' and r.levelno == logging.ERROR]
+    assert len(view_errors) == 1
+    assert sent_number in view_errors[0].getMessage()
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.helcim_invoice_id == 'inv_old_456'
+    assert invoice.previous_helcim_invoice_id == ''
+    assert invoice.amount == original_amount
+    assert invoice.revision == 0
     assert invoice.lessons.count() == 2
 
 
