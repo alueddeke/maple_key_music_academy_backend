@@ -61,7 +61,29 @@ DUPLICATE_TEACHER_ID = 108   # same person as teacher 105; delete only if empty
 # Prod snapshot (first_name, last_name, email) per listed id — drift guard.
 # Filled from the owner-run read-only query recorded on MAP-218.
 EXPECTED = {
-    # --- FILLED FROM THE MAP-218 SNAPSHOT ---
+    # read-only prod query 2026-09-22 (owner-run), recorded on MAP-218
+    3: ('Toni Teacher', 'Test', 'a.lueddeke@hotmail.com'),
+    11: ('Matt', 'Morgan', 'asd@gmail.com'),
+    60: ('Antoni', 'Lueddeke', 'student_1_noemail@maplekeymusic.internal'),
+    61: ('Antonii', 'Lueddeke', 'student_test@gmail.com'),
+    66: ('Joe', 'lue', 'student_2_noemail@maplekeymusic.internal'),
+    81: ('test5', 'test55', 'test5@gmail.com'),
+    82: ('joey', '', 'joey@temp.com'),
+    83: ('bill', '', 'bill@temp.com'),
+    84: ('matt', '', 'matt@temp.com'),
+    85: ('test6', 'test66', 'test66@gmail.com'),
+    86: ('Antoni', 'Lueddeke', 'antoni.lueddeke@temp.com'),
+    108: ('William', 'Kervin', 'wmkervin@gmail.com'),
+    109: ('April', 'Tester', 'asdsddd@gmail.com'),
+    117: ('Bill Test', 'Student', 'billy.kervin154@gmail.com'),
+    118: ('Bill Test Student', '2', 'mercedesturnersmith@gmail.com'),
+    120: ('Test', 'Teacher', 'testteacher@maplekeymusic.com'),
+    123: ('Maple Key', 'Test User', 'maplekeyteacher@gmail.com'),
+    124: ('John', 'Smith', 'johnsmith@hotmail.com'),
+    125: ('James', 'Morgan', 'jamesmorgan@live.ca'),
+    126: ('May Test', 'Student', 'maytest@gmail.com'),
+    133: ('june', 'tester', 'junetest@gmail.com'),
+    149: ('matt', 'test morgan', 'guitarmatt@live.ca'),
 }
 
 USER_FIELDS = ('email', 'is_active')
