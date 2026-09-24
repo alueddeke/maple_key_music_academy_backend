@@ -1231,3 +1231,25 @@ def test_lesson_backed_send_snapshots_and_removal_updates_the_snapshot(
     after = _detail(management_client, invoice).data
     assert after['status'] == 'adjusted'
     assert after['lessons'] == response.data['lessons']
+
+
+@pytest.mark.django_db
+def test_list_and_detail_expose_send_outcome(management_client, school, student_with_contact):
+    """MAP-214: the client can tell an unresolved send apart — both list and
+    detail carry `send_outcome` next to `status`."""
+    student, _contact = student_with_contact
+    invoice = _make_draft_invoice(student, school)
+    invoice.status = 'sending'
+    invoice.send_outcome = 'unknown'
+    invoice.save(update_fields=['status', 'send_outcome'])
+
+    listed = next(
+        row for row in management_client.get(reverse('management_pre_billing_list')).data
+        if row['id'] == invoice.id
+    )
+    detail = management_client.get(
+        reverse('management_pre_billing_detail', kwargs={'invoice_id': invoice.id})
+    ).data
+
+    assert (listed['status'], listed['send_outcome']) == ('sending', 'unknown')
+    assert (detail['status'], detail['send_outcome']) == ('sending', 'unknown')
