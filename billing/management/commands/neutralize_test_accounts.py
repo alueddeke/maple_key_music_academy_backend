@@ -301,8 +301,9 @@ class Command(BaseCommand):
             # InvoiceSendItem.invoice is PROTECT — the dead attempts of a
             # draft go with it (owner ruling 2026-09-22).
             invoice.send_items.all().delete()
+            invoice_id = invoice.id  # delete() clears the pk
             invoice.delete()
-            self.stdout.write(f'Deleted draft invoice {invoice.id}')
+            self.stdout.write(f'Deleted draft invoice {invoice_id}')
         if plan['duplicate']:
             action, duplicate, counts = plan['duplicate']
             if action == 'delete':
