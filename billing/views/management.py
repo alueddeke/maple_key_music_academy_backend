@@ -22,7 +22,9 @@ from custom_auth.decorators import (
 import logging
 import calendar
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from django.core.exceptions import ValidationError
+from django.core.validators import DecimalValidator
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +425,32 @@ def teacher_list_with_stats(request):
     return Response(serializer.data)
 
 
+def _parse_rate(raw, field_name, label):
+    """
+    Parse a teacher rate from a request body: a finite Decimal >= 0 that fits
+    the User model field (its max_digits / decimal_places). Returns
+    (value, None) or (None, error message).
+    """
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return None, f'Invalid {label} format'
+    if not value.is_finite():
+        return None, f'Invalid {label} format'
+    if value < 0:
+        return None, f'{label.capitalize()} must be positive'
+    field = User._meta.get_field(field_name)
+    try:
+        DecimalValidator(field.max_digits, field.decimal_places)(value)
+    except ValidationError:
+        largest = Decimal(10) ** (field.max_digits - field.decimal_places) - Decimal(1).scaleb(-field.decimal_places)
+        return None, (
+            f'{label.capitalize()} must be at most {largest} '
+            f'with no more than {field.decimal_places} decimal places'
+        )
+    return value, None
+
+
 @api_view(['GET', 'PATCH'])
 @management_required
 def teacher_detail(request, pk):
@@ -454,37 +482,20 @@ def teacher_detail(request, pk):
             )
 
         # Validate every field before writing anything
-        from decimal import Decimal, InvalidOperation
         if sends_hourly:
-            try:
-                new_rate = Decimal(str(request.data['hourly_rate']))
-                if new_rate < 0:
-                    return Response(
-                        {'error': 'Hourly rate must be positive'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-            except (InvalidOperation, ValueError):
-                return Response(
-                    {'error': 'Invalid hourly rate format'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            new_rate, error = _parse_rate(request.data['hourly_rate'], 'hourly_rate', 'hourly rate')
+            if error:
+                return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
 
         if sends_online:
             # null clears the override: the teacher returns to the school online rate
             new_online_rate = None
             if request.data['online_hourly_rate'] is not None:
-                try:
-                    new_online_rate = Decimal(str(request.data['online_hourly_rate']))
-                    if new_online_rate < 0:
-                        return Response(
-                            {'error': 'Online hourly rate must be positive'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-                except (InvalidOperation, ValueError):
-                    return Response(
-                        {'error': 'Invalid online hourly rate format'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                new_online_rate, error = _parse_rate(
+                    request.data['online_hourly_rate'], 'online_hourly_rate', 'online hourly rate'
+                )
+                if error:
+                    return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
 
         if sends_hourly:
             teacher.hourly_rate = new_rate
