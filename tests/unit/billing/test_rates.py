@@ -3,7 +3,8 @@ Unit tests for billing.services.rates.resolve_rates (MAP-182).
 
 One function resolves rates. Precedence:
   in_person -> (teacher.hourly_rate, school_settings.inperson_student_rate)
-  online    -> (school_settings.online_teacher_rate, school_settings.online_student_rate)
+  online    -> (teacher.online_hourly_rate if not None else school_settings.online_teacher_rate,
+                school_settings.online_student_rate)
 
 SchoolSettings.get_settings_for_school(school) is the only settings source;
 GlobalRateSettings is never read. Assertions compare against fixture values,
@@ -31,6 +32,22 @@ def second_teacher(second_school, teacher_user, db):
         last_name="Teacher",
         hourly_rate=teacher_user.hourly_rate + Decimal("7.00"),
         school=second_school,
+        is_approved=True,
+    )
+
+
+@pytest.fixture
+def override_teacher(school, school_settings, db):
+    """Teacher in the same school as teacher_user, with an online override distinct from the school rate (MAP-163)."""
+    return User.objects.create_user(
+        email="override@test.com",
+        password="testpass123",
+        user_type="teacher",
+        first_name="Override",
+        last_name="Teacher",
+        hourly_rate=school_settings.inperson_student_rate,
+        online_hourly_rate=school_settings.online_teacher_rate + Decimal("5.00"),
+        school=school,
         is_approved=True,
     )
 
@@ -125,3 +142,48 @@ class TestResolveRates:
         created = SchoolSettings.objects.get(school=school)
         assert online == (created.online_teacher_rate, created.online_student_rate)
         assert in_person == (teacher_user.hourly_rate, created.inperson_student_rate)
+
+
+@pytest.mark.django_db
+class TestOnlineTeacherOverride:
+    """MAP-163: per-teacher online rate, school rate when unset."""
+
+    def test_online_uses_teacher_override_else_school_rate(
+        self, school, school_settings, teacher_user, override_teacher
+    ):
+        assert teacher_user.online_hourly_rate is None
+
+        with_override = resolve_rates(school, override_teacher, 'online')
+        without = resolve_rates(school, teacher_user, 'online')
+
+        assert with_override == (
+            override_teacher.online_hourly_rate,
+            school_settings.online_student_rate,
+        )
+        assert without == (
+            school_settings.online_teacher_rate,
+            school_settings.online_student_rate,
+        )
+        assert with_override[0] != without[0]
+
+    def test_online_override_zero_is_a_real_rate(
+        self, school, school_settings, override_teacher
+    ):
+        override_teacher.online_hourly_rate = Decimal("0.00")
+        override_teacher.save()
+
+        teacher_rate, student_rate = resolve_rates(school, override_teacher, 'online')
+
+        assert teacher_rate == Decimal("0.00")
+        assert teacher_rate != school_settings.online_teacher_rate
+        assert student_rate == school_settings.online_student_rate
+
+    def test_online_override_does_not_change_in_person(
+        self, school, school_settings, teacher_user, override_teacher
+    ):
+        assert resolve_rates(school, override_teacher, 'in_person') == (
+            override_teacher.hourly_rate, school_settings.inperson_student_rate,
+        )
+        assert resolve_rates(school, teacher_user, 'in_person') == (
+            teacher_user.hourly_rate, school_settings.inperson_student_rate,
+        )
