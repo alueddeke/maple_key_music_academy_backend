@@ -411,9 +411,12 @@ def teacher_list_with_stats(request):
     """
     from ..serializers import TeacherListSerializer
 
+    # Removed teachers (soft-deleted, MAP-220) stay out of the list — the
+    # assign-teacher picker is built from it and the backend rejects inactive ids.
     teachers = User.objects.filter(
         user_type='teacher',
         is_approved=True,
+        is_active=True,
         school=request.user.school
     ).order_by('last_name', 'first_name')
     serializer = TeacherListSerializer(teachers, many=True)

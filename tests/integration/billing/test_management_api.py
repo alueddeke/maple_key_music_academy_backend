@@ -891,6 +891,27 @@ class TestRemovalReleasesEmail:
         assert created.status_code == status.HTTP_201_CREATED
         assert User.objects.filter(email=original, is_active=True).count() == 1
 
+    def test_removed_teacher_is_not_listed_and_cannot_be_assigned(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        """The list feeds the assign-teacher picker; a removed teacher must drop
+        out of it, and assigning one is refused."""
+        authenticated_management_client.delete(
+            reverse('management_delete_teacher', kwargs={'pk': teacher_user.id})
+        )
+
+        listed = authenticated_management_client.get(reverse('management_teacher_list'))
+        assert listed.status_code == status.HTTP_200_OK
+        assert teacher_user.id not in [t['id'] for t in listed.data]
+
+        assigned = authenticated_management_client.post(
+            reverse('assign_teachers_to_student', kwargs={'student_id': student_user.id}),
+            {'teacher_ids': [teacher_user.id]}, format='json',
+        )
+        assert assigned.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'inactive' in assigned.data['error']
+        assert not student_user.assigned_teachers.filter(pk=teacher_user.pk).exists()
+
     def test_delete_student_releases_email_and_allows_reuse(
         self, authenticated_management_client, student_user
     ):
