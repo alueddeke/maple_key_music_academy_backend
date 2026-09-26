@@ -147,6 +147,7 @@ def _serialize_invoice(invoice):
         ),
         'email_sent': invoice.email_sent,
         'email_error': invoice.email_error,
+        'send_outcome': invoice.send_outcome,
         'student': {
             'id': invoice.student_id,
             'full_name': invoice.student.get_full_name(),
@@ -458,8 +459,10 @@ def management_pre_billing_remove_lesson(request, invoice_id):
        removal (current DB rows); new_credit = min(original_credit, new_gross);
        amount = new_gross − new_credit.
     3. OUTSIDE transaction: create the replacement Helcim invoice with
-       discount = new_credit. Failure → 502 inline, nothing persisted, the
-       old invoice stays live (no orphaned void is possible).
+       discount = new_credit under our own number. Failure → look the
+       number up (MAP-213); found → adopt; not found → 502, nothing
+       persisted, the old invoice stays live (no orphaned void is possible);
+       lookup itself failing → 502 naming the number.
     4. Minimal transaction.atomic: the DB now points at the replacement —
        new ids/token, amount, issued snapshot (MAP-186), previous_* ids,
        revision += 1, cancel_outcome='pending'.
@@ -589,25 +592,37 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     # attempt id is persisted with the replacement in Step 9: a create
     # failure leaves nothing behind (MAP-184).
     replacement_attempt_id = uuid.uuid4()
+    replacement_number = _helcim_invoice_number(invoice.pk, replacement_attempt_id)
     try:
         helcim_response = HelcimClient(school=school).create_invoice(
             currency='CAD',
             line_items=line_items,
             customer_id=contact.helcim_customer_id,
             discount=_credit_discount(line_items, amount),
-            invoice_number=_helcim_invoice_number(invoice.pk, replacement_attempt_id),
+            invoice_number=replacement_number,
         )
     except HelcimAPIError as e:
-        # Nothing persisted, old invoice untouched and still live.
-        logger.error(
-            'create_invoice (replacement) failed for invoice %s: %s',
-            invoice.id,
-            e,
-        )
-        return Response(
-            {'error': f'Replacement invoice creation failed: {e}'},
-            status=status.HTTP_502_BAD_GATEWAY,
-        )
+        # Outcome unknown (timeout / 5xx after accept): ask Helcim for the
+        # number we just used before declaring failure (MAP-185 lookup-first).
+        helcim_response = None
+        try:
+            helcim_response = HelcimClient(school=school).get_invoice_by_number(replacement_number)
+        except HelcimAPIError as lookup_error:
+            logger.error(
+                'replacement create unconfirmed for invoice %s: number=%s create_error=%s lookup_error=%s',
+                invoice.id, replacement_number, e, lookup_error,
+            )
+            return Response(
+                {'error': f'Replacement invoice creation unconfirmed — check Helcim for {replacement_number} before retrying: {e}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        if helcim_response is None:
+            logger.error('create_invoice (replacement) failed for invoice %s: %s', invoice.id, e)
+            return Response(
+                {'error': f'Replacement invoice creation failed: {e}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        logger.warning('replacement %s adopted after create error for invoice %s: %s', replacement_number, invoice.id, e)
 
     # Step 8: Build payment URL from subdomain + new token (per-school subdomain wins)
     payment_url = payment_page_url(helcim_response['token'], school)
