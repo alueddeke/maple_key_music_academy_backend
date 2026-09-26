@@ -108,7 +108,7 @@ jobs:
 
       # The deploy body lives in the docker repo as numbered scripts
       # (MAP-191: maple_key_music_academy_docker/deployment/). This job only
-      # materialises the environment, copies the scripts and runs them —
+      # streams the environment, copies the scripts and runs them —
       # the same run.sh the laptop path uses. Secrets never appear in the
       # SSH script text (GitHub caps that expression at 21,000 chars and bash
       # once mangled a `$` inside a token — MAP-212/218).
@@ -119,7 +119,12 @@ jobs:
           ref: develop
           path: docker-repo
 
-      - name: Write deploy.env from secrets
+      # One native ssh/scp step, identical to what deploy-from-laptop.sh does:
+      # copy the scripts, stream deploy.env over ssh stdin (never a file on the
+      # runner — the first run of the scp-action variant failed because the
+      # action's container could not read the 0600 file the runner wrote),
+      # then run the stages.
+      - name: Deploy (copy scripts, stream deploy.env, run.sh)
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
@@ -140,28 +145,22 @@ jobs:
           HELCIM_WEBHOOK_SECRET: ${{ secrets.HELCIM_WEBHOOK_SECRET }}
           HELCIM_SUBDOMAIN: ${{ secrets.HELCIM_SUBDOMAIN }}
           CERTBOT_EMAIL: ${{ secrets.CERTBOT_EMAIL }}
-        run: bash docker-repo/deployment/write-deploy-env.sh docker-repo/deployment/deploy.env
-
-      - name: Copy deployment scripts to the droplet
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPC_HOST }}
-          username: ${{ secrets.VPC_USERNAME }}
-          key: ${{ secrets.VPC_SSH_KEY }}
-          port: ${{ secrets.VPC_PORT || 22 }}
-          source: docker-repo/deployment/*
-          target: deployment
-          strip_components: 2
-          overwrite: true
-
-      - name: Deploy to VPC
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPC_HOST }}
-          username: ${{ secrets.VPC_USERNAME }}
-          key: ${{ secrets.VPC_SSH_KEY }}
-          port: ${{ secrets.VPC_PORT || 22 }}
-          script: bash ~/deployment/run.sh
+          VPC_HOST: ${{ secrets.VPC_HOST }}
+          VPC_USERNAME: ${{ secrets.VPC_USERNAME }}
+          VPC_PORT: ${{ secrets.VPC_PORT || 22 }}
+          VPC_SSH_KEY: ${{ secrets.VPC_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEY="$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$VPC_SSH_KEY" > "$KEY"
+          OPTS=(-i "$KEY" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+          DEST="$VPC_USERNAME@$VPC_HOST"
+          ssh "${OPTS[@]}" -p "$VPC_PORT" "$DEST" 'mkdir -p ~/deployment'
+          scp "${OPTS[@]}" -P "$VPC_PORT" -q docker-repo/deployment/*.sh "$DEST":deployment/
+          bash docker-repo/deployment/write-deploy-env.sh - \
+            | ssh "${OPTS[@]}" -p "$VPC_PORT" "$DEST" 'umask 077; cat > ~/deployment/deploy.env'
+          ssh "${OPTS[@]}" -p "$VPC_PORT" "$DEST" 'bash ~/deployment/run.sh'
 
       - name: Tag successful deploy
         run: |
