@@ -629,3 +629,72 @@ class TestBatchAddLessonOnlineRate:
         item_b = BatchLessonItem.objects.get(pk=resp_b.data["id"])
         assert item_a.teacher_rate == override_teacher.online_hourly_rate
         assert item_b.teacher_rate == school_settings.online_teacher_rate
+
+
+def _largest_rate(field_name):
+    """Largest value the User rate column stores, from the model field itself."""
+    field = User._meta.get_field(field_name)
+    return Decimal(10) ** (field.max_digits - field.decimal_places) - Decimal(1).scaleb(-field.decimal_places)
+
+
+def _too_precise(field_name):
+    """One more decimal place than the User rate column keeps."""
+    field = User._meta.get_field(field_name)
+    return Decimal(1).scaleb(-(field.decimal_places + 1)) + Decimal("1")
+
+
+@pytest.mark.django_db
+class TestRateInputBounds:
+    """Non-finite, oversized or over-precise rates → 400, never a 500 (MAP-163 owner addendum)."""
+
+    @pytest.fixture(params=["hourly_rate", "online_hourly_rate"])
+    def field_name(self, request):
+        return request.param
+
+    @pytest.mark.parametrize("raw", ["Infinity", "-Infinity", "NaN", "sNaN"])
+    def test_non_finite_rate_400_row_unchanged(self, management_client, teacher_user, field_name, raw):
+        before = getattr(teacher_user, field_name)
+
+        response = management_client.patch(
+            reverse("management_teacher_detail", kwargs={"pk": teacher_user.pk}),
+            {field_name: raw}, format="json",
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert isinstance(response.data["error"], str)
+        teacher_user.refresh_from_db()
+        assert getattr(teacher_user, field_name) == before
+
+    def test_rate_above_column_maximum_400_row_unchanged(self, management_client, teacher_user, field_name):
+        before = getattr(teacher_user, field_name)
+        too_big = _largest_rate(field_name) + Decimal("0.01")
+
+        response = management_client.patch(
+            reverse("management_teacher_detail", kwargs={"pk": teacher_user.pk}),
+            {field_name: str(too_big)}, format="json",
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert str(_largest_rate(field_name)) in response.data["error"]
+        teacher_user.refresh_from_db()
+        assert getattr(teacher_user, field_name) == before
+
+    def test_rate_with_too_many_decimals_400(self, management_client, teacher_user, field_name):
+        response = management_client.patch(
+            reverse("management_teacher_detail", kwargs={"pk": teacher_user.pk}),
+            {field_name: str(_too_precise(field_name))}, format="json",
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_column_maximum_is_accepted(self, management_client, teacher_user, field_name):
+        largest = _largest_rate(field_name)
+
+        response = management_client.patch(
+            reverse("management_teacher_detail", kwargs={"pk": teacher_user.pk}),
+            {field_name: str(largest)}, format="json",
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        teacher_user.refresh_from_db()
+        assert getattr(teacher_user, field_name) == largest
