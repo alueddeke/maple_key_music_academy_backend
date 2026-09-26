@@ -438,3 +438,74 @@ class TestResolveWhenNone:
 
         assert sched.teacher_rate == explicit_teacher
         assert sched.student_rate == explicit_student
+
+
+@pytest.fixture
+def override_teacher(school, school_settings, db):
+    """Second teacher in the same school with an online override (MAP-163)."""
+    return User.objects.create_user(
+        email="override@test.com",
+        password="testpass123",
+        user_type="teacher",
+        first_name="Override",
+        last_name="Teacher",
+        hourly_rate=school_settings.inperson_student_rate,
+        online_hourly_rate=school_settings.online_teacher_rate + Decimal("5.00"),
+        school=school,
+        is_approved=True,
+    )
+
+
+@pytest.mark.django_db
+class TestOnlineTeacherOverrideLocking:
+    """MAP-163: online rows lock their own teacher's resolved rate at creation."""
+
+    def test_online_lesson_locks_own_teachers_rate(
+        self, school, school_settings, teacher_user, override_teacher, student_user
+    ):
+        a = Lesson.objects.create(**_lesson_kwargs(override_teacher, student_user, school, 'online'))
+        b = Lesson.objects.create(**_lesson_kwargs(teacher_user, student_user, school, 'online'))
+        a.refresh_from_db()
+        b.refresh_from_db()
+
+        assert a.teacher_rate == override_teacher.online_hourly_rate
+        assert b.teacher_rate == school_settings.online_teacher_rate
+        assert a.student_rate == b.student_rate == school_settings.online_student_rate
+
+        # Changing or clearing the override later never touches the locked rows.
+        locked = a.teacher_rate
+        override_teacher.online_hourly_rate = None
+        override_teacher.save()
+        a.refresh_from_db()
+        assert a.teacher_rate == locked
+
+    def test_online_schedule_locks_own_teachers_rate(
+        self, school, school_settings, teacher_user, override_teacher, student_user
+    ):
+        def make(teacher, day):
+            return RecurringLessonsSchedule.objects.create(
+                teacher=teacher, student=student_user, school=school,
+                day_of_week=day, start_time=time(15, 0), duration=Decimal("1.0"),
+                lesson_type='online', start_date=date(2026, 1, 1),
+            )
+
+        a = make(override_teacher, 0)
+        b = make(teacher_user, 1)
+        a.refresh_from_db()
+        b.refresh_from_db()
+
+        assert a.teacher_rate == override_teacher.online_hourly_rate
+        assert b.teacher_rate == school_settings.online_teacher_rate
+
+    def test_online_rate_never_falls_back_to_hourly_rate(
+        self, school, school_settings, teacher_user, student_user
+    ):
+        teacher_user.hourly_rate = school_settings.online_teacher_rate + Decimal("13.00")
+        teacher_user.online_hourly_rate = None
+        teacher_user.save()
+
+        lesson = Lesson.objects.create(**_lesson_kwargs(teacher_user, student_user, school, 'online'))
+        lesson.refresh_from_db()
+
+        assert lesson.teacher_rate == school_settings.online_teacher_rate
+        assert lesson.teacher_rate != teacher_user.hourly_rate
