@@ -22,7 +22,9 @@ from custom_auth.decorators import (
 import logging
 import calendar
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from django.core.exceptions import ValidationError
+from django.core.validators import DecimalValidator
 
 logger = logging.getLogger(__name__)
 
@@ -423,14 +425,42 @@ def teacher_list_with_stats(request):
     return Response(serializer.data)
 
 
+def _parse_rate(raw, field_name, label):
+    """
+    Parse a teacher rate from a request body: a finite Decimal >= 0 that fits
+    the User model field (its max_digits / decimal_places). Returns
+    (value, None) or (None, error message).
+    """
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return None, f'Invalid {label} format'
+    if not value.is_finite():
+        return None, f'Invalid {label} format'
+    if value < 0:
+        return None, f'{label.capitalize()} must be positive'
+    field = User._meta.get_field(field_name)
+    try:
+        DecimalValidator(field.max_digits, field.decimal_places)(value)
+    except ValidationError:
+        largest = Decimal(10) ** (field.max_digits - field.decimal_places) - Decimal(1).scaleb(-field.decimal_places)
+        return None, (
+            f'{label.capitalize()} must be at most {largest} '
+            f'with no more than {field.decimal_places} decimal places'
+        )
+    return value, None
+
+
 @api_view(['GET', 'PATCH'])
 @management_required
 def teacher_detail(request, pk):
     """
-    Get teacher details with stats, or update teacher hourly_rate.
+    Get teacher details with stats, or update the teacher's rates:
+    hourly_rate (in-person) and/or online_hourly_rate (null = school default).
     Management only.
     """
     from ..serializers import TeacherDetailSerializer
+    from ..services.rates import resolve_rates
 
     try:
         teacher = User.objects.get(pk=pk, user_type='teacher', school=request.user.school)
@@ -442,47 +472,67 @@ def teacher_detail(request, pk):
         return Response(serializer.data)
 
     elif request.method == 'PATCH':
-        # Only allow updating hourly_rate
-        if 'hourly_rate' not in request.data:
+        # Only the two rate fields can be updated (MAP-163)
+        sends_hourly = 'hourly_rate' in request.data
+        sends_online = 'online_hourly_rate' in request.data
+        if not sends_hourly and not sends_online:
             return Response(
-                {'error': 'Only hourly_rate can be updated'},
+                {'error': 'Only hourly_rate or online_hourly_rate can be updated'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Validate hourly_rate
-        from decimal import Decimal, InvalidOperation
-        try:
-            new_rate = Decimal(str(request.data['hourly_rate']))
-            if new_rate < 0:
-                return Response(
-                    {'error': 'Hourly rate must be positive'},
-                    status=status.HTTP_400_BAD_REQUEST
+        # Validate every field before writing anything
+        if sends_hourly:
+            new_rate, error = _parse_rate(request.data['hourly_rate'], 'hourly_rate', 'hourly rate')
+            if error:
+                return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+
+        if sends_online:
+            # null clears the override: the teacher returns to the school online rate
+            new_online_rate = None
+            if request.data['online_hourly_rate'] is not None:
+                new_online_rate, error = _parse_rate(
+                    request.data['online_hourly_rate'], 'online_hourly_rate', 'online hourly rate'
                 )
-        except (InvalidOperation, ValueError):
-            return Response(
-                {'error': 'Invalid hourly rate format'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+                if error:
+                    return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Update teacher hourly_rate
-        teacher.hourly_rate = new_rate
+        if sends_hourly:
+            teacher.hourly_rate = new_rate
+        if sends_online:
+            teacher.online_hourly_rate = new_online_rate
         teacher.save()
 
         schedules_updated = 0
         if request.data.get('apply_to_schedules'):
-            # Update active in-person recurring schedules
-            schedules_updated = RecurringLessonsSchedule.objects.filter(
-                teacher=teacher,
-                is_active=True,
-                lesson_type='in_person'
-            ).update(teacher_rate=new_rate)
+            if sends_hourly:
+                # Update active in-person recurring schedules
+                schedules_updated += RecurringLessonsSchedule.objects.filter(
+                    teacher=teacher,
+                    is_active=True,
+                    lesson_type='in_person'
+                ).update(teacher_rate=new_rate)
 
-            # Update lesson items in open (draft/submitted) batches
-            BatchLessonItem.objects.filter(
-                batch__teacher=teacher,
-                batch__status__in=['draft', 'submitted'],
-                lesson_type='in_person'
-            ).update(teacher_rate=new_rate)
+                # Update lesson items in open (draft/submitted) batches
+                BatchLessonItem.objects.filter(
+                    batch__teacher=teacher,
+                    batch__status__in=['draft', 'submitted'],
+                    lesson_type='in_person'
+                ).update(teacher_rate=new_rate)
+
+            if sends_online:
+                online_rate, _ = resolve_rates(teacher.school, teacher, 'online')
+                schedules_updated += RecurringLessonsSchedule.objects.filter(
+                    teacher=teacher,
+                    is_active=True,
+                    lesson_type='online'
+                ).update(teacher_rate=online_rate)
+
+                BatchLessonItem.objects.filter(
+                    batch__teacher=teacher,
+                    batch__status__in=['draft', 'submitted'],
+                    lesson_type='online'
+                ).update(teacher_rate=online_rate)
 
         serializer = TeacherDetailSerializer(teacher)
         response_data = serializer.data

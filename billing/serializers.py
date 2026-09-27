@@ -610,7 +610,7 @@ class TeacherListSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'hourly_rate',
-            'instruments', 'is_approved',
+            'online_hourly_rate', 'instruments', 'is_approved',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings'
         ]
@@ -667,7 +667,7 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'phone_number', 'address',
-            'hourly_rate', 'bio', 'instruments', 'is_approved',
+            'hourly_rate', 'online_hourly_rate', 'bio', 'instruments', 'is_approved',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings',
             'recent_lessons', 'recent_invoices',
