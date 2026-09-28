@@ -85,7 +85,9 @@ class TeacherInstrument(models.Model):
     skill_ceiling = models.CharField(
         max_length=20,
         choices=SKILL_CEILING_CHOICES,
-        help_text="Highest student level the teacher takes on this instrument",
+        null=True,
+        blank=True,
+        help_text="Highest student level the teacher takes on this instrument; empty = not set",
     )
     rate = models.DecimalField(
         max_digits=6, decimal_places=2, null=True, blank=True,
@@ -111,7 +113,7 @@ class TeacherInstrument(models.Model):
     def __str__(self):
         return (
             f"{self.profile.teacher.get_full_name()} — {self.instrument} "
-            f"({self.get_skill_ceiling_display()})"
+            f"({self.get_skill_ceiling_display() or 'Not set'})"
         )
 
 
