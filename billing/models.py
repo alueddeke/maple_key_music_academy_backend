@@ -202,7 +202,6 @@ class User(AbstractUser):
     
     # Teacher-specific fields
     bio = models.TextField(blank=True)
-    instruments = models.CharField(max_length=500, blank=True, help_text="Comma-separated list of instruments")
     hourly_rate = models.DecimalField(max_digits=6, decimal_places=2, default=50.00)
     # Per-teacher online rate (MAP-163). None = use SchoolSettings.online_teacher_rate; 0 is a real rate.
     online_hourly_rate = models.DecimalField(

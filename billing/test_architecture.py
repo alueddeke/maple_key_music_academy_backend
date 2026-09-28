@@ -71,7 +71,6 @@ class ArchitectureTest:
             last_name='Teacher',
             user_type='teacher',
             bio='Piano instructor',
-            instruments='Piano, Guitar',
             hourly_rate=75.00
         )
         assert teacher.is_approved == False, "Teachers should need approval"

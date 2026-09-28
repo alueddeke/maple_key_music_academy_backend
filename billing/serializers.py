@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator
 from django.db.models import Count, Sum, Q
 from custom_auth.authentication import removed_account_message
+from teacher_profiles.instruments import instrument_names
 from .models import (
     Lesson, Invoice, ApprovedEmail, UserRegistrationRequest,
     InvoiceRecipientEmail, GlobalRateSettings, BillableContact,
@@ -54,6 +55,7 @@ class UserSerializer(serializers.ModelSerializer):
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
     assigned_teachers_data = serializers.SerializerMethodField()
     assigned_students_data = serializers.SerializerMethodField()
+    instruments = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -97,11 +99,14 @@ class UserSerializer(serializers.ModelSerializer):
                     'id': teacher.id,
                     'name': teacher.get_full_name(),
                     'email': teacher.email,
-                    'instruments': teacher.instruments
+                    'instruments': instrument_names(teacher)
                 }
                 for teacher in obj.assigned_teachers.filter(is_active=True)
             ]
         return []
+
+    def get_instruments(self, obj):
+        return instrument_names(obj)
 
     def get_assigned_students_data(self, obj):
         """Return full student info for teachers"""
@@ -434,6 +439,7 @@ class DetailedUserSerializer(serializers.ModelSerializer):
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
     assigned_teachers_data = serializers.SerializerMethodField()
+    instruments = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -456,11 +462,14 @@ class DetailedUserSerializer(serializers.ModelSerializer):
                     'id': teacher.id,
                     'name': teacher.get_full_name(),
                     'email': teacher.email,
-                    'instruments': teacher.instruments
+                    'instruments': instrument_names(teacher)
                 }
                 for teacher in obj.assigned_teachers.filter(is_active=True)
             ]
         return []
+
+    def get_instruments(self, obj):
+        return instrument_names(obj)
 
 
 class DetailedInvoiceSerializer(serializers.ModelSerializer):
@@ -605,6 +614,7 @@ class TeacherListSerializer(serializers.ModelSerializer):
     total_invoices = serializers.SerializerMethodField()
     pending_invoices = serializers.SerializerMethodField()
     total_earnings = serializers.SerializerMethodField()
+    instruments = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -614,6 +624,9 @@ class TeacherListSerializer(serializers.ModelSerializer):
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings'
         ]
+
+    def get_instruments(self, obj):
+        return instrument_names(obj)
 
     def get_total_students(self, obj):
         """Count distinct ACTIVE students this teacher has taught"""
@@ -662,6 +675,7 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
     # Recent activity
     recent_lessons = serializers.SerializerMethodField()
     recent_invoices = serializers.SerializerMethodField()
+    instruments = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -673,6 +687,9 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
             'recent_lessons', 'recent_invoices',
             'date_joined', 'last_login'
         ]
+
+    def get_instruments(self, obj):
+        return instrument_names(obj)
 
     def get_total_students(self, obj):
         return Lesson.objects.filter(teacher=obj, status='completed').values('student').distinct().count()
