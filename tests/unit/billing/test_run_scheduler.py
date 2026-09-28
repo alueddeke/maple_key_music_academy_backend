@@ -2,7 +2,7 @@
 Unit tests for run_scheduler (MAP-154) — the unattended reconciliation loop.
 
 One tick = retry_webhook_events (every 15 min), sync_helcim_payments (once
-per UTC day at/after 03:00), and the unresolved-events gauge. Helcim is
+per UTC day at/after 03:00), and the unresolved + failed-15m gauges. Helcim is
 mocked at the client seams; the commands run for real against the DB.
 """
 
@@ -23,6 +23,7 @@ from billing.models import (
     StudentCreditAccount,
 )
 from billing.services.helcim_client import HelcimAPIError
+from billing.services.webhook_processing import ALERT_STATES
 
 GET_TARGET = 'billing.services.webhook_processing.HelcimClient.get_card_transaction'
 LIST_TARGET = 'billing.services.helcim_client.HelcimClient.list_card_transactions'
@@ -58,8 +59,17 @@ def _event(tx_id, age, processing_status='enrichment_failed'):
     return event
 
 
+def _processed(event, ago):
+    """Stamp processed_at `ago` in the past (the processing path sets it to now)."""
+    HelcimWebhookEvent.objects.filter(pk=event.pk).update(processed_at=timezone.now() - ago)
+
+
 def _tick():
     call_command('run_scheduler', '--once', stdout=StringIO())
+
+
+def _failed_gauge():
+    return REGISTRY.get_sample_value('maplekey_webhook_events_failed_15m')
 
 
 @pytest.mark.django_db
@@ -118,3 +128,55 @@ def test_sync_runs_once_per_day_after_0300_utc(school, hour, expected_calls):
         _tick()
 
     assert mock_list.call_count == expected_calls
+
+
+# --- maplekey_webhook_events_failed_15m (MAP-231) ---------------------------
+# The webhook-failures alert reads this gauge: a count from the DB, so one
+# event is enough to fire (the per-process counter's increase() missed it).
+# Helcim stays down in these ticks, so the retry leaves retryable events in
+# an alert state and re-stamps processed_at, as it does in prod.
+
+HELCIM_DOWN = HelcimAPIError('down', status_code=503)
+
+
+@pytest.mark.django_db
+def test_failed_gauge_counts_recent_alert_event(school):
+    """One needs_attention event processed a minute ago → gauge 1."""
+    _processed(_event('tx-na-recent', timedelta(minutes=2), 'needs_attention'), timedelta(minutes=1))
+
+    with mock.patch(GET_TARGET, side_effect=HELCIM_DOWN), \
+         mock.patch(LIST_TARGET, return_value=[]):
+        _tick()
+
+    assert _failed_gauge() == 1
+
+
+@pytest.mark.django_db
+def test_failed_gauge_ignores_old_and_non_alert_events(school):
+    """
+    Outside the window (terminal, so the retry does not re-stamp it) or not in
+    ALERT_STATES → not counted.
+    """
+    _processed(_event('tx-na-old', timedelta(minutes=25), 'needs_attention'), timedelta(minutes=20))
+    for status in ('credited', 'not_approved', 'non_purchase'):
+        assert status not in ALERT_STATES
+        _processed(_event(f'tx-{status}', timedelta(minutes=2), status), timedelta(minutes=1))
+
+    with mock.patch(GET_TARGET, side_effect=HELCIM_DOWN), \
+         mock.patch(LIST_TARGET, return_value=[]):
+        _tick()
+
+    assert _failed_gauge() == 0
+
+
+@pytest.mark.django_db
+def test_failed_gauge_counts_every_alert_state(school):
+    """One recent event per ALERT_STATES member → all counted."""
+    for status in ALERT_STATES:
+        _processed(_event(f'tx-alert-{status}', timedelta(minutes=2), status), timedelta(minutes=1))
+
+    with mock.patch(GET_TARGET, side_effect=HELCIM_DOWN), \
+         mock.patch(LIST_TARGET, return_value=[]):
+        _tick()
+
+    assert _failed_gauge() == len(ALERT_STATES)

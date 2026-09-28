@@ -54,6 +54,10 @@ logger = logging.getLogger(__name__)
 # is allowed to re-process. Everything else is terminal.
 RETRYABLE_STATES = {'pending', 'enrichment_failed', 'no_invoice', 'no_account'}
 
+# A received payment that did not credit and needs a human — what the
+# webhook-failures alert counts (scheduler gauge, MAP-231).
+ALERT_STATES = {'enrichment_failed', 'no_invoice', 'no_account', 'needs_attention'}
+
 CREDITABLE_TYPES = {'purchase', 'capture'}
 
 
