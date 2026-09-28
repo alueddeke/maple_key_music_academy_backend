@@ -138,15 +138,17 @@ class PreBillingInvoiceAdmin(admin.ModelAdmin):
                        'revision', 'cancel_outcome', 'created_at', 'updated_at')
     actions = ['retry_cancel']
 
-    @admin.action(description='Retry cancel of the previous Helcim invoice (failed voids only)')
+    @admin.action(description='Retry cancel of the previous Helcim invoice (pending or failed voids)')
     def retry_cancel(self, request, queryset):
         # MAP-184: a lesson removal persists the replacement first and voids
         # the previous invoice second; a rejected void leaves cancel_outcome
         # 'failed'. This re-attempts that void so two live invoices never
         # stay un-flagged.
+        # MAP-205: 'pending' is the crash window between persisting the
+        # replacement and voiding the previous invoice — retried too.
         done = failed = skipped = 0
         for invoice in queryset:
-            if invoice.cancel_outcome != 'failed':
+            if invoice.cancel_outcome not in ('pending', 'failed'):
                 skipped += 1
                 continue
             try:
@@ -158,6 +160,8 @@ class PreBillingInvoiceAdmin(admin.ModelAdmin):
                     'retry cancel failed for invoice %s (previous helcim_id=%s): %s',
                     invoice.id, invoice.previous_helcim_invoice_id, e,
                 )
+                invoice.cancel_outcome = 'failed'
+                invoice.save(update_fields=['cancel_outcome', 'updated_at'])
                 failed += 1
                 continue
             invoice.cancel_outcome = 'done'
@@ -166,7 +170,7 @@ class PreBillingInvoiceAdmin(admin.ModelAdmin):
         self.message_user(
             request,
             f'{done} previous invoice(s) voided, {failed} still failed, '
-            f'{skipped} skipped (cancel_outcome not failed).',
+            f'{skipped} skipped (cancel_outcome not pending/failed).',
         )
 
 
