@@ -194,3 +194,68 @@ class TestInstrumentList:
         assert response.status_code == status.HTTP_200_OK
         assert len(response.data['instruments']) == 1
         assert response.data['instruments'][0]['instrument'] == 'Piano'
+
+
+@pytest.mark.django_db
+class TestSkillCeilingRequiredOnWrite:
+    """MAP-229 D1: only the legacy backfill leaves a level unset; API writes name one."""
+
+    @pytest.fixture
+    def unset_piano(self, teacher_profile):
+        return TeacherInstrument.objects.create(
+            profile=teacher_profile, instrument='Piano', skill_ceiling=None
+        )
+
+    @pytest.mark.parametrize('payload_change', [
+        {'skill_ceiling': None},
+        {'skill_ceiling': ''},
+    ])
+    def test_create_with_unset_skill_ceiling_rejected(
+        self, management_client, teacher_user, payload_change
+    ):
+        payload = {**VALID_PAYLOAD, **payload_change}
+        response = management_client.post(instruments_url(teacher_user.id), payload, format='json')
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'skill_ceiling' in response.data
+        assert not TeacherInstrument.objects.filter(profile__teacher=teacher_user).exists()
+
+    def test_create_without_skill_ceiling_rejected(self, management_client, teacher_user):
+        payload = {k: v for k, v in VALID_PAYLOAD.items() if k != 'skill_ceiling'}
+        response = management_client.post(instruments_url(teacher_user.id), payload, format='json')
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'skill_ceiling' in response.data
+        assert not TeacherInstrument.objects.filter(profile__teacher=teacher_user).exists()
+
+    def test_partial_update_rate_keeps_unset_skill(self, management_client, teacher_user, unset_piano):
+        response = management_client.put(
+            instrument_url(teacher_user.id, unset_piano.id), {'rate': '60.00'}, format='json'
+        )
+        assert response.status_code == status.HTTP_200_OK
+        unset_piano.refresh_from_db()
+        assert str(unset_piano.rate) == '60.00'
+        assert unset_piano.skill_ceiling is None
+
+    def test_update_explicit_null_skill_rejected(self, management_client, teacher_user, piano):
+        response = management_client.put(
+            instrument_url(teacher_user.id, piano.id), {'skill_ceiling': None}, format='json'
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        piano.refresh_from_db()
+        assert piano.skill_ceiling == 'intermediate'
+
+    def test_update_sets_level_on_unset_row(self, management_client, teacher_user, unset_piano):
+        response = management_client.put(
+            instrument_url(teacher_user.id, unset_piano.id), {'skill_ceiling': 'advanced'}, format='json'
+        )
+        assert response.status_code == status.HTTP_200_OK
+        unset_piano.refresh_from_db()
+        assert unset_piano.skill_ceiling == 'advanced'
+
+    def test_profile_endpoint_serializes_unset_skill_as_null(
+        self, management_client, teacher_user, unset_piano
+    ):
+        response = management_client.get(
+            reverse('teacher_profile_detail', kwargs={'teacher_id': teacher_user.id})
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['instruments'][0]['skill_ceiling'] is None
