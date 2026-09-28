@@ -241,6 +241,19 @@ class TestUserProfile:
         assert response.data['user']['user_type'] == 'teacher'
         assert 'first_name' in response.data['user']
 
+    def test_profile_instruments_built_from_teacher_rows(self, api_client, teacher_user):
+        """MAP-229: /me reads the teacher's TeacherInstrument rows, not a stored string."""
+        from teacher_profiles.models import TeacherInstrument, TeacherProfile
+        api_client.force_authenticate(user=teacher_user)
+        url = reverse('user_profile')
+        assert api_client.get(url).data['user']['instruments'] == ''
+
+        profile = TeacherProfile.objects.create(teacher=teacher_user, school=teacher_user.school)
+        TeacherInstrument.objects.create(profile=profile, instrument='Voice', skill_ceiling=None)
+        TeacherInstrument.objects.create(profile=profile, instrument='Guitar', skill_ceiling='beginner')
+
+        assert api_client.get(url).data['user']['instruments'] == 'Guitar, Voice'
+
     def test_unauthenticated_returns_401(self, api_client):
         url = reverse('user_profile')
         response = api_client.get(url)

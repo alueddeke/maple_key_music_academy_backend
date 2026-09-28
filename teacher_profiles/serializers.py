@@ -20,6 +20,10 @@ class TeacherInstrumentSerializer(serializers.ModelSerializer):
             'teaches_history',
             'teaches_rcm_prep',
         ]
+        # MAP-229 D1: only the legacy backfill leaves a level unset; every
+        # write through the API names one. A partial update that omits the
+        # field leaves an unset level unset.
+        extra_kwargs = {'skill_ceiling': {'required': True, 'allow_null': False, 'allow_blank': False}}
 
     def validate_instrument(self, value):
         value = value.strip()

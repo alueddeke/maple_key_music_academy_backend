@@ -41,7 +41,7 @@ class UserAdmin(BaseUserAdmin):
         (None, {'fields': ('email', 'password')}),
         ('Personal info', {'fields': ('first_name', 'last_name', 'phone_number', 'address')}),
         ('Role & Status', {'fields': ('user_type', 'is_approved', 'oauth_provider')}),
-        ('Teacher fields', {'fields': ('bio', 'instruments', 'hourly_rate')}),
+        ('Teacher fields', {'fields': ('bio', 'hourly_rate')}),
         ('Student fields', {'fields': ('assigned_teachers',)}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
     )

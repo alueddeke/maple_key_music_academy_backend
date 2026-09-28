@@ -511,7 +511,7 @@ class TestManagementPutsCannotEscalate:
         assert response.status_code == status.HTTP_200_OK, response.data
         assert _snapshot(user) == before
         assert (user.id, user.oauth_provider, user.oauth_id, user.date_joined, user.last_login) == untouched_before
-        for name in ('email', 'first_name', 'last_name', 'phone_number', 'address', 'bio', 'instruments'):
+        for name in ('email', 'first_name', 'last_name', 'phone_number', 'address', 'bio'):
             assert getattr(user, name) == payload[name], name
         assert user.hourly_rate == Decimal(payload['hourly_rate'])
         assert set(user.assigned_teachers.values_list('id', flat=True)) == {teacher_user.id}
@@ -1034,3 +1034,81 @@ class TestRemovalReleasesEmail:
             {'email': teacher_user.email, 'first_name': 'Same'}, format='json',
         )
         assert response.status_code == status.HTTP_200_OK
+
+
+# ---------------------------------------------------------------------------
+# MAP-229: one instrument list — every `instruments` payload key is built from
+# the teacher's TeacherInstrument rows; the Edit Info endpoint cannot write it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestDerivedInstruments:
+
+    @pytest.fixture
+    def rows(self, teacher_user):
+        from teacher_profiles.models import TeacherInstrument, TeacherProfile
+        profile = TeacherProfile.objects.create(teacher=teacher_user, school=teacher_user.school)
+        TeacherInstrument.objects.create(profile=profile, instrument='Violin', skill_ceiling='advanced')
+        TeacherInstrument.objects.create(profile=profile, instrument='Cello', skill_ceiling=None)
+        return profile
+
+    @staticmethod
+    def _payload_instruments(client, teacher, student):
+        """The `instruments` value at every management read site, keyed by site."""
+        student.assigned_teachers.add(teacher)
+        listed = client.get(reverse('management_teacher_list')).data
+        detail = client.get(reverse('management_teacher_detail', kwargs={'pk': teacher.id})).data
+        students = client.get(reverse('teacher_students', kwargs={'teacher_id': teacher.id})).data
+        student_detail = client.get(reverse('management_student_detail', kwargs={'pk': student.id})).data
+        users = client.get(reverse('management_all_users'), {'user_type': 'teacher'}).data
+        return {
+            'teacher_list': next(t['instruments'] for t in listed if t['id'] == teacher.id),
+            'teacher_detail': detail['instruments'],
+            'teacher_students': students['teacher']['instruments'],
+            'assigned_teachers_data': next(
+                t['instruments'] for t in student_detail['assigned_teachers_data'] if t['id'] == teacher.id
+            ),
+            'all_users': next(u['instruments'] for u in users if u['id'] == teacher.id),
+        }
+
+    def test_every_read_site_joins_rows_in_name_order(
+        self, authenticated_management_client, teacher_user, student_user, rows
+    ):
+        sites = self._payload_instruments(authenticated_management_client, teacher_user, student_user)
+
+        assert sites == {site: 'Cello, Violin' for site in sites}
+
+    def test_every_read_site_is_empty_without_profile(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        sites = self._payload_instruments(authenticated_management_client, teacher_user, student_user)
+
+        assert sites == {site: '' for site in sites}
+
+    def test_adding_a_row_through_the_instruments_api_updates_the_teacher_list(
+        self, authenticated_management_client, teacher_user, rows
+    ):
+        response = authenticated_management_client.post(
+            reverse('teacher_instrument_list', kwargs={'teacher_id': teacher_user.id}),
+            {'instrument': 'Banjo', 'skill_ceiling': 'beginner'},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+
+        listed = authenticated_management_client.get(reverse('management_teacher_list')).data
+        assert next(t['instruments'] for t in listed if t['id'] == teacher_user.id) == 'Banjo, Cello, Violin'
+
+    def test_edit_info_ignores_instruments_key(
+        self, authenticated_management_client, teacher_user, rows
+    ):
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'instruments': 'Kazoo', 'first_name': 'Renamed'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['instruments'] == 'Cello, Violin'
+        assert sorted(rows.instruments.values_list('instrument', flat=True)) == ['Cello', 'Violin']
+        teacher_user.refresh_from_db()
+        assert teacher_user.first_name == 'Renamed'

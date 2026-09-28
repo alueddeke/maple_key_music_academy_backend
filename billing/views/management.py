@@ -15,6 +15,7 @@ from ..serializers import (
     BatchRejectionSnapshotSerializer
 )
 from custom_auth.authentication import release_email, revoke_user_tokens
+from teacher_profiles.instruments import instrument_names
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
     teacher_or_management_required, owns_resource_or_management
@@ -420,7 +421,9 @@ def teacher_list_with_stats(request):
         is_approved=True,
         is_active=True,
         school=request.user.school
-    ).order_by('last_name', 'first_name')
+    ).order_by('last_name', 'first_name').select_related(
+        'teacher_profile'
+    ).prefetch_related('teacher_profile__instruments')
     serializer = TeacherListSerializer(teachers, many=True)
     return Response(serializer.data)
 
@@ -1028,7 +1031,7 @@ def teacher_students(request, teacher_id):
             'first_name': teacher.first_name,
             'last_name': teacher.last_name,
             'email': teacher.email,
-            'instruments': teacher.instruments,
+            'instruments': instrument_names(teacher),
             'bio': teacher.bio
         },
         'students': serializer.data,
