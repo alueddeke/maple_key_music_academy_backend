@@ -9,7 +9,9 @@ Each tick:
   - once per UTC day at/after 03:00: sync_helcim_payments (a start after
     03:00 syncs immediately — a deploy never skips a day; sync is idempotent)
   - refresh maplekey_webhook_events_unresolved_1h (retryable events received
-    more than an hour ago) and maplekey_scheduler_last_tick_timestamp
+    more than an hour ago), maplekey_webhook_events_failed_15m (events that
+    landed in an alert state in the last 15 min — the webhook-failures alert,
+    MAP-231) and maplekey_scheduler_last_tick_timestamp
 
 Metrics are served on SCHEDULER_METRICS_PORT (default 9103) for the
 'scheduler' Prometheus job; the webhook-unresolved alert fires on the gauge
@@ -28,18 +30,26 @@ from django.utils import timezone
 from prometheus_client import Gauge, start_http_server
 
 from billing.models import HelcimWebhookEvent
-from billing.services.webhook_processing import RETRYABLE_STATES
+from billing.services.webhook_processing import ALERT_STATES, RETRYABLE_STATES
 
 logger = logging.getLogger(__name__)
 
 RETRY_INTERVAL = timedelta(minutes=15)
 SYNC_HOUR_UTC = 3
 UNRESOLVED_AFTER = timedelta(hours=1)
+ALERT_WINDOW = timedelta(minutes=15)
 TICK_SLEEP_SECONDS = 60
 
 webhook_events_unresolved_1h = Gauge(
     'maplekey_webhook_events_unresolved_1h',
     'Helcim webhook events still in a retryable state more than 1h after receipt',
+)
+# Counted from the DB, not from the per-process webhook counter: one event
+# must be enough to alert, and the API's gunicorn workers each keep their
+# own counter (MAP-231).
+webhook_events_failed_15m = Gauge(
+    'maplekey_webhook_events_failed_15m',
+    'Helcim webhook events that landed in an alert state in the last 15 min',
 )
 scheduler_last_tick_timestamp = Gauge(
     'maplekey_scheduler_last_tick_timestamp',
@@ -48,7 +58,7 @@ scheduler_last_tick_timestamp = Gauge(
 
 
 class Command(BaseCommand):
-    help = 'Run retry_webhook_events every 15 min and sync_helcim_payments daily; export the unresolved gauge.'
+    help = 'Run retry_webhook_events every 15 min and sync_helcim_payments daily; export the webhook gauges.'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -101,6 +111,10 @@ class Command(BaseCommand):
             received_at__lt=now - UNRESOLVED_AFTER,
         ).count()
         webhook_events_unresolved_1h.set(unresolved)
+        webhook_events_failed_15m.set(HelcimWebhookEvent.objects.filter(
+            processing_status__in=ALERT_STATES,
+            processed_at__gte=now - ALERT_WINDOW,
+        ).count())
         scheduler_last_tick_timestamp.set(now.timestamp())
         if unresolved:
             logger.warning('%s webhook event(s) unresolved for more than 1h', unresolved)
