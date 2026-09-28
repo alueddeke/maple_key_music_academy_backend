@@ -752,8 +752,8 @@ def test_replacement_create_unconfirmed_when_lookup_also_fails(
     assert invoice.lessons.count() == 2
 
 
-def _failed_cancel_invoice(student, school):
-    return PreBillingInvoice.objects.create(
+def _failed_cancel_invoice(student, school, **overrides):
+    fields = dict(
         student=student,
         school=school,
         status='adjusted',
@@ -767,9 +767,11 @@ def _failed_cancel_invoice(student, school):
         cancel_outcome='failed',
         revision=1,
     )
+    fields.update(overrides)
+    return PreBillingInvoice.objects.create(**fields)
 
 
-def _admin_retry_cancel(school, invoice):
+def _admin_retry_cancel(school, *invoices):
     from django.test import Client
     staff = User.objects.create_superuser(
         email='staff@prebilling.test', password='testpass123',
@@ -779,7 +781,7 @@ def _admin_retry_cancel(school, invoice):
     client.force_login(staff)
     return client.post(
         reverse('admin:billing_prebillinginvoice_changelist'),
-        {'action': 'retry_cancel', '_selected_action': [invoice.id]},
+        {'action': 'retry_cancel', '_selected_action': [inv.id for inv in invoices]},
     )
 
 
@@ -815,6 +817,72 @@ def test_admin_retry_cancel_keeps_failed_when_provider_rejects(school, student_w
     mock_put.assert_called_once()
     invoice.refresh_from_db()
     assert invoice.cancel_outcome == 'failed'
+
+
+@pytest.mark.django_db
+def test_admin_retry_cancel_voids_pending_row(school, student_with_contact):
+    """MAP-205: a row stuck at 'pending' (crash between persist and void) is re-voided → done."""
+    student, _ = student_with_contact
+    invoice = _failed_cancel_invoice(student, school, cancel_outcome='pending')
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put:
+        mock_put.return_value = _helcim_cancel_invoice_ok()
+        response = _admin_retry_cancel(school, invoice)
+
+    assert response.status_code == 302
+    mock_put.assert_called_once()
+    assert mock_put.call_args.args[0].endswith(f'/invoices/{invoice.previous_helcim_invoice_id}')
+    invoice.refresh_from_db()
+    assert invoice.cancel_outcome == 'done'
+    assert invoice.helcim_invoice_id == 'inv_new_789'
+
+
+@pytest.mark.django_db
+def test_admin_retry_cancel_pending_row_rejected_moves_to_failed(school, student_with_contact):
+    """MAP-205: a rejected retry of a 'pending' row ends 'failed', never stays 'pending'."""
+    student, _ = student_with_contact
+    invoice = _failed_cancel_invoice(student, school, cancel_outcome='pending')
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put:
+        mock_put.return_value = _helcim_cancel_invoice_fail()
+        response = _admin_retry_cancel(school, invoice)
+
+    assert response.status_code == 302
+    mock_put.assert_called_once()
+    invoice.refresh_from_db()
+    assert invoice.cancel_outcome == 'failed'
+    assert invoice.helcim_invoice_id == 'inv_new_789'
+
+
+@pytest.mark.django_db
+def test_admin_retry_cancel_skips_none_and_done_rows(school, student_with_contact):
+    """MAP-205: rows at 'none' or 'done' make no provider call and are counted as skipped."""
+    from django.contrib.messages import get_messages
+
+    student, _ = student_with_contact
+    never_adjusted = _failed_cancel_invoice(
+        student, school,
+        status='sent', revision=0, cancel_outcome='none',
+        previous_helcim_invoice_id='', previous_helcim_invoice_number='',
+        period_start=date(2026, 7, 1), period_end=date(2026, 7, 31),
+    )
+    already_voided = _failed_cancel_invoice(
+        student, school, cancel_outcome='done',
+        period_start=date(2026, 8, 1), period_end=date(2026, 8, 31),
+    )
+
+    with patch('billing.services.helcim_client.requests.put') as mock_put:
+        response = _admin_retry_cancel(school, never_adjusted, already_voided)
+
+    assert response.status_code == 302
+    mock_put.assert_not_called()
+    never_adjusted.refresh_from_db()
+    already_voided.refresh_from_db()
+    assert never_adjusted.cancel_outcome == 'none'
+    assert already_voided.cancel_outcome == 'done'
+    messages = [str(m) for m in get_messages(response.wsgi_request)]
+    assert len(messages) == 1
+    assert '0 previous invoice(s) voided, 0 still failed, 2 skipped' in messages[0]
 
 
 # ---------------------------------------------------------------------------
