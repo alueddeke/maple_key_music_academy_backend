@@ -3,6 +3,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
+from teacher_profiles.instruments import instrument_names
 import logging
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def user_profile(request):
             'phone_number': request.user.phone_number,
             'address': request.user.address,
             'bio': getattr(request.user, 'bio', ''),
-            'instruments': getattr(request.user, 'instruments', ''),
+            'instruments': instrument_names(request.user),
             'hourly_rate': getattr(request.user, 'hourly_rate', None),
         }
     })
