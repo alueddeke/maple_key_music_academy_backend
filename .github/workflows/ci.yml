@@ -82,3 +82,20 @@ jobs:
           HELCIM_WEBHOOK_SECRET: dGVzdC1zZWNyZXQ=
           HELCIM_SUBDOMAIN: citest
         run: pytest tests/
+
+  pip-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.10.1
+
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt
