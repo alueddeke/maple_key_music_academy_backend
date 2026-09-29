@@ -168,3 +168,29 @@ jobs:
             echo "::error::Unapplied migrations remain after a full migrate."
             exit 1
           }
+
+  # MAP-247: duplication/complexity report at warn (measure rung, STANDARDS
+  # enforcement ladder). --exit-zero: prints the report, never fails the PR.
+  # pylint is installed here, not in requirements.txt (that file builds the
+  # production image). Seeds + tests are excluded (owner ruling 2026-09-29).
+  complexity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pylint
+        run: pip install pylint==4.0.10
+
+      - name: Duplication/complexity report (warn)
+        run: >-
+          pylint --disable=all
+          --enable=duplicate-code,too-many-branches,too-many-statements
+          --ignore=migrations,tests,seed_realistic.py,seed_billing_test.py
+          --exit-zero
+          analytics billing custom_auth maple_key_backend notifications teacher_profiles
