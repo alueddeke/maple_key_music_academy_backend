@@ -118,6 +118,12 @@ class SchoolSettings(models.Model):
     # Payment terms for Helcim CSV export
     payment_terms = models.CharField(max_length=50, default="Due in 15 days", help_text="Default payment terms for student invoices")
     management_notification_email = models.EmailField(blank=True, help_text="Email for management notifications (future use)")
+    # Where parents' replies to an invoice email go (MAP-222). Blank = no
+    # Reply-To header, so replies reach settings.INVOICE_EMAIL_ADDRESS.
+    invoice_reply_to_email = models.EmailField(
+        blank=True,
+        help_text="Reply-To for parent invoice emails; blank = replies go to the sending address",
+    )
 
     # Waived-cancellation policy (MAP-101): cap free (waived) cancellations per
     # period; past the cap a teacher's "waived" is recorded as forfeited
