@@ -51,12 +51,11 @@ docker compose exec api pytest tests/ -k "test_name"      # single test
 
 ---
 
-## CI Gate (Phase 8)
+## CI Gate
 
-The `production` branch requires the "test" status check to pass before merging.
+| Workflow | Runs on | Jobs |
+|---|---|---|
+| `.github/workflows/ci.yml` | PRs → `develop` | `test` (check-no-fallbacks, `makemigrations --check`, `pytest tests/` on Postgres) · `pip-audit` · `migrate-from-empty` (full `migrate` + `migrate --check` on an empty Postgres) |
+| `.github/workflows/deploy.yml` | PRs → `production`, pushes to `production`, manual dispatch | `test` · `pip-audit` · `build_and_push` (needs both; push/dispatch only) · `deploy` (push/dispatch only) |
 
-- **Job name:** `test` (in `.github/workflows/deploy.yml`)
-- **What it does:** Runs `pytest tests/` with a PostgreSQL service container
-- **Branch protection:** Configured manually in GitHub Settings → Branches → `production` rule
-
-If branch protection is not yet configured, see `maple_key_music_academy_docker/CLAUDE.md → Branch Protection Setup`.
+Required on `production` (both apply): classic branch protection `["test", "pip-audit"]` + the "Production" repository ruleset `["test"]`. `develop` is unprotected — a red check does not block the merge; don't merge red. Changing required contexts is an owner action.
