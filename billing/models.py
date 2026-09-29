@@ -183,6 +183,22 @@ class User(AbstractUser):
         ('teacher', 'Teacher'), 
         ('student', 'Student'),
     ]
+    # Canadian province/territory codes for the structured address (MAP-259).
+    PROVINCES = [
+        ('AB', 'Alberta'),
+        ('BC', 'British Columbia'),
+        ('MB', 'Manitoba'),
+        ('NB', 'New Brunswick'),
+        ('NL', 'Newfoundland and Labrador'),
+        ('NS', 'Nova Scotia'),
+        ('NT', 'Northwest Territories'),
+        ('NU', 'Nunavut'),
+        ('ON', 'Ontario'),
+        ('PE', 'Prince Edward Island'),
+        ('QC', 'Quebec'),
+        ('SK', 'Saskatchewan'),
+        ('YT', 'Yukon'),
+    ]
 
     school = models.ForeignKey(
         School,
@@ -196,6 +212,13 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15, blank=True)
     address = models.TextField(blank=True)
+    # Structured address (MAP-259): names and lengths as School /
+    # BillableContact. Blank = not entered; there is no default province.
+    # postal_code is stored normalized (A1A 1A1) by the teacher serializer.
+    street_address = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    province = models.CharField(max_length=2, choices=PROVINCES, blank=True)
+    postal_code = models.CharField(max_length=7, blank=True)
 
     # Remove the username field since we're using email
     username = None
