@@ -24,7 +24,7 @@ django-prometheus==2.3.1
 psutil==6.1.1  # Required for health_check.contrib.psutil (CPU, memory, disk metrics)
 
 # Testing dependencies
-pytest==8.3.4
+pytest==9.1.1
 pytest-django==4.9.0
 pytest-cov==6.0.0
 factory-boy==3.3.1
