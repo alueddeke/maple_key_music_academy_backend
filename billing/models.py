@@ -73,6 +73,7 @@ class School(models.Model):
         max_length=255, blank=True,
         help_text="Base64 webhook verifier token. Blank = use HELCIM_WEBHOOK_SECRET env setting.",
     )
+    map164_drill_flag = models.BooleanField(default=False)  # DRILL ONLY, never merged
     helcim_last_synced_at = models.DateTimeField(
         null=True, blank=True,
         help_text=(
