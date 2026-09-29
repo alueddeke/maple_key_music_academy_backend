@@ -1112,3 +1112,64 @@ class TestDerivedInstruments:
         assert sorted(rows.instruments.values_list('instrument', flat=True)) == ['Cello', 'Violin']
         teacher_user.refresh_from_db()
         assert teacher_user.first_name == 'Renamed'
+
+
+@pytest.mark.django_db
+class TestApprovedEmailCreateResponse:
+    """MAP-255: the approved-email create response never carries the raw
+    invitation token — the invitation email is its only delivery channel."""
+
+    EXPECTED_KEYS = {
+        'id', 'email', 'user_type', 'user_type_display', 'approved_by',
+        'approved_by_name', 'approved_at', 'notes',
+        'invitation_sent', 'invitation_message',
+    }
+
+    def _create(self, client, email):
+        return client.post(
+            reverse('approved_email_list'),
+            {'email': email, 'user_type': 'teacher', 'notes': ''},
+            format='json',
+        )
+
+    def test_create_omits_invitation_token_and_emails_the_link(
+        self, authenticated_management_client
+    ):
+        from django.conf import settings
+        from django.core import mail
+        from billing.models import InvitationToken
+
+        email = 'invitee@example.com'
+        response = self._create(authenticated_management_client, email)
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert set(response.data) == self.EXPECTED_KEYS
+        assert response.data['invitation_sent'] is True
+
+        invitation = InvitationToken.objects.get(email=email)
+        assert invitation.token not in response.content.decode()
+
+        assert len(mail.outbox) == 1
+        assert mail.outbox[0].to == [email]
+        assert f'{settings.FRONTEND_URL}/invite/{invitation.token}' in mail.outbox[0].body
+
+    def test_email_failure_still_omits_invitation_token(
+        self, authenticated_management_client
+    ):
+        import smtplib
+        from unittest.mock import patch
+        from billing.models import InvitationToken
+
+        email = 'unreachable@example.com'
+        with patch(
+            'billing.invitation_utils.send_mail',
+            side_effect=smtplib.SMTPException('relay down'),
+        ):
+            response = self._create(authenticated_management_client, email)
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert set(response.data) == self.EXPECTED_KEYS
+        assert response.data['invitation_sent'] is False
+
+        invitation = InvitationToken.objects.get(email=email)
+        assert invitation.token not in response.content.decode()
