@@ -681,7 +681,7 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     email_result, email_message = PreBillingEmailService.send_payment_request(
         contact.email,
         contact.student.get_full_name(),
-        school.name,
+        school,
         period_label,
         invoice.amount,
         lesson_dates,
@@ -764,7 +764,7 @@ def management_pre_billing_resend_email(request, invoice_id):
     email_result, email_message = PreBillingEmailService.send_payment_request(
         contact.email,
         contact.student.get_full_name(),
-        invoice.school.name,
+        invoice.school,
         invoice.period_start.strftime('%B %Y'),
         invoice.amount,
         lesson_dates,

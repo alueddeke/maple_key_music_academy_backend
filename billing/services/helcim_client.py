@@ -257,16 +257,16 @@ class HelcimClient:
 
         The Helcim OpenAPI schema for PUT /v2/invoices/{invoiceId} lists `currency`
         and `lineItems` as required fields (Pitfall 7 / Assumption A1 in 19-RESEARCH.md).
-        This method accepts them defensively: if Helcim requires them even for
-        cancellation, pass the original invoice's currency and line items.
-        If the sandbox later confirms that `{'status': 'CANCELLED'}` alone works,
-        the extra fields are harmless and can be dropped.
+        Confirmed on the test account 2026-09-29 (MAP-207): `{'status': 'CANCELLED',
+        'currency': 'CAD'}` without `lineItems` returns 200 and the invoice reads
+        CANCELLED afterwards, so the admin retry's id-only call is valid. Passing
+        the original line items (the lesson-removal flow) is also accepted.
 
         Args:
             invoice_id: Helcim invoice ID string
             currency:   ISO 4217 currency code, default 'CAD'
             line_items: list of dicts with keys 'description', 'quantity', 'price';
-                        if None, only status is sent (may be rejected by Helcim)
+                        if None, only status + currency are sent (accepted, MAP-207)
 
         Returns:
             dict with updated invoice fields

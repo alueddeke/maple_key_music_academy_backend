@@ -1,3 +1,5 @@
+from email.utils import formataddr
+
 from django.core.mail import EmailMessage
 from django.conf import settings
 import logging
@@ -123,7 +125,7 @@ class PreBillingEmailService:
     def send_payment_request(
         contact_email: str,
         contact_name: str,
-        school_name: str,
+        school,
         period_label: str,
         amount,
         lesson_dates: list,
@@ -132,10 +134,14 @@ class PreBillingEmailService:
         """
         Send a payment-request email to a billing contact.
 
+        Sent from "<school name>" <settings.INVOICE_EMAIL_ADDRESS> (MAP-222).
+        Reply-To is the school's SchoolSettings.invoice_reply_to_email when
+        set; otherwise no Reply-To, so replies reach the sending address.
+
         Args:
             contact_email: recipient email address (from BillableContact.email)
             contact_name: recipient full name (e.g. "Jane Smith")
-            school_name: school display name (e.g. "Maple Key Music Academy")
+            school: the School the invoice belongs to (name + reply-to setting)
             period_label: human-readable billing period (e.g. "June 2026")
             amount: Decimal invoice amount
             lesson_dates: list of date objects or strings for the lesson schedule
@@ -145,8 +151,17 @@ class PreBillingEmailService:
             tuple[bool, str] — (True, 'Email sent successfully') on success,
             (False, 'Failed to send email: {error}') on failure.
         """
+        from ..models import SchoolSettings
+
+        school_name = school.name
         try:
-            subject = f"Invoice for {period_label} — {school_name}"
+            reply_to_address = (
+                SchoolSettings.objects
+                .filter(school=school)
+                .values_list('invoice_reply_to_email', flat=True)
+                .first()
+            )
+            subject = f"{school_name} — invoice for {period_label}"
             body = (
                 f"Dear {contact_name},\n\n"
                 f"Please find your invoice for {period_label} below.\n\n"
@@ -159,8 +174,9 @@ class PreBillingEmailService:
             email = EmailMessage(
                 subject=subject,
                 body=body,
-                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@maplekey.com'),
+                from_email=formataddr((school_name, settings.INVOICE_EMAIL_ADDRESS)),
                 to=[contact_email],
+                reply_to=[reply_to_address] if reply_to_address else None,
             )
             email.send()
             logger.info('Pre-billing email sent to %s for %s', contact_email, period_label)
