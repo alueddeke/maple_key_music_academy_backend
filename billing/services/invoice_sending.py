@@ -375,7 +375,7 @@ def send_single_invoice(invoice, school):
     email_result, email_message = PreBillingEmailService.send_payment_request(
         contact.email,
         contact.student.get_full_name(),
-        school.name,
+        school,
         period_label,
         invoice.amount,
         lesson_dates,

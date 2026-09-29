@@ -352,6 +352,10 @@ EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='resend')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@maplekey.com')
+# Parent invoice emails (MAP-222) are sent from this address on the
+# Resend-verified domain; replies go to SchoolSettings.invoice_reply_to_email
+# when set. Other mail keeps DEFAULT_FROM_EMAIL.
+INVOICE_EMAIL_ADDRESS = 'billing@maplekeymusic.com'
 TEST_EMAIL_RECIPIENT = config('TEST_EMAIL_RECIPIENT', default='antonilueddeke@gmail.com')
 
 # --- Helcim (Phase 18) ---
