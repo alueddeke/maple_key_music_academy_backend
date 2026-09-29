@@ -136,6 +136,21 @@ class UserSerializer(serializers.ModelSerializer):
         return []
 
 
+class TeacherUpdateSerializer(UserSerializer):
+    """Management PUT on a teacher. The writable set is UserSerializer's plus
+    the structured address (MAP-259), added by name. Students stay on
+    UserSerializer, so they gain no writable field."""
+
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + [
+            'street_address', 'city', 'province', 'postal_code',
+        ]
+
+    def validate_postal_code(self, value):
+        # Blank = not entered; anything else must be a valid postal code.
+        return normalize_postal_code(value) if value else value
+
+
 class LessonSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
@@ -635,6 +650,7 @@ class TeacherListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name', 'hourly_rate',
             'online_hourly_rate', 'instruments', 'is_approved',
+            'street_address', 'city', 'province', 'postal_code',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings'
         ]
@@ -695,6 +711,7 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'phone_number', 'address',
+            'street_address', 'city', 'province', 'postal_code',
             'hourly_rate', 'online_hourly_rate', 'bio', 'instruments', 'is_approved',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings',

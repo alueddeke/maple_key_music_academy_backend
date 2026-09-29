@@ -12,7 +12,7 @@ from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
-    BatchRejectionSnapshotSerializer
+    BatchRejectionSnapshotSerializer, TeacherUpdateSerializer
 )
 from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
@@ -1055,7 +1055,7 @@ def management_update_teacher(request, pk):
     apply_to_schedules = request.data.get('apply_to_schedules', False)
     old_rate = teacher.hourly_rate
 
-    serializer = UserSerializer(teacher, data=request.data, partial=True)
+    serializer = TeacherUpdateSerializer(teacher, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
 
