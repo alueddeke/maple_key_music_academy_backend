@@ -6,14 +6,14 @@ django-cors-headers==4.7.0
 djangorestframework==3.18.1
 djangorestframework_simplejwt==5.5.1
 django-simple-history==3.7.0
-idna==3.10
+idna==3.20
 PyJWT==2.15.1
 python-decouple==3.8
 psycopg2-binary==2.9.9
 reportlab==4.2.5
-requests==2.32.5
+requests==2.34.2
 sqlparse==0.6.0
-urllib3==2.5.0
+urllib3==2.8.0
 gunicorn
 resend
 python-json-logger==2.0.7
