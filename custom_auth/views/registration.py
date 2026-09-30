@@ -11,6 +11,20 @@ from custom_auth.throttling import RegistrationThrottle
 
 logger = logging.getLogger(__name__)
 
+SUBMITTED_MESSAGE = 'Registration request submitted successfully'
+SUBMITTED_DETAILS = (
+    'Your request is pending management approval. '
+    'You will receive an invitation email once approved.'
+)
+
+
+def _submitted_response(email):
+    return Response({
+        'message': SUBMITTED_MESSAGE,
+        'details': SUBMITTED_DETAILS,
+        'email': email,
+    }, status=status.HTTP_202_ACCEPTED)
+
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -30,9 +44,10 @@ def register_with_email(request):
         "user_type": "teacher"  # or "student"
     }
 
-    Returns:
+    Returns 202:
     {
-        "message": "Registration request submitted. Pending management approval.",
+        "message": "Registration request submitted successfully",
+        "details": "Your request is pending management approval. ...",
         "email": "user@example.com"
     }
     """
@@ -40,21 +55,21 @@ def register_with_email(request):
 
     User = get_user_model()
 
-    # Bot filter: the frontend renders a hidden "website" field humans never
-    # fill. A value here means an automated submitter — answer with the same
-    # generic 202 so the bot learns nothing, and store nothing.
-    if request.data.get('website'):
-        logger.warning('Registration honeypot tripped from %s', request.META.get('REMOTE_ADDR'))
-        return Response({
-            'message': 'Registration request submitted successfully',
-        }, status=status.HTTP_202_ACCEPTED)
-
     # Get data from request
     email = request.data.get('email', '').strip().lower()
     first_name = request.data.get('first_name', '').strip()
     last_name = request.data.get('last_name', '').strip()
     user_type = request.data.get('user_type', 'teacher')  # Default to teacher
     school_id = request.data.get('school_id')
+
+    # Bot filter: the frontend renders a hidden "website" field humans never
+    # fill. A value here means an automated submitter — answer with the same
+    # 202 body as a real submission so the bot learns nothing, and store
+    # nothing. Checked after normalisation so both paths do the same work
+    # up to here.
+    if request.data.get('website'):
+        logger.warning('Registration honeypot tripped from %s', request.META.get('REMOTE_ADDR'))
+        return _submitted_response(email)
 
     school = None
     if school_id:
@@ -132,8 +147,4 @@ def register_with_email(request):
                 school=school,
             )
 
-            return Response({
-                'message': 'Registration request submitted successfully',
-                'details': 'Your request is pending management approval. You will receive an invitation email once approved.',
-                'email': email
-            }, status=status.HTTP_202_ACCEPTED)
+            return _submitted_response(email)
