@@ -161,7 +161,13 @@ class LessonSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lesson
-        fields = '__all__'
+        fields = [
+            'id', 'teacher_name', 'student_name', 'school_name', 'total_cost', 'student_cost',
+            'is_first_lesson', 'lesson_type', 'is_trial', 'teacher_rate', 'student_rate',
+            'scheduled_date', 'completed_date', 'duration', 'status', 'cancellation_reason',
+            'teacher_notes', 'student_notes', 'created_at', 'updated_at', 'school', 'teacher',
+            'student', 'recurring_schedule',
+        ]
 
     def get_is_first_lesson(self, obj):
         """Check if this is the student's first lesson (for UI display)"""
