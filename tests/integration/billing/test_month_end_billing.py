@@ -15,6 +15,8 @@ implementation. They MUST fail now (NoReverseMatch or assertion failure); that i
 expected RED state.
 """
 
+import re
+
 import pytest
 from decimal import Decimal
 from datetime import date, time, timedelta
@@ -274,6 +276,38 @@ class TestGenerateTeacherInvoiceEndpoint:
         # batch.invoice linked
         batch.refresh_from_db()
         assert batch.invoice_id == invoice.id
+
+    def test_generate_returns_stored_total_as_2dp_string(
+        self, management_client, teacher_user, student_user, school, school_settings
+    ):
+        """MAP-250: total_amount on the wire is the stored 2dp value, and equals the batch total.
+
+        Two items whose teacher pay sums to a half cent: the raw in-memory sum has 4 dp,
+        the stored invoice column has 2.
+        """
+        batch = _make_approved_batch(teacher_user, school)
+        for day in (1, 8):
+            _make_item(batch, student_user, scheduled_date=date(2026, 6, day),
+                       teacher_rate=Decimal('45.55'), duration=Decimal('0.75'))
+        raw_total = sum(i.calculate_teacher_payment() for i in batch.lesson_items.all())
+        assert raw_total != raw_total.quantize(Decimal('0.01'))  # precondition: sub-cent
+
+        response = management_client.post(
+            reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id}),
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        wire_total = response.json()['total_amount']
+        assert isinstance(wire_total, str)
+        assert re.match(r'^(?:0|[1-9]\d{0,7})\.\d{2}$', wire_total)
+        stored = Invoice.objects.get(pk=response.json()['invoice_id'])
+        assert wire_total == str(stored.total_amount)
+
+        batch_total = management_client.get(
+            reverse('management_batch_detail', kwargs={'batch_id': batch.id})
+        ).json()['total_teacher_payment']
+        assert batch_total == wire_total
 
     def test_generate_writes_waived_credit_transactions(
         self, management_client, teacher_user, student_user, school, school_settings, management_user

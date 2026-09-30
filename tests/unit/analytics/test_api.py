@@ -1,9 +1,11 @@
 """Endpoint + permission tests for analytics views."""
 
+import re
 from decimal import Decimal
 
 import pytest
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 
 from analytics.models import (
@@ -13,6 +15,10 @@ from analytics.models import (
     StudentExitRecord,
 )
 from billing.models import SchoolExpenseItem
+
+# MAP-250: the frontend's MoneyStringSchema / SignedMoneyStringSchema (ZOD-DISCOVERY §3).
+MONEY_RE = re.compile(r'^(?:0|[1-9]\d{0,7})\.\d{2}$')
+SIGNED_MONEY_RE = re.compile(r'^-?(?:0|[1-9]\d{0,7})\.\d{2}$')
 
 
 @pytest.mark.django_db
@@ -48,6 +54,65 @@ class TestOverviewEndpoint:
             status.HTTP_401_UNAUTHORIZED,
             status.HTTP_403_FORBIDDEN,
         )
+
+
+@pytest.mark.django_db
+class TestOverviewWireFormat:
+    """MAP-250: money is a 2dp decimal string (zero included), counts are JSON integers.
+
+    Assertions read the rendered body (response.json()), which is what the browser parses.
+    """
+
+    MONEY_KEYS = ('mrr', 'billed_revenue', 'expenses', 'teacher_pay', 'gross_margin')
+
+    def test_month_row_money_is_2dp_string_including_zero(self, management_client):
+        body = management_client.get(reverse('analytics_overview')).json()
+
+        for row in body['months']:
+            for key in self.MONEY_KEYS:
+                assert row[key] == '0.00', (row['period'], key, row[key])
+        assert body['current']['overdue_invoices']['amount'] == '0.00'
+
+    def test_gross_margin_negative_is_signed_2dp_string(self, management_client, school):
+        today = timezone.localdate()
+        expense = SchoolExpenseItem.objects.create(
+            school=school,
+            period_start=today.replace(day=1),
+            period_end=today,
+            title='Rent',
+            amount=Decimal('937.50'),
+        )
+
+        latest = management_client.get(reverse('analytics_overview')).json()['months'][-1]
+
+        assert latest['expenses'] == str(expense.amount)
+        assert SIGNED_MONEY_RE.match(latest['gross_margin'])
+        assert Decimal(latest['gross_margin']) == -expense.amount
+
+    def test_goal_current_value_follows_metric_kind(
+        self, management_client, school, active_schedule, student_user
+    ):
+        for metric in ('mrr', 'gross_margin', 'active_students', 'new_enrollments',
+                       'trial_conversion'):
+            MetricGoal.objects.create(school=school, metric=metric, target=Decimal('10.00'))
+
+        body = management_client.get(reverse('analytics_overview')).json()
+        goals = {g['metric']: g['current_value'] for g in body['goals']}
+
+        # money → 2dp string, equal to the metric it resolves from
+        assert goals['mrr'] == body['current']['mrr']
+        assert goals['gross_margin'] == body['months'][-1]['gross_margin']
+        for metric in ('mrr', 'gross_margin'):
+            assert isinstance(goals[metric], str) and MONEY_RE.match(goals[metric])
+        # count → JSON integer
+        assert goals['active_students'] == body['current']['active_students']
+        assert goals['new_enrollments'] == body['months'][-1]['new_enrollments']
+        for metric in ('active_students', 'new_enrollments'):
+            assert type(goals[metric]) is int
+        # percentage → JSON number, same value as the metric it resolves from
+        assert body['current']['trial_conversion_rate'] is not None
+        assert goals['trial_conversion'] == body['current']['trial_conversion_rate']
+        assert isinstance(goals['trial_conversion'], float)
 
 
 @pytest.mark.django_db
