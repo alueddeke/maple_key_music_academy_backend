@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 
 from rest_framework import serializers
@@ -14,6 +15,18 @@ from .models import (
 )
 
 User = get_user_model()
+
+
+def normalize_postal_code(value):
+    """Canadian postal code -> stored form A1A 1A1 (uppercase, one space)."""
+    # Remove spaces and convert to uppercase
+    cleaned = value.replace(' ', '').upper()
+    # Canadian postal code pattern: A1A 1A1 (letter-digit-letter digit-letter-digit)
+    if not re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', cleaned):
+        raise serializers.ValidationError("Invalid Canadian postal code format (e.g., M5H 2N2)")
+    return f"{cleaned[:3]} {cleaned[3:]}"
+
+
 class BillableContactSerializer(serializers.ModelSerializer):
     """Serializer for billable contact information"""
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
@@ -123,6 +136,21 @@ class UserSerializer(serializers.ModelSerializer):
         return []
 
 
+class TeacherUpdateSerializer(UserSerializer):
+    """Management PUT on a teacher. The writable set is UserSerializer's plus
+    the structured address (MAP-259), added by name. Students stay on
+    UserSerializer, so they gain no writable field."""
+
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + [
+            'street_address', 'city', 'province', 'postal_code',
+        ]
+
+    def validate_postal_code(self, value):
+        # Blank = not entered; anything else must be a valid postal code.
+        return normalize_postal_code(value) if value else value
+
+
 class LessonSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
@@ -154,11 +182,11 @@ class LessonSerializer(serializers.ModelSerializer):
         return data
 
 class InvoiceSerializer(serializers.ModelSerializer):
-    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
-    student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True, allow_null=True, default=None)
+    student_name = serializers.CharField(source='student.get_full_name', read_only=True, allow_null=True, default=None)
     school_name = serializers.CharField(source='school.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = Invoice
@@ -312,18 +340,20 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_teacher_payment(self, obj):
-        from decimal import Decimal
-        return sum(
+        from decimal import Decimal, ROUND_HALF_UP
+        total = sum(
             item.calculate_teacher_payment()
             for item in obj.lesson_items.all()
         ) or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
     def get_total_student_charges(self, obj):
-        from decimal import Decimal
-        return sum(
+        from decimal import Decimal, ROUND_HALF_UP
+        total = sum(
             item.calculate_student_charge()
             for item in obj.lesson_items.all()
         ) or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
     def get_lesson_count(self, obj):
         return obj.lesson_items.filter(status='completed').count()
@@ -420,7 +450,7 @@ class ApprovedEmailSerializer(serializers.ModelSerializer):
 
 
 class UserRegistrationRequestSerializer(serializers.ModelSerializer):
-    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True, allow_null=True, default=None)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
@@ -474,12 +504,12 @@ class DetailedUserSerializer(serializers.ModelSerializer):
 
 class DetailedInvoiceSerializer(serializers.ModelSerializer):
     """Detailed invoice serializer for management with nested lessons"""
-    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
-    student_name = serializers.CharField(source='student.get_full_name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
-    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
-    last_edited_by_name = serializers.CharField(source='last_edited_by.get_full_name', read_only=True)
+    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True, allow_null=True, default=None)
+    student_name = serializers.CharField(source='student.get_full_name', read_only=True, allow_null=True, default=None)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True, default=None)
+    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True, allow_null=True, default=None)
+    last_edited_by_name = serializers.CharField(source='last_edited_by.get_full_name', read_only=True, allow_null=True, default=None)
     lessons = LessonSerializer(many=True, read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
@@ -495,7 +525,7 @@ class DetailedInvoiceSerializer(serializers.ModelSerializer):
 
 class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
     """Serializer for invoice recipient emails"""
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
     school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
@@ -508,7 +538,7 @@ class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
 
 class GlobalRateSettingsSerializer(serializers.ModelSerializer):
     """Serializer for global rate settings (singleton) - DEPRECATED, use SchoolSettingsSerializer"""
-    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = GlobalRateSettings
@@ -581,18 +611,19 @@ class SchoolDetailSerializer(serializers.ModelSerializer):
 
     def get_invoice_total(self, obj):
         """Total invoiced amount for teacher payments"""
-        from decimal import Decimal
+        from decimal import Decimal, ROUND_HALF_UP
         total = Invoice.objects.filter(
             school=obj,
             invoice_type='teacher_payment',
             status__in=['approved', 'paid']
         ).aggregate(total=Sum('payment_balance'))['total']
-        return total or Decimal('0.00')
+        total = total or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 class SchoolSettingsSerializer(serializers.ModelSerializer):
     """Serializer for school-specific settings"""
-    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True, allow_null=True, default=None)
     school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
@@ -600,7 +631,6 @@ class SchoolSettingsSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'school', 'school_name',
             'online_teacher_rate', 'online_student_rate', 'inperson_student_rate',
-            'invoice_recipient_email',  # DEPRECATED field
             'invoice_reply_to_email',
             'updated_at', 'updated_by', 'updated_by_name'
         ]
@@ -622,6 +652,7 @@ class TeacherListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name', 'hourly_rate',
             'online_hourly_rate', 'instruments', 'is_approved',
+            'street_address', 'city', 'province', 'postal_code',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings'
         ]
@@ -655,13 +686,14 @@ class TeacherListSerializer(serializers.ModelSerializer):
 
     def get_total_earnings(self, obj):
         """Calculate total paid earnings (approved + paid invoices)"""
-        from decimal import Decimal
+        from decimal import Decimal, ROUND_HALF_UP
         total = Invoice.objects.filter(
             teacher=obj,
             invoice_type='teacher_payment',
             status__in=['approved', 'paid']
         ).aggregate(total=Sum('payment_balance'))['total']
-        return total or Decimal('0.00')
+        total = total or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 class TeacherDetailSerializer(serializers.ModelSerializer):
@@ -682,6 +714,7 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'phone_number', 'address',
+            'street_address', 'city', 'province', 'postal_code',
             'hourly_rate', 'online_hourly_rate', 'bio', 'instruments', 'is_approved',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings',
@@ -709,13 +742,14 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         ).count()
 
     def get_total_earnings(self, obj):
-        from decimal import Decimal
+        from decimal import Decimal, ROUND_HALF_UP
         total = Invoice.objects.filter(
             teacher=obj,
             invoice_type='teacher_payment',
             status__in=['approved', 'paid']
         ).aggregate(total=Sum('payment_balance'))['total']
-        return total or Decimal('0.00')
+        total = total or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
     def get_recent_lessons(self, obj):
         """Get 5 most recent completed lessons"""
@@ -776,15 +810,7 @@ class BillingContactInputSerializer(serializers.Serializer):
         return value.upper()
 
     def validate_postal_code(self, value):
-        """Basic validation for Canadian postal code format"""
-        import re
-        # Remove spaces and convert to uppercase
-        cleaned = value.replace(' ', '').upper()
-        # Canadian postal code pattern: A1A 1A1 (letter-digit-letter digit-letter-digit)
-        if not re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', cleaned):
-            raise serializers.ValidationError("Invalid Canadian postal code format (e.g., M5H 2N2)")
-        # Return formatted version with space: A1A 1A1
-        return f"{cleaned[:3]} {cleaned[3:]}"
+        return normalize_postal_code(value)
 
 
 class StudentCreateSerializer(serializers.Serializer):

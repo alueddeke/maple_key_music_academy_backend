@@ -8,18 +8,26 @@ Tests cover:
 - Rate locking mechanism (existing lessons unchanged)
 """
 
+import re
+from datetime import date, time
+from decimal import Decimal, ROUND_HALF_UP
+
 import pytest
-from decimal import Decimal
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
-from billing.models import GlobalRateSettings, Lesson, Invoice, MonthlyInvoiceBatch
+from billing.models import (
+    BatchLessonItem, GlobalRateSettings, Lesson, Invoice, MonthlyInvoiceBatch,
+)
 from django.contrib.auth import get_user_model
 from faker import Faker
 
 User = get_user_model()
+
+# MAP-250: the frontend's MoneyStringSchema (ZOD-DISCOVERY §3).
+MONEY_RE = re.compile(r'^(?:0|[1-9]\d{0,7})\.\d{2}$')
 
 
 @pytest.mark.django_db
@@ -223,6 +231,134 @@ class TestTeacherManagementAPI:
         response = authenticated_teacher_client.patch(url, data, format='json')
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestMoneyTotalsWireFormat:
+    """MAP-250: computed money totals reach the browser as 2dp decimal strings, never JSON numbers.
+
+    Assertions read the rendered body (response.json()), because response.data still
+    holds the Decimal objects that DRF's encoder would turn into floats.
+    """
+
+    def _cents(self, value):
+        # Postgres numeric(10,2) rounds half away from zero; the wire must agree with storage.
+        return value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def _batch_with_sub_cent_items(self, teacher, student):
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher, school=teacher.school, month=6, year=2026, status='submitted'
+        )
+        for day in (1, 8):
+            BatchLessonItem.objects.create(
+                batch=batch,
+                student=student,
+                scheduled_date=date(2026, 6, day),
+                start_time=time(10, 0),
+                duration=Decimal('0.75'),
+                lesson_type='online',
+                teacher_rate=Decimal('45.55'),
+                student_rate=Decimal('60.55'),
+                status='completed',
+            )
+        return batch
+
+    def _paid_invoice(self, teacher, amount, invoice_status):
+        return Invoice.objects.create(
+            invoice_type='teacher_payment',
+            teacher=teacher,
+            school=teacher.school,
+            status=invoice_status,
+            total_amount=amount,
+            payment_balance=amount,
+        )
+
+    def test_batch_detail_totals_are_2dp_strings(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        batch = self._batch_with_sub_cent_items(teacher_user, student_user)
+        items = list(batch.lesson_items.all())
+        teacher_total = sum(i.calculate_teacher_payment() for i in items)
+        student_total = sum(i.calculate_student_charge() for i in items)
+        # Precondition: the raw sums carry more than 2 decimal places.
+        assert teacher_total != self._cents(teacher_total)
+        assert student_total != self._cents(student_total)
+
+        response = authenticated_management_client.get(
+            reverse('management_batch_detail', args=[batch.id])
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        for key, raw in (
+            ('total_teacher_payment', teacher_total),
+            ('total_student_charges', student_total),
+        ):
+            assert isinstance(body[key], str)
+            assert MONEY_RE.match(body[key])
+            assert Decimal(body[key]) == self._cents(raw)
+
+    def test_empty_batch_totals_are_zero_strings(
+        self, authenticated_management_client, teacher_user
+    ):
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=teacher_user.school, month=6, year=2026, status='draft'
+        )
+
+        body = authenticated_management_client.get(
+            reverse('management_batch_detail', args=[batch.id])
+        ).json()
+
+        assert body['total_teacher_payment'] == '0.00'
+        assert body['total_student_charges'] == '0.00'
+
+    def test_teacher_list_total_earnings_is_2dp_string(
+        self, authenticated_management_client, teacher_user
+    ):
+        url = reverse('management_teacher_list')
+        before = next(
+            t for t in authenticated_management_client.get(url).json()
+            if t['id'] == teacher_user.id
+        )
+        assert before['total_earnings'] == '0.00'
+
+        approved = self._paid_invoice(teacher_user, Decimal('630.00'), 'approved')
+        paid = self._paid_invoice(teacher_user, Decimal('510.50'), 'paid')
+
+        after = next(
+            t for t in authenticated_management_client.get(url).json()
+            if t['id'] == teacher_user.id
+        )
+        assert isinstance(after['total_earnings'], str)
+        assert MONEY_RE.match(after['total_earnings'])
+        assert Decimal(after['total_earnings']) == approved.payment_balance + paid.payment_balance
+
+    def test_teacher_detail_total_earnings_is_2dp_string(
+        self, authenticated_management_client, teacher_user
+    ):
+        url = reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        assert authenticated_management_client.get(url).json()['total_earnings'] == '0.00'
+
+        invoice = self._paid_invoice(teacher_user, Decimal('1260.00'), 'approved')
+
+        body = authenticated_management_client.get(url).json()
+        assert isinstance(body['total_earnings'], str)
+        assert MONEY_RE.match(body['total_earnings'])
+        assert Decimal(body['total_earnings']) == invoice.payment_balance
+
+    def test_school_detail_invoice_total_is_2dp_string(
+        self, authenticated_management_client, teacher_user
+    ):
+        url = reverse('get_current_school')
+        assert authenticated_management_client.get(url).json()['invoice_total'] == '0.00'
+
+        approved = self._paid_invoice(teacher_user, Decimal('8000.00'), 'approved')
+        paid = self._paid_invoice(teacher_user, Decimal('762.50'), 'paid')
+
+        body = authenticated_management_client.get(url).json()
+        assert isinstance(body['invoice_total'], str)
+        assert MONEY_RE.match(body['invoice_total'])
+        assert Decimal(body['invoice_total']) == approved.payment_balance + paid.payment_balance
 
 
 @pytest.mark.django_db
@@ -483,6 +619,10 @@ class TestManagementPutsCannotEscalate:
                 return str(fake.pydecimal(left_digits=3, right_digits=2, positive=True))
             if field.name == 'phone_number':
                 return fake.numerify('###########')
+            if field.name == 'province':
+                return fake.random_element([code for code, _ in User.PROVINCES])
+            if field.name == 'postal_code':
+                return fake.bothify('?#? #?#', letters='ABCEGHJKLMNPRSTVXY')
             if field.name == 'school':
                 return second_school.id
             if field.name == 'assigned_teachers':
@@ -1112,3 +1252,176 @@ class TestDerivedInstruments:
         assert sorted(rows.instruments.values_list('instrument', flat=True)) == ['Cello', 'Violin']
         teacher_user.refresh_from_db()
         assert teacher_user.first_name == 'Renamed'
+
+
+# ---------------------------------------------------------------------------
+# MAP-259: teacher structured address (street_address, city, province,
+# postal_code) — written by the management teacher PUT, returned by the
+# teacher reads; the student PUT does not gain the fields.
+# ---------------------------------------------------------------------------
+
+ADDRESS_FIELDS = ('street_address', 'city', 'province', 'postal_code')
+
+
+def _address(user):
+    user.refresh_from_db()
+    return {name: getattr(user, name) for name in ADDRESS_FIELDS}
+
+
+@pytest.mark.django_db
+class TestTeacherStructuredAddress:
+
+    @staticmethod
+    def _put(client, route, user, payload):
+        return client.put(reverse(route, kwargs={'pk': user.id}), payload, format='json')
+
+    def test_put_teacher_address_is_stored_and_returned_by_every_teacher_read(
+        self, authenticated_management_client, teacher_user
+    ):
+        payload = {
+            'street_address': '1055 Canada Pl',
+            'city': 'Vancouver',
+            'province': 'BC',
+            'postal_code': 'v6c0c3',
+        }
+        stored = payload | {'postal_code': 'V6C 0C3'}
+
+        response = self._put(authenticated_management_client, 'management_update_teacher', teacher_user, payload)
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert {k: response.data[k] for k in ADDRESS_FIELDS} == stored
+        assert _address(teacher_user) == stored
+        assert {k: getattr(teacher_user.history.latest(), k) for k in ADDRESS_FIELDS} == stored
+
+        detail = authenticated_management_client.get(
+            reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        )
+        assert detail.status_code == status.HTTP_200_OK
+        assert {k: detail.data[k] for k in ADDRESS_FIELDS} == stored
+
+        listed = authenticated_management_client.get(reverse('management_teacher_list'))
+        row = next(t for t in listed.data if t['id'] == teacher_user.id)
+        assert {k: row[k] for k in ADDRESS_FIELDS} == stored
+
+    @pytest.mark.parametrize('field,value', [
+        ('province', 'ZZ'),
+        ('province', 'Ontario'),
+        ('postal_code', '12345'),
+        ('postal_code', 'M5H 2N'),
+        ('postal_code', 'MM5 H2N'),
+    ])
+    def test_invalid_province_or_postal_code_is_a_field_error(
+        self, authenticated_management_client, teacher_user, field, value
+    ):
+        before = _address(teacher_user)
+        payload = {'street_address': '1 Yonge St', 'city': 'Toronto', 'province': 'ON', 'postal_code': 'M5E 1W7'}
+
+        response = self._put(
+            authenticated_management_client, 'management_update_teacher', teacher_user, payload | {field: value}
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert set(response.data) == {field}
+        assert _address(teacher_user) == before
+
+    def test_blank_values_clear_the_address(self, authenticated_management_client, teacher_user):
+        User.objects.filter(pk=teacher_user.pk).update(
+            street_address='1 Yonge St', city='Toronto', province='ON', postal_code='M5E 1W7'
+        )
+
+        response = self._put(
+            authenticated_management_client, 'management_update_teacher', teacher_user,
+            {name: '' for name in ADDRESS_FIELDS},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _address(teacher_user) == {name: '' for name in ADDRESS_FIELDS}
+
+    def test_put_without_address_leaves_it_unchanged(self, authenticated_management_client, teacher_user):
+        User.objects.filter(pk=teacher_user.pk).update(
+            street_address='1 Yonge St', city='Toronto', province='ON', postal_code='M5E 1W7'
+        )
+        before = _address(teacher_user)
+
+        response = self._put(
+            authenticated_management_client, 'management_update_teacher', teacher_user, {'bio': 'New bio'}
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _address(teacher_user) == before
+        assert teacher_user.bio == 'New bio'
+
+    def test_student_put_does_not_write_or_return_the_address(
+        self, authenticated_management_client, student_user
+    ):
+        response = self._put(
+            authenticated_management_client, 'management_student_detail', student_user,
+            {'street_address': '1 Yonge St', 'city': 'Toronto', 'province': 'ON',
+             'postal_code': 'M5E 1W7', 'phone_number': '4165550199'},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _address(student_user) == {name: '' for name in ADDRESS_FIELDS}
+        assert student_user.phone_number == '4165550199'
+        assert not set(ADDRESS_FIELDS) & set(response.data)
+
+
+@pytest.mark.django_db
+class TestApprovedEmailCreateResponse:
+    """MAP-255: the approved-email create response never carries the raw
+    invitation token — the invitation email is its only delivery channel."""
+
+    EXPECTED_KEYS = {
+        'id', 'email', 'user_type', 'user_type_display', 'approved_by',
+        'approved_by_name', 'approved_at', 'notes',
+        'invitation_sent', 'invitation_message',
+    }
+
+    def _create(self, client, email):
+        return client.post(
+            reverse('approved_email_list'),
+            {'email': email, 'user_type': 'teacher', 'notes': ''},
+            format='json',
+        )
+
+    def test_create_omits_invitation_token_and_emails_the_link(
+        self, authenticated_management_client
+    ):
+        from django.conf import settings
+        from django.core import mail
+        from billing.models import InvitationToken
+
+        email = 'invitee@example.com'
+        response = self._create(authenticated_management_client, email)
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert set(response.data) == self.EXPECTED_KEYS
+        assert response.data['invitation_sent'] is True
+
+        invitation = InvitationToken.objects.get(email=email)
+        assert invitation.token not in response.content.decode()
+
+        assert len(mail.outbox) == 1
+        assert mail.outbox[0].to == [email]
+        assert f'{settings.FRONTEND_URL}/invite/{invitation.token}' in mail.outbox[0].body
+
+    def test_email_failure_still_omits_invitation_token(
+        self, authenticated_management_client
+    ):
+        import smtplib
+        from unittest.mock import patch
+        from billing.models import InvitationToken
+
+        email = 'unreachable@example.com'
+        with patch(
+            'billing.invitation_utils.send_mail',
+            side_effect=smtplib.SMTPException('relay down'),
+        ):
+            response = self._create(authenticated_management_client, email)
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert set(response.data) == self.EXPECTED_KEYS
+        assert response.data['invitation_sent'] is False
+
+        invitation = InvitationToken.objects.get(email=email)
+        assert invitation.token not in response.content.decode()

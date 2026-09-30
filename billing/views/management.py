@@ -12,7 +12,7 @@ from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
-    BatchRejectionSnapshotSerializer
+    BatchRejectionSnapshotSerializer, TeacherUpdateSerializer
 )
 from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
@@ -23,7 +23,7 @@ from custom_auth.decorators import (
 import logging
 import calendar
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from django.core.exceptions import ValidationError
 from django.core.validators import DecimalValidator
 
@@ -137,8 +137,6 @@ def approved_email_list(request):
             response_data = serializer.data
             response_data['invitation_sent'] = success
             response_data['invitation_message'] = message
-            if invitation:
-                response_data['invitation_token'] = invitation.token
 
             return Response(response_data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -153,7 +151,7 @@ def approved_email_delete(request, pk):
     try:
         approved_email = ApprovedEmail.objects.get(pk=pk, approved_by__school=request.user.school)
         approved_email.delete()
-        return Response({'message': 'Approved email deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
+        return Response(status=status.HTTP_204_NO_CONTENT)
     except ApprovedEmail.DoesNotExist:
         return Response({'error': 'Approved email not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1055,7 +1053,7 @@ def management_update_teacher(request, pk):
     apply_to_schedules = request.data.get('apply_to_schedules', False)
     old_rate = teacher.hourly_rate
 
-    serializer = UserSerializer(teacher, data=request.data, partial=True)
+    serializer = TeacherUpdateSerializer(teacher, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
 
@@ -1380,7 +1378,8 @@ def _generate_teacher_invoice_locked(request, batch_id, ledger, CreditTransactio
         'status': 'invoice_generated',
         'invoice_id': invoice.id,
         'invoice_number': invoice.invoice_number,
-        'total_amount': str(invoice.total_amount),
+        # 2dp as stored: Postgres numeric(10,2) rounds half away from zero.
+        'total_amount': str(invoice.total_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
         'waived_credits_written': len(waived_items),
         'forfeited_credits_written': forfeited_credits_written,
     })
