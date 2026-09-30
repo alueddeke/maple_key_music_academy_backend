@@ -619,6 +619,10 @@ class TestManagementPutsCannotEscalate:
                 return str(fake.pydecimal(left_digits=3, right_digits=2, positive=True))
             if field.name == 'phone_number':
                 return fake.numerify('###########')
+            if field.name == 'province':
+                return fake.random_element([code for code, _ in User.PROVINCES])
+            if field.name == 'postal_code':
+                return fake.bothify('?#? #?#', letters='ABCEGHJKLMNPRSTVXY')
             if field.name == 'school':
                 return second_school.id
             if field.name == 'assigned_teachers':
@@ -1248,6 +1252,118 @@ class TestDerivedInstruments:
         assert sorted(rows.instruments.values_list('instrument', flat=True)) == ['Cello', 'Violin']
         teacher_user.refresh_from_db()
         assert teacher_user.first_name == 'Renamed'
+
+
+# ---------------------------------------------------------------------------
+# MAP-259: teacher structured address (street_address, city, province,
+# postal_code) — written by the management teacher PUT, returned by the
+# teacher reads; the student PUT does not gain the fields.
+# ---------------------------------------------------------------------------
+
+ADDRESS_FIELDS = ('street_address', 'city', 'province', 'postal_code')
+
+
+def _address(user):
+    user.refresh_from_db()
+    return {name: getattr(user, name) for name in ADDRESS_FIELDS}
+
+
+@pytest.mark.django_db
+class TestTeacherStructuredAddress:
+
+    @staticmethod
+    def _put(client, route, user, payload):
+        return client.put(reverse(route, kwargs={'pk': user.id}), payload, format='json')
+
+    def test_put_teacher_address_is_stored_and_returned_by_every_teacher_read(
+        self, authenticated_management_client, teacher_user
+    ):
+        payload = {
+            'street_address': '1055 Canada Pl',
+            'city': 'Vancouver',
+            'province': 'BC',
+            'postal_code': 'v6c0c3',
+        }
+        stored = payload | {'postal_code': 'V6C 0C3'}
+
+        response = self._put(authenticated_management_client, 'management_update_teacher', teacher_user, payload)
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert {k: response.data[k] for k in ADDRESS_FIELDS} == stored
+        assert _address(teacher_user) == stored
+        assert {k: getattr(teacher_user.history.latest(), k) for k in ADDRESS_FIELDS} == stored
+
+        detail = authenticated_management_client.get(
+            reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        )
+        assert detail.status_code == status.HTTP_200_OK
+        assert {k: detail.data[k] for k in ADDRESS_FIELDS} == stored
+
+        listed = authenticated_management_client.get(reverse('management_teacher_list'))
+        row = next(t for t in listed.data if t['id'] == teacher_user.id)
+        assert {k: row[k] for k in ADDRESS_FIELDS} == stored
+
+    @pytest.mark.parametrize('field,value', [
+        ('province', 'ZZ'),
+        ('province', 'Ontario'),
+        ('postal_code', '12345'),
+        ('postal_code', 'M5H 2N'),
+        ('postal_code', 'MM5 H2N'),
+    ])
+    def test_invalid_province_or_postal_code_is_a_field_error(
+        self, authenticated_management_client, teacher_user, field, value
+    ):
+        before = _address(teacher_user)
+        payload = {'street_address': '1 Yonge St', 'city': 'Toronto', 'province': 'ON', 'postal_code': 'M5E 1W7'}
+
+        response = self._put(
+            authenticated_management_client, 'management_update_teacher', teacher_user, payload | {field: value}
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert set(response.data) == {field}
+        assert _address(teacher_user) == before
+
+    def test_blank_values_clear_the_address(self, authenticated_management_client, teacher_user):
+        User.objects.filter(pk=teacher_user.pk).update(
+            street_address='1 Yonge St', city='Toronto', province='ON', postal_code='M5E 1W7'
+        )
+
+        response = self._put(
+            authenticated_management_client, 'management_update_teacher', teacher_user,
+            {name: '' for name in ADDRESS_FIELDS},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _address(teacher_user) == {name: '' for name in ADDRESS_FIELDS}
+
+    def test_put_without_address_leaves_it_unchanged(self, authenticated_management_client, teacher_user):
+        User.objects.filter(pk=teacher_user.pk).update(
+            street_address='1 Yonge St', city='Toronto', province='ON', postal_code='M5E 1W7'
+        )
+        before = _address(teacher_user)
+
+        response = self._put(
+            authenticated_management_client, 'management_update_teacher', teacher_user, {'bio': 'New bio'}
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _address(teacher_user) == before
+        assert teacher_user.bio == 'New bio'
+
+    def test_student_put_does_not_write_or_return_the_address(
+        self, authenticated_management_client, student_user
+    ):
+        response = self._put(
+            authenticated_management_client, 'management_student_detail', student_user,
+            {'street_address': '1 Yonge St', 'city': 'Toronto', 'province': 'ON',
+             'postal_code': 'M5E 1W7', 'phone_number': '4165550199'},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert _address(student_user) == {name: '' for name in ADDRESS_FIELDS}
+        assert student_user.phone_number == '4165550199'
+        assert not set(ADDRESS_FIELDS) & set(response.data)
 
 
 @pytest.mark.django_db
