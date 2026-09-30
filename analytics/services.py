@@ -10,7 +10,7 @@ Definitions locked with product (2026-07-06):
 
 from collections import Counter, defaultdict
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.apps import apps
 from django.conf import settings
@@ -85,6 +85,11 @@ def _month_starts(today, months):
 
 def _prev_month(year, month):
     return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def _money(value):
+    """Money on the wire: 2dp decimal string, zero included ("0.00", never "0")."""
+    return str(value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 def _scheduled_hours_and_revenue(schedules, year, month):
@@ -219,10 +224,10 @@ def compute_month_rows(school, months=6, today=None):
         rows.append({
             'period': f'{year}-{month:02d}',
             'mrr': str(mrr.quantize(Decimal('0.01'))),
-            'billed_revenue': str(billed),
-            'expenses': str(expenses),
-            'teacher_pay': str(teacher_pay),
-            'gross_margin': str(billed - teacher_pay - expenses),
+            'billed_revenue': _money(billed),
+            'expenses': _money(expenses),
+            'teacher_pay': _money(teacher_pay),
+            'gross_margin': _money(billed - teacher_pay - expenses),
             'active_students': active_students,
             'new_enrollments': new_enrollments,
             'churned': churned,
@@ -406,7 +411,7 @@ def compute_current_metrics(school, today=None):
         'trial_conversion_rate': trial_conversion,
         'overdue_invoices': {
             'count': overdue['n'] or 0,
-            'amount': str(overdue['total'] or Decimal('0')),
+            'amount': _money(overdue['total'] or Decimal('0')),
         },
         'exit_reasons': exit_reasons,
     }
@@ -428,10 +433,8 @@ def compute_goals(school, month_rows, current):
             'metric': goal.metric,
             'metric_display': goal.get_metric_display(),
             'target': str(goal.target),
-            'current_value': (
-                str(live_values[goal.metric])
-                if live_values.get(goal.metric) is not None else None
-            ),
+            # Native kind of the resolved metric: money 2dp string, count int, percent float.
+            'current_value': live_values.get(goal.metric),
         }
         for goal in MetricGoal.objects.filter(school=school).order_by('metric')
     ]

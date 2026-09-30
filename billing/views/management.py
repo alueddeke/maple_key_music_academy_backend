@@ -23,7 +23,7 @@ from custom_auth.decorators import (
 import logging
 import calendar
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from django.core.exceptions import ValidationError
 from django.core.validators import DecimalValidator
 
@@ -1378,7 +1378,8 @@ def _generate_teacher_invoice_locked(request, batch_id, ledger, CreditTransactio
         'status': 'invoice_generated',
         'invoice_id': invoice.id,
         'invoice_number': invoice.invoice_number,
-        'total_amount': str(invoice.total_amount),
+        # 2dp as stored: Postgres numeric(10,2) rounds half away from zero.
+        'total_amount': str(invoice.total_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
         'waived_credits_written': len(waived_items),
         'forfeited_credits_written': forfeited_credits_written,
     })
