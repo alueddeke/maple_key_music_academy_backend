@@ -312,18 +312,20 @@ class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_teacher_payment(self, obj):
-        from decimal import Decimal
-        return sum(
+        from decimal import Decimal, ROUND_HALF_UP
+        total = sum(
             item.calculate_teacher_payment()
             for item in obj.lesson_items.all()
         ) or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
     def get_total_student_charges(self, obj):
-        from decimal import Decimal
-        return sum(
+        from decimal import Decimal, ROUND_HALF_UP
+        total = sum(
             item.calculate_student_charge()
             for item in obj.lesson_items.all()
         ) or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
     def get_lesson_count(self, obj):
         return obj.lesson_items.filter(status='completed').count()
@@ -581,13 +583,14 @@ class SchoolDetailSerializer(serializers.ModelSerializer):
 
     def get_invoice_total(self, obj):
         """Total invoiced amount for teacher payments"""
-        from decimal import Decimal
+        from decimal import Decimal, ROUND_HALF_UP
         total = Invoice.objects.filter(
             school=obj,
             invoice_type='teacher_payment',
             status__in=['approved', 'paid']
         ).aggregate(total=Sum('payment_balance'))['total']
-        return total or Decimal('0.00')
+        total = total or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 class SchoolSettingsSerializer(serializers.ModelSerializer):
@@ -655,13 +658,14 @@ class TeacherListSerializer(serializers.ModelSerializer):
 
     def get_total_earnings(self, obj):
         """Calculate total paid earnings (approved + paid invoices)"""
-        from decimal import Decimal
+        from decimal import Decimal, ROUND_HALF_UP
         total = Invoice.objects.filter(
             teacher=obj,
             invoice_type='teacher_payment',
             status__in=['approved', 'paid']
         ).aggregate(total=Sum('payment_balance'))['total']
-        return total or Decimal('0.00')
+        total = total or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 class TeacherDetailSerializer(serializers.ModelSerializer):
@@ -709,13 +713,14 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         ).count()
 
     def get_total_earnings(self, obj):
-        from decimal import Decimal
+        from decimal import Decimal, ROUND_HALF_UP
         total = Invoice.objects.filter(
             teacher=obj,
             invoice_type='teacher_payment',
             status__in=['approved', 'paid']
         ).aggregate(total=Sum('payment_balance'))['total']
-        return total or Decimal('0.00')
+        total = total or Decimal('0.00')
+        return str(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
     def get_recent_lessons(self, obj):
         """Get 5 most recent completed lessons"""
