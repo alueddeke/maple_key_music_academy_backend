@@ -4,6 +4,9 @@ MAP-260: response keys the strict frontend schemas rely on.
 - A name derived from a nullable FK is always present, as null when the FK is empty.
 - School settings no longer expose the deprecated invoice_recipient_email.
 - Deleting an approved email returns an empty 204.
+
+MAP-253: a lesson row emits exactly the listed keys; a new Lesson column
+does not reach the wire without a deliberate contract change.
 """
 from decimal import Decimal
 
@@ -15,6 +18,7 @@ from billing.models import (
     ApprovedEmail,
     Invoice,
     InvoiceRecipientEmail,
+    Lesson,
     SchoolSettings,
     UserRegistrationRequest,
 )
@@ -23,6 +27,14 @@ INVOICE_NAME_KEYS = ('created_by_name', 'approved_by_name')
 DETAILED_INVOICE_NAME_KEYS = (
     'created_by_name', 'approved_by_name', 'rejected_by_name', 'last_edited_by_name',
 )
+
+LESSON_KEYS = {
+    'id', 'teacher', 'teacher_name', 'student', 'student_name', 'school', 'school_name',
+    'lesson_type', 'is_trial', 'teacher_rate', 'student_rate', 'scheduled_date',
+    'completed_date', 'duration', 'status', 'cancellation_reason', 'teacher_notes',
+    'student_notes', 'recurring_schedule', 'created_at', 'updated_at', 'total_cost',
+    'student_cost', 'is_first_lesson',
+}
 
 
 def _teacher_invoice(teacher, **kwargs):
@@ -163,3 +175,45 @@ def test_approved_email_delete_returns_empty_204(api_client, management_user):
     # The test client strips 204 bodies, so assert on what the view returned.
     assert response.data is None
     assert not ApprovedEmail.objects.filter(pk=approved.pk).exists()
+
+
+@pytest.mark.django_db
+def test_teacher_detail_recent_lessons_emit_exactly_the_lesson_keys(
+    api_client, management_user, teacher_user, student_user,
+):
+    api_client.force_authenticate(management_user)
+
+    response = api_client.get(reverse('management_teacher_detail', args=[teacher_user.id]))
+
+    assert response.status_code == status.HTTP_200_OK
+    rows = response.data['recent_lessons']
+    assert rows
+    for row in rows:
+        assert set(row) == LESSON_KEYS
+
+
+@pytest.mark.django_db
+def test_request_lesson_creates_requested_lesson_and_emits_the_lesson_keys(
+    api_client, teacher_user, student_user, school,
+):
+    api_client.force_authenticate(student_user)
+
+    response = api_client.post(
+        reverse('request_lesson'),
+        {
+            'teacher': teacher_user.id,
+            'school': school.id,
+            'lesson_type': 'online',
+            'scheduled_date': '2026-10-05T15:00:00Z',
+            'student_notes': 'Scales please',
+        },
+        format='json',
+    )
+
+    assert response.status_code == status.HTTP_201_CREATED
+    assert set(response.data) == LESSON_KEYS
+    lesson = Lesson.objects.get(pk=response.data['id'])
+    assert lesson.student == student_user
+    assert lesson.teacher == teacher_user
+    assert lesson.status == 'requested'
+    assert lesson.student_notes == 'Scales please'

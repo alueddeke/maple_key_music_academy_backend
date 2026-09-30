@@ -12,7 +12,7 @@ from ..serializers import (
     UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
-    BatchRejectionSnapshotSerializer, TeacherUpdateSerializer
+    BatchRejectionSnapshotSerializer, TeacherDetailSerializer, TeacherUpdateSerializer
 )
 from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
@@ -1072,7 +1072,8 @@ def management_update_teacher(request, pk):
                 lesson_type='in_person'
             ).update(teacher_rate=teacher.hourly_rate)
 
-        response_data = serializer.data
+        # Same record shape as the teacher detail read (MAP-251)
+        response_data = TeacherDetailSerializer(teacher).data
         response_data['schedules_updated'] = schedules_updated
         return Response(response_data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
