@@ -154,11 +154,11 @@ class LessonSerializer(serializers.ModelSerializer):
         return data
 
 class InvoiceSerializer(serializers.ModelSerializer):
-    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
-    student_name = serializers.CharField(source='student.get_full_name', read_only=True)
+    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True, allow_null=True, default=None)
+    student_name = serializers.CharField(source='student.get_full_name', read_only=True, allow_null=True, default=None)
     school_name = serializers.CharField(source='school.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = Invoice
@@ -420,7 +420,7 @@ class ApprovedEmailSerializer(serializers.ModelSerializer):
 
 
 class UserRegistrationRequestSerializer(serializers.ModelSerializer):
-    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True, allow_null=True, default=None)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
@@ -474,12 +474,12 @@ class DetailedUserSerializer(serializers.ModelSerializer):
 
 class DetailedInvoiceSerializer(serializers.ModelSerializer):
     """Detailed invoice serializer for management with nested lessons"""
-    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
-    student_name = serializers.CharField(source='student.get_full_name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
-    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
-    last_edited_by_name = serializers.CharField(source='last_edited_by.get_full_name', read_only=True)
+    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True, allow_null=True, default=None)
+    student_name = serializers.CharField(source='student.get_full_name', read_only=True, allow_null=True, default=None)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True, default=None)
+    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True, allow_null=True, default=None)
+    last_edited_by_name = serializers.CharField(source='last_edited_by.get_full_name', read_only=True, allow_null=True, default=None)
     lessons = LessonSerializer(many=True, read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
@@ -495,7 +495,7 @@ class DetailedInvoiceSerializer(serializers.ModelSerializer):
 
 class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
     """Serializer for invoice recipient emails"""
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
     school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
@@ -508,7 +508,7 @@ class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
 
 class GlobalRateSettingsSerializer(serializers.ModelSerializer):
     """Serializer for global rate settings (singleton) - DEPRECATED, use SchoolSettingsSerializer"""
-    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = GlobalRateSettings
@@ -592,7 +592,7 @@ class SchoolDetailSerializer(serializers.ModelSerializer):
 
 class SchoolSettingsSerializer(serializers.ModelSerializer):
     """Serializer for school-specific settings"""
-    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True, allow_null=True, default=None)
     school_name = serializers.CharField(source='school.name', read_only=True)
 
     class Meta:
