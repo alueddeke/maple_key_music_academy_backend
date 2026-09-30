@@ -137,8 +137,6 @@ def approved_email_list(request):
             response_data = serializer.data
             response_data['invitation_sent'] = success
             response_data['invitation_message'] = message
-            if invitation:
-                response_data['invitation_token'] = invitation.token
 
             return Response(response_data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
