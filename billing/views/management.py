@@ -151,7 +151,7 @@ def approved_email_delete(request, pk):
     try:
         approved_email = ApprovedEmail.objects.get(pk=pk, approved_by__school=request.user.school)
         approved_email.delete()
-        return Response({'message': 'Approved email deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
+        return Response(status=status.HTTP_204_NO_CONTENT)
     except ApprovedEmail.DoesNotExist:
         return Response({'error': 'Approved email not found'}, status=status.HTTP_404_NOT_FOUND)
 
