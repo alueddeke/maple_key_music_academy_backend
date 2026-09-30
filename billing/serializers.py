@@ -600,7 +600,6 @@ class SchoolSettingsSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'school', 'school_name',
             'online_teacher_rate', 'online_student_rate', 'inperson_student_rate',
-            'invoice_recipient_email',  # DEPRECATED field
             'invoice_reply_to_email',
             'updated_at', 'updated_by', 'updated_by_name'
         ]
