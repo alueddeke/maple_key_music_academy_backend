@@ -1366,6 +1366,51 @@ class TestTeacherStructuredAddress:
         assert not set(ADDRESS_FIELDS) & set(response.data)
 
 
+# ---------------------------------------------------------------------------
+# MAP-251 (Z0 D9): the teacher PUT returns the same record as the teacher
+# detail read, plus schedules_updated; input validation is unchanged.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestTeacherUpdateResponseShape:
+
+    @staticmethod
+    def _detail(client, teacher):
+        response = client.get(reverse('management_teacher_detail', kwargs={'pk': teacher.id}))
+        assert response.status_code == status.HTTP_200_OK
+        return response.json()
+
+    def test_put_response_is_teacher_detail_shape_plus_schedules_updated(
+        self, authenticated_management_client, teacher_user
+    ):
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'bio': 'Updated bio', 'city': 'Toronto'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        body = response.json()
+        detail = self._detail(authenticated_management_client, teacher_user)
+        assert set(body) == set(detail) | {'schedules_updated'}
+        assert {k: v for k, v in body.items() if k != 'schedules_updated'} == detail
+        assert body['bio'] == 'Updated bio'
+        assert body['city'] == 'Toronto'
+
+    def test_put_invalid_input_returns_field_errors_and_writes_nothing(
+        self, authenticated_management_client, teacher_user
+    ):
+        before = self._detail(authenticated_management_client, teacher_user)
+
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'email': 'not-an-email', 'bio': 'Should not be saved'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert set(response.data) == {'email'}
+        assert self._detail(authenticated_management_client, teacher_user) == before
+
+
 @pytest.mark.django_db
 class TestApprovedEmailCreateResponse:
     """MAP-255: the approved-email create response never carries the raw
