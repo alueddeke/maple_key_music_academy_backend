@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 
 from rest_framework import serializers
@@ -14,6 +15,18 @@ from .models import (
 )
 
 User = get_user_model()
+
+
+def normalize_postal_code(value):
+    """Canadian postal code -> stored form A1A 1A1 (uppercase, one space)."""
+    # Remove spaces and convert to uppercase
+    cleaned = value.replace(' ', '').upper()
+    # Canadian postal code pattern: A1A 1A1 (letter-digit-letter digit-letter-digit)
+    if not re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', cleaned):
+        raise serializers.ValidationError("Invalid Canadian postal code format (e.g., M5H 2N2)")
+    return f"{cleaned[:3]} {cleaned[3:]}"
+
+
 class BillableContactSerializer(serializers.ModelSerializer):
     """Serializer for billable contact information"""
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
@@ -121,6 +134,21 @@ class UserSerializer(serializers.ModelSerializer):
                 for student in obj.assigned_students.filter(is_active=True)
             ]
         return []
+
+
+class TeacherUpdateSerializer(UserSerializer):
+    """Management PUT on a teacher. The writable set is UserSerializer's plus
+    the structured address (MAP-259), added by name. Students stay on
+    UserSerializer, so they gain no writable field."""
+
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + [
+            'street_address', 'city', 'province', 'postal_code',
+        ]
+
+    def validate_postal_code(self, value):
+        # Blank = not entered; anything else must be a valid postal code.
+        return normalize_postal_code(value) if value else value
 
 
 class LessonSerializer(serializers.ModelSerializer):
@@ -622,6 +650,7 @@ class TeacherListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name', 'hourly_rate',
             'online_hourly_rate', 'instruments', 'is_approved',
+            'street_address', 'city', 'province', 'postal_code',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings'
         ]
@@ -682,6 +711,7 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'phone_number', 'address',
+            'street_address', 'city', 'province', 'postal_code',
             'hourly_rate', 'online_hourly_rate', 'bio', 'instruments', 'is_approved',
             'total_students', 'total_lessons', 'total_invoices',
             'pending_invoices', 'total_earnings',
@@ -776,15 +806,7 @@ class BillingContactInputSerializer(serializers.Serializer):
         return value.upper()
 
     def validate_postal_code(self, value):
-        """Basic validation for Canadian postal code format"""
-        import re
-        # Remove spaces and convert to uppercase
-        cleaned = value.replace(' ', '').upper()
-        # Canadian postal code pattern: A1A 1A1 (letter-digit-letter digit-letter-digit)
-        if not re.match(r'^[A-Z]\d[A-Z]\d[A-Z]\d$', cleaned):
-            raise serializers.ValidationError("Invalid Canadian postal code format (e.g., M5H 2N2)")
-        # Return formatted version with space: A1A 1A1
-        return f"{cleaned[:3]} {cleaned[3:]}"
+        return normalize_postal_code(value)
 
 
 class StudentCreateSerializer(serializers.Serializer):
