@@ -15,7 +15,6 @@ from decimal import Decimal
 from django.urls import reverse
 from rest_framework import status
 from django.contrib.auth import get_user_model
-from billing.models import Invoice
 
 User = get_user_model()
 
@@ -69,31 +68,6 @@ class TestAuthSchoolIsolation:
         assert response.status_code == status.HTTP_404_NOT_FOUND
         # Victim row was NOT deleted
         assert User.objects.filter(id=school2_teacher.id).exists() is True
-
-    def test_school1_mgmt_cannot_approve_school2_invoice(
-        self, api_client, management_user, second_school, school2_teacher
-    ):
-        """
-        SEC-04 (T-05-16): School A management cannot approve a teacher-payment
-        invoice belonging to School B. Must return 404; invoice status must stay
-        'pending' after the request.
-        """
-        invoice = Invoice.objects.create(
-            invoice_type='teacher_payment',
-            teacher=school2_teacher,
-            school=second_school,
-            status='pending',
-            payment_balance=Decimal('100.00'),
-            total_amount=Decimal('100.00'),
-        )
-
-        api_client.force_authenticate(user=management_user)
-        url = reverse('approve_teacher_invoice', kwargs={'invoice_id': invoice.id})
-        response = api_client.post(url)
-
-        assert response.status_code == status.HTTP_404_NOT_FOUND
-        invoice.refresh_from_db()
-        assert invoice.status == 'pending'
 
     def test_school1_mgmt_cannot_view_school2_teacher(
         self, api_client, management_user, school2_teacher

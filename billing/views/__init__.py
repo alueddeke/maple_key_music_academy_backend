@@ -3,8 +3,6 @@
 # to use `from . import views` and `views.function_name` without any change.
 
 from .management import (
-    all_teachers,
-    approve_teacher,
     approved_email_list,
     approved_email_delete,
     registration_request_list,
@@ -59,10 +57,8 @@ from .management import (
 )
 
 from .teacher import (
-    teacher_invoice_list,
     teacher_invoice_stats,
     submit_lessons_for_invoice,
-    approve_teacher_invoice,
     teacher_assigned_students,
     teacher_monthly_batches,
     batch_detail,
@@ -73,12 +69,6 @@ from .teacher import (
     # Phase 22: Month-End Adjustments
     teacher_batch_adjustment_item,
     student_waive_usage,
-)
-
-from .lessons import (
-    request_lesson,
-    confirm_lesson,
-    complete_lesson,
 )
 
 from .invitation import (
