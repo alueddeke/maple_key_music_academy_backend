@@ -33,3 +33,15 @@ send_run_pending_items = Gauge(
     'maplekey_send_run_pending_items',
     'Pending invoice send-run items across queued/running runs',
 )
+
+
+# Which image this process runs. Set once at startup by BillingConfig.ready()
+# from IMAGE_SHA (the deploy passes the image tag as env), so the API, the
+# send-run worker and the scheduler each export maplekey_image_info{sha} 1 on
+# their own /metrics. The image-split alert counts distinct shas across the
+# three jobs: > 1 for 5 min = a deploy left them on different images (MAP-189).
+image_info = Gauge(
+    'maplekey_image_info',
+    'Image sha this process was started from (value is always 1)',
+    ['sha'],
+)
