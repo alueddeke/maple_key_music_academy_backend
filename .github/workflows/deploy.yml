@@ -162,6 +162,9 @@ jobs:
           HELCIM_WEBHOOK_SECRET: ${{ secrets.HELCIM_WEBHOOK_SECRET }}
           HELCIM_SUBDOMAIN: ${{ secrets.HELCIM_SUBDOMAIN }}
           CERTBOT_EMAIL: ${{ secrets.CERTBOT_EMAIL }}
+          # Deploy the :<sha> tag build_and_push pushed, not :latest — the
+          # scripts assert the running containers against it (MAP-189).
+          IMAGE_TAG: ${{ github.sha }}
           VPC_HOST: ${{ secrets.VPC_HOST }}
           VPC_USERNAME: ${{ secrets.VPC_USERNAME }}
           VPC_PORT: ${{ secrets.VPC_PORT || 22 }}
