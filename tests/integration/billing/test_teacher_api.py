@@ -267,9 +267,25 @@ LEGACY_ROUTE_NAMES = [
     'teacher_detail', 'student_detail', 'lesson_detail', 'invoice_detail',
 ]
 
+# MAP-203: the seven @planned routes with no frontend caller no longer exist.
+# (name, kwargs) — the kwargs are the real ones so that a still-registered
+# route would reverse successfully and fail the test.
+MAP203_ROUTE_NAMES = [
+    ('all_teachers', {}),
+    ('approve_teacher', {'teacher_id': 1}),
+    ('request_lesson', {}),
+    ('confirm_lesson', {'lesson_id': 1}),
+    ('complete_lesson', {'lesson_id': 1}),
+    ('teacher_invoice_list', {}),
+    ('approve_teacher_invoice', {'invoice_id': 1}),
+]
+
 LEGACY_ROUTE_PATHS = [
     'teachers', 'students', 'lessons',
     'teacher_pk', 'student_pk', 'lesson_pk', 'invoice_pk',
+    # MAP-203
+    'teachers_all', 'teacher_approve', 'lesson_request', 'lesson_confirm',
+    'lesson_complete', 'teacher_invoices', 'teacher_invoice_approve',
 ]
 
 ROLE_FIXTURES = ['anonymous', 'student_user', 'teacher_user', 'management_user']
@@ -298,18 +314,32 @@ def legacy_route_paths(school, teacher_user, student_user):
         'student_pk': f'/api/billing/students/{student_user.id}/',
         'lesson_pk': f'/api/billing/lessons/{lesson.id}/',
         'invoice_pk': f'/api/billing/invoices/{invoice.id}/',
+        # MAP-203
+        'teachers_all': '/api/billing/teachers/all/',
+        'teacher_approve': f'/api/billing/teachers/{teacher_user.id}/approve/',
+        'lesson_request': '/api/billing/lessons/request/',
+        'lesson_confirm': f'/api/billing/lessons/{lesson.id}/confirm/',
+        'lesson_complete': f'/api/billing/lessons/{lesson.id}/complete/',
+        'teacher_invoices': '/api/billing/invoices/teacher/',
+        'teacher_invoice_approve': f'/api/billing/invoices/teacher/{invoice.id}/approve/',
     }
 
 
 @pytest.mark.django_db
 class TestLegacyGenericRoutesRemoved:
-    """MAP-178 acceptance: each of the seven routes -> 404 for every role."""
+    """MAP-178 + MAP-203 acceptance: each deleted route -> 404 for every role."""
 
     @pytest.mark.parametrize('route_name', LEGACY_ROUTE_NAMES)
     def test_legacy_route_name_is_not_registered(self, route_name):
         """The URL name is gone from billing/urls.py."""
         with pytest.raises(NoReverseMatch):
             reverse(route_name, kwargs={'pk': 1} if route_name.endswith('_detail') else None)
+
+    @pytest.mark.parametrize('route_name, kwargs', MAP203_ROUTE_NAMES)
+    def test_map203_route_name_is_not_registered(self, route_name, kwargs):
+        """MAP-203: the URL name is gone from billing/urls.py."""
+        with pytest.raises(NoReverseMatch):
+            reverse(route_name, kwargs=kwargs or None)
 
     @pytest.mark.parametrize('role_fixture', ROLE_FIXTURES)
     @pytest.mark.parametrize('route_key', LEGACY_ROUTE_PATHS)
@@ -378,32 +408,6 @@ class TestSubmitLessonsIgnoresBodyStatus:
         assert invoice.date_paid is None
         assert invoice.reference_number is None
         assert response.data['invoice']['status'] == 'pending'
-
-
-@pytest.mark.django_db
-class TestTeacherInvoiceListIsReadOnly:
-    """P0 audit 2026-09-09: invoices/teacher/ lists only; invoices are created
-    through submit-lessons/. The former POST branch could not create a row once
-    MAP-178 made teacher/payment_balance read-only (IntegrityError -> 500)."""
-
-    @pytest.mark.parametrize('client_fixture', ['authenticated_teacher_client', 'authenticated_management_client'])
-    def test_post_is_not_allowed_and_creates_nothing(self, request, client_fixture, school_settings):
-        client = request.getfixturevalue(client_fixture)
-        before = Invoice.objects.count()
-
-        response = client.post(
-            reverse('teacher_invoice_list'),
-            {'invoice_type': 'teacher_payment', 'due_date': '2026-09-30T00:00:00Z', 'lessons': []},
-            format='json',
-        )
-
-        assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
-        assert Invoice.objects.count() == before
-
-    def test_get_still_lists_for_teacher(self, authenticated_teacher_client, school_settings):
-        response = authenticated_teacher_client.get(reverse('teacher_invoice_list'))
-        assert response.status_code == status.HTTP_200_OK
-        assert isinstance(response.data, list)
 
 
 # ---------------------------------------------------------------------------

@@ -18,16 +18,11 @@ from billing.models import (
     ApprovedEmail,
     Invoice,
     InvoiceRecipientEmail,
-    Lesson,
     SchoolSettings,
     UserRegistrationRequest,
 )
 
 INVOICE_NAME_KEYS = ('created_by_name', 'approved_by_name')
-DETAILED_INVOICE_NAME_KEYS = (
-    'created_by_name', 'approved_by_name', 'rejected_by_name', 'last_edited_by_name',
-)
-
 LESSON_KEYS = {
     'id', 'teacher', 'teacher_name', 'student', 'student_name', 'school', 'school_name',
     'lesson_type', 'is_trial', 'teacher_rate', 'student_rate', 'scheduled_date',
@@ -69,29 +64,6 @@ def test_invoice_null_fks_emit_null_name_keys(api_client, management_user, teach
         assert empty_row[key] is None
         assert filled_row[key] == management_user.get_full_name()
     # A teacher-payment invoice has no student: the key is present, as null.
-    assert empty_row['student_name'] is None
-    assert empty_row['teacher_name'] == teacher_user.get_full_name()
-
-
-@pytest.mark.django_db
-def test_detailed_invoice_null_fks_emit_null_name_keys(api_client, management_user, teacher_user):
-    empty = _teacher_invoice(teacher_user)
-    filled = _teacher_invoice(
-        teacher_user,
-        created_by=management_user,
-        approved_by=management_user,
-        rejected_by=management_user,
-        last_edited_by=management_user,
-    )
-    api_client.force_authenticate(teacher_user)
-
-    response = api_client.get(reverse('teacher_invoice_list'))
-
-    assert response.status_code == status.HTTP_200_OK
-    empty_row, filled_row = _by_id(response.data, empty.id), _by_id(response.data, filled.id)
-    for key in DETAILED_INVOICE_NAME_KEYS:
-        assert empty_row[key] is None
-        assert filled_row[key] == management_user.get_full_name()
     assert empty_row['student_name'] is None
     assert empty_row['teacher_name'] == teacher_user.get_full_name()
 
@@ -191,29 +163,3 @@ def test_teacher_detail_recent_lessons_emit_exactly_the_lesson_keys(
     for row in rows:
         assert set(row) == LESSON_KEYS
 
-
-@pytest.mark.django_db
-def test_request_lesson_creates_requested_lesson_and_emits_the_lesson_keys(
-    api_client, teacher_user, student_user, school,
-):
-    api_client.force_authenticate(student_user)
-
-    response = api_client.post(
-        reverse('request_lesson'),
-        {
-            'teacher': teacher_user.id,
-            'school': school.id,
-            'lesson_type': 'online',
-            'scheduled_date': '2026-10-05T15:00:00Z',
-            'student_notes': 'Scales please',
-        },
-        format='json',
-    )
-
-    assert response.status_code == status.HTTP_201_CREATED
-    assert set(response.data) == LESSON_KEYS
-    lesson = Lesson.objects.get(pk=response.data['id'])
-    assert lesson.student == student_user
-    assert lesson.teacher == teacher_user
-    assert lesson.status == 'requested'
-    assert lesson.student_notes == 'Scales please'
