@@ -9,7 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, BatchRejectionSnapshot, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
 from ..serializers import (
-    UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    UserSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
     BatchRejectionSnapshotSerializer, TeacherDetailSerializer, TeacherUpdateSerializer
@@ -86,28 +86,6 @@ def validate_batch_billable_contacts(batch):
 
     return errors if errors else None
 
-
-# USER MANAGEMENT ENDPOINTS
-
-@api_view(['GET'])
-@management_required
-def all_teachers(request):
-    """Management endpoint to see all teachers (approved and pending)"""
-    teachers = User.objects.filter(user_type='teacher', school=request.user.school)
-    serializer = UserSerializer(teachers, many=True)
-    return Response(serializer.data)
-
-@api_view(['POST'])
-@management_required
-def approve_teacher(request, teacher_id):
-    """Management endpoint to approve pending teachers"""
-    try:
-        teacher = User.objects.get(id=teacher_id, user_type='teacher', school=request.user.school)
-        teacher.is_approved = True
-        teacher.save()
-        return Response({'message': 'Teacher approved successfully'})
-    except User.DoesNotExist:
-        return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
 
 # MANAGEMENT ENDPOINTS FOR USER APPROVAL SYSTEM
 
