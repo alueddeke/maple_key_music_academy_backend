@@ -21,7 +21,7 @@ loop continues — the scheduler never dies on a Helcim outage.
 import logging
 import os
 import signal
-import time
+import threading
 from datetime import timedelta
 
 from django.core.management import call_command
@@ -67,7 +67,11 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        self._stop = False
+        # An Event, not a flag: time.sleep() resumes after a signal handler
+        # returns, so a bare flag was only noticed up to 60 s later and docker
+        # stop (10 s default grace) SIGKILLed the container (MAP-215).
+        # Event.wait() returns the moment _request_stop sets it.
+        self._stop_event = threading.Event()
         signal.signal(signal.SIGTERM, self._request_stop)
         signal.signal(signal.SIGINT, self._request_stop)
         self._next_retry_at = None   # None → due now
@@ -77,17 +81,17 @@ class Command(BaseCommand):
             start_http_server(int(os.environ.get('SCHEDULER_METRICS_PORT', '9103')))
         logger.info('Scheduler started (once=%s)', options['once'])
 
-        while not self._stop:
+        while not self._stop_event.is_set():
             self._tick()
             if options['once']:
                 break
-            time.sleep(TICK_SLEEP_SECONDS)
+            self._stop_event.wait(TICK_SLEEP_SECONDS)
 
         logger.info('Scheduler stopped')
 
     def _request_stop(self, signum, frame):
         logger.info('Scheduler received signal %s — stopping after current tick', signum)
-        self._stop = True
+        self._stop_event.set()
 
     def _tick(self):
         now = timezone.now()

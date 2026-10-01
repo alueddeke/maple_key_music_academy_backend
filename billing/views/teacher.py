@@ -8,7 +8,7 @@ from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
 from ..waive_policy import apply_waive_limit, get_waive_usage
 from ..serializers import (
-    UserSerializer, LessonSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    UserSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, TeacherBatchLessonItemSerializer
 )
 from ..services.invoice_totals import recalculate
@@ -28,30 +28,6 @@ User = get_user_model()
 
 
 # INVOICE MANAGEMENT
-
-@api_view(['GET'])
-@teacher_or_management_required
-def teacher_invoice_list(request):
-    """
-    Teacher payment invoices (read-only). Invoices are created only through
-    submit_lessons_for_invoice; the former POST branch could not create a row
-    once MAP-178 made teacher/payment_balance read-only (P0 audit 2026-09-09).
-    """
-    if request.user.user_type == 'management':
-        invoices = Invoice.objects.filter(
-            invoice_type='teacher_payment',
-            school=request.user.school
-        ).order_by('-created_at')
-    else:  # teacher
-        invoices = Invoice.objects.filter(
-            invoice_type='teacher_payment',
-            teacher=request.user,
-            school=request.user.school
-        ).order_by('-created_at')
-
-    # Use DetailedInvoiceSerializer to include lesson details
-    serializer = DetailedInvoiceSerializer(invoices, many=True)
-    return Response(serializer.data)
 
 @api_view(['GET'])
 @teacher_required
@@ -420,20 +396,6 @@ def submit_lessons_for_invoice(request):
             'error': 'Failed to create invoice',
             'details': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['POST'])
-@management_required
-def approve_teacher_invoice(request, invoice_id):
-    """Management approves teacher payment invoices"""
-    try:
-        invoice = Invoice.objects.get(id=invoice_id, invoice_type='teacher_payment', school=request.user.school)
-        invoice.status = 'approved'
-        invoice.approved_by = request.user
-        invoice.approved_at = timezone.now()
-        invoice.save()
-        return Response({'message': 'Invoice approved'})
-    except Invoice.DoesNotExist:
-        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
 
 # ============================================================================
 # MONTHLY INVOICE BATCH ENDPOINTS (Teacher Workflow)

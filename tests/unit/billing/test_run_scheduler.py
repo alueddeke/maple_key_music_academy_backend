@@ -6,6 +6,9 @@ per UTC day at/after 03:00), and the unresolved + failed-15m gauges. Helcim is
 mocked at the client seams; the commands run for real against the DB.
 """
 
+import logging
+import signal
+import threading
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from io import StringIO
@@ -70,6 +73,35 @@ def _tick():
 
 def _failed_gauge():
     return REGISTRY.get_sample_value('maplekey_webhook_events_failed_15m')
+
+
+def test_sigterm_stops_the_idle_loop_within_two_seconds(caplog):
+    """
+    MAP-215: SIGTERM must interrupt the 60 s idle wait, not be noticed after
+    it. handle(once=False) runs in a thread with the tick and the metrics
+    server patched out; the stop request lands while the loop is idle and
+    the thread must be gone within 2 s with the usual last log line.
+    """
+    from billing.management.commands.run_scheduler import Command
+
+    cmd = Command()
+    started = threading.Event()
+
+    with mock.patch.object(Command, '_tick', side_effect=started.set) as tick, \
+         mock.patch('billing.management.commands.run_scheduler.start_http_server') as server, \
+         mock.patch('billing.management.commands.run_scheduler.signal.signal'), \
+         caplog.at_level(logging.INFO, logger='billing.management.commands.run_scheduler'):
+        worker = threading.Thread(target=cmd.handle, kwargs={'once': False}, daemon=True)
+        worker.start()
+        assert started.wait(2), 'first tick never ran'
+
+        cmd._request_stop(signal.SIGTERM, None)
+        worker.join(timeout=2)
+
+    assert not worker.is_alive(), 'scheduler did not exit within 2 s of SIGTERM'
+    assert tick.call_count >= 1
+    assert server.call_count == 1  # once=False still starts the metrics server
+    assert 'Scheduler stopped' in caplog.text
 
 
 @pytest.mark.django_db

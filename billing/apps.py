@@ -37,3 +37,10 @@ class BillingConfig(AppConfig):
         # MAPLEKEY_ENV is unset (image build, CI, dev).
         if os.environ.get('MAPLEKEY_ENV') == 'prod' and os.environ.get('DEBUG', '').lower() == 'true':
             raise ImproperlyConfigured('DEBUG must be False when MAPLEKEY_ENV=prod')
+
+        # MAP-189: export the image sha this process runs (deploy passes it as
+        # IMAGE_SHA). Every backend-image process — API, worker, scheduler —
+        # runs ready(), so each /metrics carries maplekey_image_info{sha} 1
+        # and the image-split alert can see a version split between them.
+        from billing.metrics import image_info
+        image_info.labels(sha=os.environ.get('IMAGE_SHA', 'unknown')).set(1)

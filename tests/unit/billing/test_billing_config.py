@@ -125,3 +125,29 @@ class TestBillingConfigDebugInProd:
             os.environ.pop('MAPLEKEY_ENV', None)
             config = get_config()
             config.ready()
+
+
+class TestBillingConfigImageInfo:
+    """MAP-189: ready() exports maplekey_image_info{sha} = 1 for the image sha the deploy passed."""
+
+    HELCIM_ENV = TestBillingConfigDebugInProd.HELCIM_ENV
+
+    @staticmethod
+    def _sample(sha):
+        from prometheus_client import REGISTRY
+        return REGISTRY.get_sample_value('maplekey_image_info', {'sha': sha})
+
+    def test_ready_exports_image_sha_from_env(self):
+        """The sha in IMAGE_SHA becomes the label; the series value is 1."""
+        sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
+        env = {**self.HELCIM_ENV, 'IMAGE_SHA': sha}
+        with mock.patch.dict(os.environ, env, clear=False):
+            get_config().ready()
+        assert self._sample(sha) == 1
+
+    def test_ready_exports_unknown_when_unset(self):
+        """No IMAGE_SHA (dev, CI, image build) → sha="unknown", still exported."""
+        with mock.patch.dict(os.environ, self.HELCIM_ENV, clear=False):
+            os.environ.pop('IMAGE_SHA', None)
+            get_config().ready()
+        assert self._sample('unknown') == 1

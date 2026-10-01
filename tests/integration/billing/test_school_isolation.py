@@ -331,36 +331,6 @@ class TestSchoolIsolation:
 class TestPhase2ManagementSchoolScoping:
     """SEC-04: Management endpoints must filter by school=request.user.school."""
 
-    def test_management_cannot_approve_cross_school_invoice(
-        self, api_client, management_user, school, second_school
-    ):
-        """
-        SEC-04: Management from school A cannot approve invoice belonging to school B.
-        """
-        from billing.models import Invoice
-        from decimal import Decimal
-
-        school2_teacher = User.objects.create_user(
-            email="teacher_s2@test.com", password="test123",
-            user_type="teacher", school=second_school, is_approved=True
-        )
-        invoice = Invoice.objects.create(
-            invoice_type='teacher_payment',
-            teacher=school2_teacher,
-            school=second_school,
-            status='pending',
-            payment_balance=Decimal("100.00"),
-            total_amount=Decimal("100.00")
-        )
-
-        api_client.force_authenticate(user=management_user)
-        url = reverse('approve_teacher_invoice', kwargs={'invoice_id': invoice.id})
-        response = api_client.post(url)
-
-        assert response.status_code == status.HTTP_404_NOT_FOUND
-        invoice.refresh_from_db()
-        assert invoice.status == 'pending'
-
     def test_management_cannot_delete_cross_school_user(
         self, api_client, management_user, second_school
     ):
