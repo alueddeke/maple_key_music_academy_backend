@@ -1,14 +1,13 @@
 from django.http import HttpResponse
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
 from ..waive_policy import apply_waive_limit, get_waive_usage
 from ..serializers import (
-    UserSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    UserSerializer, InvoiceSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, TeacherBatchLessonItemSerializer
 )
 from ..services.invoice_totals import recalculate
@@ -402,12 +401,9 @@ def submit_lessons_for_invoice(request):
 # ============================================================================
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@teacher_required
 def teacher_assigned_students(request):
     """Get all students assigned to the current teacher (teacher-only endpoint)"""
-    if request.user.user_type != 'teacher':
-        return Response({'error': 'Teacher access required'}, status=status.HTTP_403_FORBIDDEN)
-
     # Get active students assigned to this teacher
     students = request.user.assigned_students.filter(is_active=True)
     serializer = UserSerializer(students, many=True)

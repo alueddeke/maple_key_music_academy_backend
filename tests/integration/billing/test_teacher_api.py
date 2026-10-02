@@ -172,7 +172,6 @@ class TestTeacherAssignedStudentsAPI:
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert 'error' in response.data
-        assert 'Teacher access required' in response.data['error']
 
     def test_unauthenticated_user_cannot_access(self, api_client):
         """Unauthenticated users cannot access teacher endpoint."""
