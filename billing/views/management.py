@@ -9,7 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, BatchRejectionSnapshot, StudentInvoice, RecurringLessonsSchedule, SchoolMonthlyExpenses, PreBillingInvoice, SchoolExpenseItem
 from ..serializers import (
-    UserSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    UserSerializer, InvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
     BatchRejectionSnapshotSerializer, TeacherDetailSerializer, TeacherUpdateSerializer
