@@ -508,27 +508,6 @@ class DetailedUserSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
 
-class DetailedInvoiceSerializer(serializers.ModelSerializer):
-    """Detailed invoice serializer for management with nested lessons"""
-    teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True, allow_null=True, default=None)
-    student_name = serializers.CharField(source='student.get_full_name', read_only=True, allow_null=True, default=None)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True, default=None)
-    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True, allow_null=True, default=None)
-    last_edited_by_name = serializers.CharField(source='last_edited_by.get_full_name', read_only=True, allow_null=True, default=None)
-    lessons = LessonSerializer(many=True, read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
-    can_be_edited = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Invoice
-        fields = '__all__'
-
-    def get_can_be_edited(self, obj):
-        return obj.can_be_edited()
-
-
 class InvoiceRecipientEmailSerializer(serializers.ModelSerializer):
     """Serializer for invoice recipient emails"""
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True, default=None)

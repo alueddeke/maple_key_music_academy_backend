@@ -8,7 +8,7 @@ from django.utils import timezone
 from ..models import Invoice, Lesson, BillableContact, MonthlyInvoiceBatch, BatchLessonItem, StudentInvoice
 from ..waive_policy import apply_waive_limit, get_waive_usage
 from ..serializers import (
-    UserSerializer, InvoiceSerializer, DetailedInvoiceSerializer,
+    UserSerializer, InvoiceSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, TeacherBatchLessonItemSerializer
 )
 from ..services.invoice_totals import recalculate
