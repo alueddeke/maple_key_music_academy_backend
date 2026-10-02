@@ -9,6 +9,11 @@ urlpatterns = [
         name='school_instrument_list',
     ),
     path(
+        'instruments/add/',
+        views.school_instrument_create,
+        name='school_instrument_create',
+    ),
+    path(
         'instruments/<int:instrument_id>/',
         views.school_instrument_detail,
         name='school_instrument_detail',

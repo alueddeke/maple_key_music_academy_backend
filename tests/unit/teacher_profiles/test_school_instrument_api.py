@@ -11,6 +11,10 @@ def list_url():
     return reverse('school_instrument_list')
 
 
+def create_url():
+    return reverse('school_instrument_create')
+
+
 def detail_url(instrument_id):
     return reverse('school_instrument_detail', kwargs={'instrument_id': instrument_id})
 
@@ -52,22 +56,26 @@ class TestSchoolInstrumentList:
 @pytest.mark.django_db
 class TestSchoolInstrumentCreate:
     def test_management_creates(self, management_client, management_user):
-        response = management_client.post(list_url(), {'name': 'Cello'}, format='json')
+        response = management_client.post(create_url(), {'name': 'Cello'}, format='json')
         assert response.status_code == status.HTTP_201_CREATED
         assert SchoolInstrument.objects.filter(
             school=management_user.school, name='Cello'
         ).exists()
 
     def test_teacher_cannot_create(self, teacher_client):
-        response = teacher_client.post(list_url(), {'name': 'Cello'}, format='json')
+        response = teacher_client.post(create_url(), {'name': 'Cello'}, format='json')
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
+    def test_list_route_no_longer_accepts_writes(self, management_client):
+        response = management_client.post(list_url(), {'name': 'Cello'}, format='json')
+        assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+
     def test_duplicate_name_rejected_case_insensitive(self, management_client, piano):
-        response = management_client.post(list_url(), {'name': 'piano'}, format='json')
+        response = management_client.post(create_url(), {'name': 'piano'}, format='json')
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_blank_name_rejected(self, management_client):
-        response = management_client.post(list_url(), {'name': '   '}, format='json')
+        response = management_client.post(create_url(), {'name': '   '}, format='json')
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
 
@@ -85,6 +93,12 @@ class TestSchoolInstrumentDetail:
         response = management_client.delete(detail_url(piano.id))
         assert response.status_code == status.HTTP_204_NO_CONTENT
         assert not SchoolInstrument.objects.filter(pk=piano.id).exists()
+
+    def test_teacher_cannot_rename(self, teacher_client, piano):
+        response = teacher_client.put(
+            detail_url(piano.id), {'name': 'Grand Piano'}, format='json'
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_teacher_cannot_delete(self, teacher_client, piano):
         response = teacher_client.delete(detail_url(piano.id))
