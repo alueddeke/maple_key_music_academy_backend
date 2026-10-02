@@ -3,7 +3,10 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from custom_auth.decorators import teacher_or_management_required
+from custom_auth.decorators import (
+    management_required,
+    teacher_or_management_required,
+)
 
 from .models import (
     SchoolInstrument,
@@ -163,28 +166,21 @@ def teacher_availability_detail(request, teacher_id, slot_id):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET', 'POST'])
+@api_view(['GET'])
 @teacher_or_management_required
 def school_instrument_list(request):
-    """The school's approved instrument list.
+    """The school's approved instrument list — feeds the instrument dropdowns."""
+    serializer = SchoolInstrumentSerializer(
+        SchoolInstrument.objects.filter(school=request.user.school), many=True
+    )
+    return Response(serializer.data)
 
-    GET: any teacher/management user — feeds the instrument dropdowns.
-    POST: management only.
-    """
+
+@api_view(['POST'])
+@management_required
+def school_instrument_create(request):
+    """Add an instrument to the school list."""
     school = request.user.school
-
-    if request.method == 'GET':
-        serializer = SchoolInstrumentSerializer(
-            SchoolInstrument.objects.filter(school=school), many=True
-        )
-        return Response(serializer.data)
-
-    if request.user.user_type != 'management':
-        return Response(
-            {'error': 'Only management can edit the instrument list'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
     serializer = SchoolInstrumentSerializer(
         data=request.data, context={'school': school}
     )
@@ -195,15 +191,9 @@ def school_instrument_list(request):
 
 
 @api_view(['PUT', 'DELETE'])
-@teacher_or_management_required
+@management_required
 def school_instrument_detail(request, instrument_id):
-    """Rename or remove an instrument from the school list. Management only."""
-    if request.user.user_type != 'management':
-        return Response(
-            {'error': 'Only management can edit the instrument list'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
+    """Rename or remove an instrument from the school list."""
     instrument = SchoolInstrument.objects.filter(
         pk=instrument_id, school=request.user.school
     ).first()
