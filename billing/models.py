@@ -707,10 +707,6 @@ class Invoice(models.Model):
 
         return total
 
-    def can_be_edited(self):
-        """Check if invoice can be edited by management"""
-        return self.status in ['draft', 'pending']
-
     def generate_invoice_number(self):
         """Generate unique invoice number: INV-YYYY-MM-NNNN"""
         import hashlib
