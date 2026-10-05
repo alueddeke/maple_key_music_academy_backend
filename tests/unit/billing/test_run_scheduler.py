@@ -1,9 +1,10 @@
 """
 Unit tests for run_scheduler (MAP-154) — the unattended reconciliation loop.
 
-One tick = retry_webhook_events (every 15 min), sync_helcim_payments (once
-per UTC day at/after 03:00), and the unresolved + failed-15m gauges. Helcim is
-mocked at the client seams; the commands run for real against the DB.
+One tick = retry_webhook_events + sync_helcim_ach (every 15 min),
+sync_helcim_payments (once per UTC day at/after 03:00), and the unresolved +
+failed-15m gauges. Helcim is mocked at the client seams; the commands run for
+real against the DB.
 """
 
 import logging
@@ -23,6 +24,7 @@ from billing.models import (
     CreditTransaction,
     HelcimWebhookEvent,
     PreBillingInvoice,
+    School,
     StudentCreditAccount,
 )
 from billing.services.helcim_client import HelcimAPIError
@@ -30,7 +32,15 @@ from billing.services.webhook_processing import ALERT_STATES
 
 GET_TARGET = 'billing.services.webhook_processing.HelcimClient.get_card_transaction'
 LIST_TARGET = 'billing.services.helcim_client.HelcimClient.list_card_transactions'
+ACH_LIST_TARGET = 'billing.services.helcim_client.HelcimClient.list_ach_transactions'
 NOW_TARGET = 'billing.management.commands.run_scheduler.timezone.now'
+
+
+@pytest.fixture(autouse=True)
+def ach_list():
+    """Every tick also polls Helcim's bank list (MAP-217): no bank transactions unless a test says so."""
+    with mock.patch(ACH_LIST_TARGET, return_value=[]) as listed:
+        yield listed
 
 
 def _invoice_and_account(school, student_user, number, amount='60.00'):
@@ -160,6 +170,40 @@ def test_sync_runs_once_per_day_after_0300_utc(school, hour, expected_calls):
         _tick()
 
     assert mock_list.call_count == expected_calls
+
+
+@pytest.mark.django_db
+def test_bank_sync_runs_once_per_retry_window(school, ach_list):
+    """
+    MAP-217: the bank poll shares the 15-minute window with the retry — due at
+    the first tick, not again inside the window, due again when it has passed.
+    One provider list call per school per due tick.
+    """
+    from billing.management.commands.run_scheduler import Command, RETRY_INTERVAL
+
+    cmd = Command(stdout=StringIO(), stderr=StringIO())
+    started = datetime(2026, 9, 13, 1, 0, 0, tzinfo=dt_timezone.utc)  # before the daily card sync
+    later_ticks = [started + RETRY_INTERVAL / 2, started + RETRY_INTERVAL]
+    clock = {'now': started}
+    calls_after_each_tick = []
+
+    def end_of_tick(_seconds):
+        calls_after_each_tick.append(ach_list.call_count)
+        if later_ticks:
+            clock['now'] = later_ticks.pop(0)
+        else:
+            cmd._request_stop(signal.SIGTERM, None)
+
+    with mock.patch(NOW_TARGET, side_effect=lambda: clock['now']), \
+         mock.patch('billing.management.commands.run_scheduler.start_http_server'), \
+         mock.patch('billing.management.commands.run_scheduler.signal.signal'), \
+         mock.patch('billing.management.commands.run_scheduler.threading.Event.wait',
+                    side_effect=end_of_tick), \
+         mock.patch(GET_TARGET), mock.patch(LIST_TARGET, return_value=[]):
+        cmd.handle(once=False)
+
+    schools = School.objects.count()
+    assert calls_after_each_tick == [schools, schools, 2 * schools]
 
 
 # --- maplekey_webhook_events_failed_15m (MAP-231) ---------------------------
