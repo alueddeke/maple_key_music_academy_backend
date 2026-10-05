@@ -4,8 +4,10 @@ Unattended reconciliation scheduler (MAP-154). Runs as its own container
 can take down the API or the send-run worker.
 
 Each tick:
-  - every 15 minutes: retry_webhook_events (first tick runs it at startup, so
-    a deploy flushes stuck events at once)
+  - every 15 minutes: retry_webhook_events, then sync_helcim_ach — bank
+    payments have no webhook, so this poll is how they are credited (MAP-217).
+    The first tick runs both at startup, so a deploy flushes stuck events at
+    once.
   - once per UTC day at/after 03:00: sync_helcim_payments (a start after
     03:00 syncs immediately — a deploy never skips a day; sync is idempotent)
   - refresh maplekey_webhook_events_unresolved_1h (retryable events received
@@ -58,7 +60,8 @@ scheduler_last_tick_timestamp = Gauge(
 
 
 class Command(BaseCommand):
-    help = 'Run retry_webhook_events every 15 min and sync_helcim_payments daily; export the webhook gauges.'
+    help = ('Run retry_webhook_events and sync_helcim_ach every 15 min and '
+            'sync_helcim_payments daily; export the webhook gauges.')
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -97,6 +100,7 @@ class Command(BaseCommand):
         now = timezone.now()
         if self._next_retry_at is None or now >= self._next_retry_at:
             self._run('retry_webhook_events')
+            self._run('sync_helcim_ach')
             self._next_retry_at = now + RETRY_INTERVAL
         if now.hour >= SYNC_HOUR_UTC and self._last_sync_day != now.date():
             self._run('sync_helcim_payments')
