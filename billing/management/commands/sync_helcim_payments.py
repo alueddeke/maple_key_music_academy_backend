@@ -99,7 +99,7 @@ class Command(BaseCommand):
 
         seen = set(
             HelcimWebhookEvent.objects
-            .filter(helcim_transaction_id__in=[
+            .filter(rail='card', helcim_transaction_id__in=[
                 str(t.get('transactionId', '')) for t in transactions
             ])
             .values_list('helcim_transaction_id', flat=True)
@@ -124,6 +124,7 @@ class Command(BaseCommand):
                 continue
 
             event, created = HelcimWebhookEvent.objects.get_or_create(
+                rail='card',
                 helcim_transaction_id=tx_id,
                 defaults={
                     # Mark the origin — this row was pulled by sync, not pushed

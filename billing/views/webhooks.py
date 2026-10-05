@@ -147,14 +147,15 @@ def payment_callback(request):
         logger.warning('Helcim cardTransaction webhook missing id — ignoring')
         return Response({'status': 'ignored'}, status=200)
 
-    # helcim_transaction_id is unique, so get_or_create yields one row per
-    # transaction. The status check below is a cheap fast path only — a
+    # (rail, helcim_transaction_id) is unique, so get_or_create yields one row
+    # per card transaction. The status check below is a cheap fast path only — a
     # terminal event answers 'duplicate' without entering the service.
     # Correctness under concurrent delivery comes from the event row lock and
     # the one_credit_per_webhook_event constraint in process_webhook_event
     # (MAP-180). school is the signature-matched school (None for the
     # env/default secret); process_webhook_event overwrites it on credit.
     event, created = HelcimWebhookEvent.objects.get_or_create(
+        rail='card',
         helcim_transaction_id=tx_id,
         defaults={
             'raw_payload': payload,
