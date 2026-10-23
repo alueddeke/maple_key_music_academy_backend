@@ -18,7 +18,7 @@ from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
 from custom_auth.decorators import (
     role_required, teacher_required, management_required,
-    teacher_or_management_required, owns_resource_or_management
+    teacher_or_management_required
 )
 import logging
 import calendar
