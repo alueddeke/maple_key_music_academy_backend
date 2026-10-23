@@ -71,6 +71,32 @@ def _period_for(year, month):
     return period_start, period_end
 
 
+def _parse_list_period(query_params):
+    """
+    Strict ``month`` / ``year`` parsing for the management list endpoint (MAP-282).
+
+    Returns ``(period, error)``: ``(None, None)`` when neither param is present
+    (caller lists every invoice), ``((period_start, period_end), None)`` when both
+    are valid, or ``(None, message)`` for one param alone or an invalid value —
+    the list endpoint answers 400 instead of silently falling back the way the
+    generate endpoint's ``_resolve_period`` does (D13 fail fast at the boundary).
+    """
+    raw_month = query_params.get('month')
+    raw_year = query_params.get('year')
+    if raw_month is None and raw_year is None:
+        return None, None
+    if raw_month is None or raw_year is None:
+        return None, 'month and year must be supplied together'
+    try:
+        month = int(raw_month)
+        year = int(raw_year)
+    except (TypeError, ValueError):
+        return None, 'month and year must be integers'
+    if not (1 <= month <= 12) or not (1000 <= year <= 9999):
+        return None, 'month must be 1-12 and year a 4-digit year'
+    return _period_for(year, month), None
+
+
 def _resolve_period(request):
     """
     Derive (period_start, period_end) from request-supplied ``month`` and ``year``.
@@ -340,10 +366,17 @@ def management_pre_billing_generate(request):
 @management_required
 def management_pre_billing_list(request):
     """
-    GET /api/billing/management/pre-billing/
+    GET /api/billing/management/pre-billing/[?month=M&year=YYYY]
 
-    Return all PreBillingInvoice rows scoped to request.user.school.
+    Return PreBillingInvoice rows scoped to request.user.school. Without
+    params every invoice is returned (the dashboard summary relies on this);
+    with both ``month`` and ``year`` only that billing period. One param alone
+    or an invalid value is a 400 (MAP-282).
     """
+    period, error = _parse_list_period(request.query_params)
+    if error is not None:
+        return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+
     qs = (
         PreBillingInvoice.objects
         .filter(school=request.user.school)
@@ -351,6 +384,9 @@ def management_pre_billing_list(request):
         .prefetch_related('lessons')
         .order_by('-created_at')
     )
+    if period is not None:
+        period_start, period_end = period
+        qs = qs.filter(period_start__range=(period_start, period_end))
     return Response([_serialize_invoice(i) for i in qs])
 
 
