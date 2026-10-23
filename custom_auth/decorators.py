@@ -59,39 +59,3 @@ def management_required(view_func):
 def teacher_or_management_required(view_func):
     """Shorthand decorator for teacher or management endpoints"""
     return role_required('teacher', 'management')(view_func)
-
-def owns_resource_or_management(resource_field='teacher'):
-    """
-    Decorator that ensures users can only access their own resources,
-    unless they are management (who can access everything).
-    
-    Usage: @owns_resource_or_management('teacher') for teacher-owned resources
-           @owns_resource_or_management('student') for student-owned resources
-    """
-    def decorator(view_func):
-        @wraps(view_func)
-        def wrapper(request, *args, **kwargs):
-            # First apply role checking
-            role_check = role_required('teacher', 'student', 'management')(view_func)
-            response = role_check(request, *args, **kwargs)
-            if hasattr(response, 'status_code') and response.status_code != 200:
-                return response
-            
-            # Management can access everything
-            if request.user.user_type == 'management':
-                return view_func(request, *args, **kwargs)
-            
-            # For non-management users, add resource ownership to request
-            if resource_field == 'teacher' and request.user.user_type == 'teacher':
-                request.resource_owner = request.user
-            elif resource_field == 'student' and request.user.user_type == 'student':
-                request.resource_owner = request.user
-            else:
-                return Response({
-                    'error': 'Access denied',
-                    'message': 'You can only access your own resources'
-                }, status=status.HTTP_403_FORBIDDEN)
-            
-            return view_func(request, *args, **kwargs)
-        return wrapper
-    return decorator
