@@ -14,6 +14,7 @@ Mocked Helcim HTTP patterns follow test_helcim_client.py approach
 
 import pytest
 from decimal import Decimal
+import calendar
 from datetime import date, time
 import logging
 from unittest.mock import patch, Mock
@@ -1321,3 +1322,94 @@ def test_list_and_detail_expose_send_outcome(management_client, school, student_
 
     assert (listed['status'], listed['send_outcome']) == ('sending', 'unknown')
     assert (detail['status'], detail['send_outcome']) == ('sending', 'unknown')
+
+
+# ---------------------------------------------------------------------------
+# MAP-282 — list endpoint month/year filter
+# ---------------------------------------------------------------------------
+
+def _draft_for_period(student, school, year, month):
+    period_start, period_end = date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+    return PreBillingInvoice.objects.create(
+        student=student, school=school, status='draft', amount=Decimal('100.00'),
+        period_start=period_start, period_end=period_end,
+    )
+
+
+def _list(client, **params):
+    return client.get(reverse('management_pre_billing_list'), params)
+
+
+@pytest.mark.django_db
+def test_list_without_params_returns_every_period(management_client, school, student_with_contact):
+    """No month/year → every invoice of the school (the dashboard summary relies on it)."""
+    student, _contact = student_with_contact
+    june = _draft_for_period(student, school, 2026, 6)
+    july = _draft_for_period(student, school, 2026, 7)
+
+    response = _list(management_client)
+
+    assert response.status_code == 200
+    assert {row['id'] for row in response.data} == {june.id, july.id}
+
+
+@pytest.mark.django_db
+def test_list_with_month_and_year_returns_only_that_period(management_client, school, student_with_contact):
+    """A valid month/year pair narrows the list to invoices whose period starts in that month."""
+    student, _contact = student_with_contact
+    june = _draft_for_period(student, school, 2026, 6)
+    _draft_for_period(student, school, 2026, 7)
+
+    response = _list(management_client, month=6, year=2026)
+
+    assert response.status_code == 200
+    assert [row['id'] for row in response.data] == [june.id]
+    assert response.data[0]['period_start'] == '2026-06-01'
+
+
+@pytest.mark.django_db
+def test_list_with_period_that_has_no_invoices_returns_empty_list(management_client, school, student_with_contact):
+    student, _contact = student_with_contact
+    _draft_for_period(student, school, 2026, 6)
+
+    response = _list(management_client, month=1, year=2027)
+
+    assert response.status_code == 200
+    assert response.data == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('params, fragment', [
+    ({'month': 6}, 'together'),
+    ({'year': 2026}, 'together'),
+    ({'month': 'june', 'year': 2026}, 'integers'),
+    ({'month': 6, 'year': 'abc'}, 'integers'),
+    ({'month': 13, 'year': 2026}, '1-12'),
+    ({'month': 0, 'year': 2026}, '1-12'),
+    ({'month': 6, 'year': 26}, '4-digit'),
+])
+def test_list_rejects_partial_or_invalid_period_with_400(management_client, school, student_with_contact, params, fragment):
+    """One param alone or an invalid value is a 400 with an error body — no silent fallback."""
+    student, _contact = student_with_contact
+    _draft_for_period(student, school, 2026, 6)
+
+    response = _list(management_client, **params)
+
+    assert response.status_code == 400
+    assert fragment in response.data['error']
+
+
+@pytest.mark.django_db
+def test_list_period_filter_stays_school_scoped(management_client, school, student_with_contact, second_school):
+    """The month/year filter never widens the school scope (LOCK-05)."""
+    student, _contact = student_with_contact
+    mine = _draft_for_period(student, school, 2026, 6)
+    other_student = User.objects.create_user(
+        email='second_school_student@prebilling.test', password='testpass123',
+        user_type='student', school=second_school, is_approved=True,
+    )
+    _draft_for_period(other_student, second_school, 2026, 6)
+
+    response = _list(management_client, month=6, year=2026)
+
+    assert [row['id'] for row in response.data] == [mine.id]
