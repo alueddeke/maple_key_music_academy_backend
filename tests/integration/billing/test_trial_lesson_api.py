@@ -176,6 +176,8 @@ class TestCreateTrialLesson:
         assert resp.data["id"] == item.id
         assert resp.data["batch_id"] == batch.id
         assert resp.data["batch_status"] == "draft"
+        assert resp.data["teacher"] == teacher_user.id
+        assert resp.data["teacher_name"] == teacher_user.get_full_name()
         assert resp.data["status"] == "trial"
         assert Decimal(resp.data["student_charge"]) == Decimal("0.00")
 

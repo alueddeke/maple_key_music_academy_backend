@@ -38,7 +38,7 @@ TRIAL_LESSON_KEYS = {
     'id', 'student', 'student_name', 'scheduled_date', 'start_time', 'duration',
     'lesson_type', 'teacher_rate', 'student_rate', 'status', 'cancellation_reason',
     'teacher_notes', 'admin_notes', 'is_one_off', 'teacher_payment', 'student_charge',
-    'created_at', 'batch_id', 'batch_status',
+    'created_at', 'batch_id', 'batch_status', 'teacher', 'teacher_name',
 }
 
 
@@ -203,3 +203,5 @@ def test_trial_lesson_emits_batch_item_keys_plus_batch_fields(
     assert set(fetched.data.keys()) == TRIAL_LESSON_KEYS
     assert fetched.data['batch_status'] == 'draft'
     assert isinstance(fetched.data['batch_id'], int)
+    assert fetched.data['teacher'] == teacher_user.id
+    assert fetched.data['teacher_name'] == teacher_user.get_full_name()

@@ -935,9 +935,13 @@ def student_pause_lessons(request, student_id):
 # ============================================================================
 
 def _trial_item_payload(item):
+    # Batch-item keys plus the batch and its teacher: the item row carries no
+    # teacher of its own (the batch does), and the student card shows both.
     data = BatchLessonItemSerializer(item).data
     data['batch_id'] = item.batch_id
     data['batch_status'] = item.batch.status
+    data['teacher'] = item.batch.teacher_id
+    data['teacher_name'] = item.batch.teacher.get_full_name()
     return data
 
 
@@ -972,7 +976,7 @@ def management_student_trial_lesson(request, student_id):
 
     def current_trial_item():
         return (
-            BatchLessonItem.objects.select_related('batch')
+            BatchLessonItem.objects.select_related('batch', 'batch__teacher')
             .filter(student=student, status='trial', batch__school=request.user.school)
             .order_by('created_at', 'id')
             .first()
