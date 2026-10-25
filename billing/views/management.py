@@ -12,7 +12,8 @@ from ..serializers import (
     UserSerializer, InvoiceSerializer,
     BillableContactSerializer, StudentCreateSerializer,
     MonthlyInvoiceBatchSerializer, BatchLessonItemSerializer, RecurringScheduleSerializer,
-    BatchRejectionSnapshotSerializer, TeacherDetailSerializer, TeacherUpdateSerializer
+    BatchRejectionSnapshotSerializer, TeacherDetailSerializer, TeacherUpdateSerializer,
+    TrialLessonCreateSerializer
 )
 from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
@@ -927,6 +928,139 @@ def student_pause_lessons(request, student_id):
     )
     serializer = RecurringScheduleSerializer(schedules, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ============================================================================
+# STUDENT TRIAL LESSON ENDPOINT (MAP-284)
+# ============================================================================
+
+def _trial_item_payload(item):
+    data = BatchLessonItemSerializer(item).data
+    data['batch_id'] = item.batch_id
+    data['batch_status'] = item.batch.status
+    return data
+
+
+@api_view(['GET', 'POST', 'DELETE'])
+@management_required
+def management_student_trial_lesson(request, student_id):
+    """
+    One trial lesson per student, entered by management independently of any
+    recurring schedule (MAP-284, decisions D1-D6).
+
+    GET    -> the student's trial item (plus batch_id/batch_status) or 404.
+    POST   -> create BatchLessonItem(status='trial', recurring_schedule=None) in the
+              teacher's draft batch for the date's month (batch created when
+              missing); demote any auto-detected trial item still in an open
+              batch to 'confirmed' (D6). 201 with the item.
+    DELETE -> remove the trial item while its batch is still draft; 409 after.
+
+    School-scoped student lookup: cross-school id -> 404.
+    """
+    from django.db import transaction
+    from billing.services.rates import resolve_rates
+
+    try:
+        student = User.objects.get(
+            pk=student_id,
+            user_type='student',
+            is_active=True,
+            school=request.user.school,
+        )
+    except User.DoesNotExist:
+        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    def current_trial_item():
+        return (
+            BatchLessonItem.objects.select_related('batch')
+            .filter(student=student, status='trial', batch__school=request.user.school)
+            .order_by('created_at', 'id')
+            .first()
+        )
+
+    if request.method == 'GET':
+        item = current_trial_item()
+        if item is None:
+            return Response({'error': 'Trial lesson not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_trial_item_payload(item))
+
+    if request.method == 'DELETE':
+        item = current_trial_item()
+        if item is None:
+            return Response({'error': 'Trial lesson not found'}, status=status.HTTP_404_NOT_FOUND)
+        if item.recurring_schedule_id is not None or item.batch.status != 'draft':
+            return Response(
+                {'error': 'trial lesson can no longer be removed'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        item.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # POST
+    with transaction.atomic():
+        # Serialise concurrent POSTs for the same student: the second one sees
+        # the first item and fails the D4 check inside validate().
+        list(
+            BatchLessonItem.objects.select_for_update()
+            .filter(student=student, status='trial')
+        )
+        serializer = TrialLessonCreateSerializer(
+            data=request.data, context={'request': request, 'student': student}
+        )
+        if not serializer.is_valid():
+            errors = serializer.errors
+            if 'error' in errors and 'fields' not in errors:
+                # validate() raised {'error': msg}; DRF list-wraps it. Flatten to the
+                # fixed wire body.
+                return Response({'error': str(errors['error'][0])}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        teacher = data['teacher']
+        lesson_date = data['date']
+
+        # Same creation path as teacher_monthly_batches POST (billing/views/teacher.py).
+        batch, _ = MonthlyInvoiceBatch.objects.get_or_create(
+            teacher=teacher,
+            school=request.user.school,
+            month=lesson_date.month,
+            year=lesson_date.year,
+            defaults={'status': 'draft'},
+        )
+
+        teacher_rate, student_rate = resolve_rates(
+            request.user.school, teacher, data['lesson_type']
+        )
+
+        # D6: the explicit trial is the only trial. Auto-detected trial items still
+        # in open batches become ordinary confirmed lessons.
+        BatchLessonItem.objects.filter(
+            student=student,
+            status='trial',
+            batch__status__in=['draft', 'submitted'],
+        ).update(status='confirmed')
+
+        # BatchLessonItem.save() auto-trial rule (zero history -> 'trial') agrees with
+        # the explicit status here; with history it leaves status alone.
+        item = BatchLessonItem.objects.create(
+            batch=batch,
+            student=student,
+            scheduled_date=lesson_date,
+            start_time=data['start_time'],
+            duration=data['duration'],
+            lesson_type=data['lesson_type'],
+            teacher_rate=teacher_rate,
+            student_rate=student_rate,
+            status='trial',
+            recurring_schedule=None,
+            is_one_off=False,
+        )
+        # A SchoolSettings row created on first use (get_or_create) still carries
+        # its Python-literal column defaults in memory; reload so the payload is
+        # built from DB-typed Decimals exactly like a later GET.
+        item.refresh_from_db()
+
+    return Response(_trial_item_payload(item), status=status.HTTP_201_CREATED)
 
 
 # ============================================================================
