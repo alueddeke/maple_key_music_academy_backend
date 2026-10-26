@@ -754,6 +754,19 @@ def recurring_schedule_detail(request, student_id, schedule_id):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'DELETE':
+        # BatchLessonItem.recurring_schedule is SET_NULL: deleting the schedule
+        # would leave its projected items in open batches as schedule-less rows,
+        # the shape the trial route reads as an explicit trial (MAP-284). Remove
+        # the future-dated ones with the same boundaries as
+        # reconcile_open_batches_for_student (open batch, scheduled_date > today,
+        # schedule-sourced); past-dated items stay — they happened and are
+        # billable. reconcile itself is not usable here: the schedule is still
+        # active while it runs, so it would delete nothing.
+        BatchLessonItem.objects.filter(
+            recurring_schedule=schedule,
+            batch__status__in=['draft', 'submitted'],
+            scheduled_date__gt=date.today(),
+        ).delete()
         schedule.delete()
         return Response({
             'message': 'Recurring schedule deleted successfully'

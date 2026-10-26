@@ -328,6 +328,62 @@ class TestTrialAndScheduleInteraction:
         assert trial_items.get().scheduled_date == trial_date
         assert trial_items.get().batch_id == batch.id
 
+    def test_schedule_delete_removes_its_future_open_batch_items(
+        self, management_client, teacher_client, new_student, teacher_user, school
+    ):
+        """Schedule synced first -> auto-trial on its first date. Deleting the
+        schedule must not leave schedule-less (SET_NULL) items behind that the
+        trial route would read as an explicit trial."""
+        year, month = _future_month()
+        start = _date_in(year, month, 10)
+        schedule = RecurringLessonsSchedule.objects.create(
+            teacher=teacher_user, student=new_student, school=school,
+            day_of_week=start.weekday(), start_time=time(15, 0),
+            duration=Decimal("1.00"), lesson_type="in_person",
+            start_date=start, is_active=True,
+        )
+        batch = sync_batch(teacher_client, year, month)
+        assert BatchLessonItem.objects.filter(batch=batch, student=new_student, status="trial").exists()
+
+        resp = management_client.delete(
+            reverse("recurring_schedule_detail", kwargs={"student_id": new_student.pk, "schedule_id": schedule.pk})
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.content
+
+        assert not BatchLessonItem.objects.filter(batch=batch, student=new_student).exists()
+        assert management_client.get(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND
+        created = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 2))
+        assert created.status_code == status.HTTP_201_CREATED, created.content
+
+    def test_schedule_delete_keeps_past_dated_items(
+        self, management_client, teacher_client, new_student, teacher_user, school
+    ):
+        """A lesson that already happened stays billable after the schedule goes."""
+        year, month = _future_month()
+        start = _date_in(year, month, 10)
+        schedule = RecurringLessonsSchedule.objects.create(
+            teacher=teacher_user, student=new_student, school=school,
+            day_of_week=start.weekday(), start_time=time(15, 0),
+            duration=Decimal("1.00"), lesson_type="in_person",
+            start_date=start, is_active=True,
+        )
+        batch = sync_batch(teacher_client, year, month)
+        past_item = BatchLessonItem.objects.filter(batch=batch, student=new_student).order_by("scheduled_date").first()
+        past_item.scheduled_date = date.today() - timedelta(days=1)
+        past_item.save(update_fields=["scheduled_date"])
+        future_count = BatchLessonItem.objects.filter(batch=batch, student=new_student).exclude(pk=past_item.pk).count()
+        assert future_count >= 1
+
+        resp = management_client.delete(
+            reverse("recurring_schedule_detail", kwargs={"student_id": new_student.pk, "schedule_id": schedule.pk})
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.content
+
+        remaining = BatchLessonItem.objects.filter(batch=batch, student=new_student)
+        assert list(remaining.values_list("pk", flat=True)) == [past_item.pk]
+        past_item.refresh_from_db()
+        assert past_item.recurring_schedule is None
+
     def test_pause_reconcile_leaves_trial_item_alone(
         self, management_client, teacher_client, new_student, teacher_user, school
     ):
