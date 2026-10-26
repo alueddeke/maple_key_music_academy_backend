@@ -7,6 +7,9 @@ MAP-260: response keys the strict frontend schemas rely on.
 
 MAP-253: a lesson row emits exactly the listed keys; a new Lesson column
 does not reach the wire without a deliberate contract change.
+
+MAP-284: the trial-lesson route emits the batch-item keys plus batch_id and
+batch_status; the frontend parity fixture is captured from this shape.
 """
 from decimal import Decimal
 
@@ -16,6 +19,7 @@ from rest_framework import status
 
 from billing.models import (
     ApprovedEmail,
+    BillableContact,
     Invoice,
     InvoiceRecipientEmail,
     SchoolSettings,
@@ -29,6 +33,12 @@ LESSON_KEYS = {
     'completed_date', 'duration', 'status', 'cancellation_reason', 'teacher_notes',
     'student_notes', 'recurring_schedule', 'created_at', 'updated_at', 'total_cost',
     'student_cost', 'is_first_lesson',
+}
+TRIAL_LESSON_KEYS = {
+    'id', 'student', 'student_name', 'scheduled_date', 'start_time', 'duration',
+    'lesson_type', 'teacher_rate', 'student_rate', 'status', 'cancellation_reason',
+    'teacher_notes', 'admin_notes', 'is_one_off', 'teacher_payment', 'student_charge',
+    'created_at', 'batch_id', 'batch_status', 'teacher', 'teacher_name', 'auto_detected',
 }
 
 
@@ -163,3 +173,36 @@ def test_teacher_detail_recent_lessons_emit_exactly_the_lesson_keys(
     for row in rows:
         assert set(row) == LESSON_KEYS
 
+
+@pytest.mark.django_db
+def test_trial_lesson_emits_batch_item_keys_plus_batch_fields(
+    api_client, management_user, teacher_user, school, school_settings
+):
+    from datetime import date
+    from django.contrib.auth import get_user_model
+    student = get_user_model().objects.create_user(
+        email='trial.keys@test.com', password='x', user_type='student',
+        first_name='Trial', last_name='Keys', school=school, is_approved=True,
+    )
+    student.assigned_teachers.add(teacher_user)
+    today = date.today()
+    month = today.month % 12 + 1
+    year = today.year + (1 if month == 1 else 0)
+    api_client.force_authenticate(management_user)
+    url = reverse('management_student_trial_lesson', args=[student.id])
+
+    created = api_client.post(url, {
+        'teacher': teacher_user.id, 'date': date(year, month, 3).isoformat(),
+        'start_time': '16:00:00', 'duration': '1.00',
+    }, format='json')
+    fetched = api_client.get(url)
+
+    assert created.status_code == status.HTTP_201_CREATED, created.content
+    assert fetched.status_code == status.HTTP_200_OK
+    assert set(created.data.keys()) == TRIAL_LESSON_KEYS
+    assert set(fetched.data.keys()) == TRIAL_LESSON_KEYS
+    assert fetched.data['batch_status'] == 'draft'
+    assert isinstance(fetched.data['batch_id'], int)
+    assert fetched.data['teacher'] == teacher_user.id
+    assert fetched.data['teacher_name'] == teacher_user.get_full_name()
+    assert fetched.data['auto_detected'] is False

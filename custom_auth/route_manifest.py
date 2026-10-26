@@ -88,6 +88,7 @@ ROUTE_MANIFEST = {
     'student_recurring_schedules': MANAGEMENT_ONLY,
     'recurring_schedule_detail': MANAGEMENT_ONLY,
     'student_pause_lessons': MANAGEMENT_ONLY,
+    'management_student_trial_lesson': MANAGEMENT_ONLY,
     'assign_teachers_to_student': MANAGEMENT_ONLY,
     'unassign_teacher_from_student': MANAGEMENT_ONLY,
     'teacher_students': MANAGEMENT_ONLY,

@@ -444,3 +444,27 @@ class TestManagementApproveTrialBatch:
         assert StudentInvoice.objects.filter(batch=trial_batch).count() == 0
         trial_batch.refresh_from_db()
         assert trial_batch.status == "approved"
+
+    def test_approve_schedule_less_trial_item(
+        self, management_client, trial_batch, trial_student
+    ):
+        """MAP-284: an explicit trial item has no recurring_schedule; approval still
+        creates the trial Lesson (teacher paid, student $0) and no StudentInvoice."""
+        from billing.models import Lesson, StudentInvoice
+        item = trial_batch.lesson_items.get()
+        assert item.recurring_schedule is None
+        assert item.is_one_off is False
+        teacher_payment = item.calculate_teacher_payment()
+        assert teacher_payment == item.teacher_rate * item.duration
+
+        url = reverse("management_approve_batch", kwargs={"batch_id": trial_batch.pk})
+        response = management_client.post(url, format="json")
+        assert response.status_code == status.HTTP_200_OK, response.content
+
+        lesson = Lesson.objects.get(student=trial_student)
+        assert lesson.is_trial is True
+        assert lesson.status == "trial"
+        assert lesson.student_rate == Decimal("0.00")
+        assert lesson.teacher_rate == item.teacher_rate
+        assert lesson.recurring_schedule is None
+        assert StudentInvoice.objects.filter(batch=trial_batch).count() == 0

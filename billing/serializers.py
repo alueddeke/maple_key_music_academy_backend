@@ -319,6 +319,83 @@ class TeacherBatchLessonItemSerializer(StrictFieldsMixin, serializers.ModelSeria
             raise serializers.ValidationError("Student is not assigned to you.")
         return student
 
+class TrialLessonCreateSerializer(StrictFieldsMixin, serializers.Serializer):
+    """
+    Management trial-lesson entry (MAP-284). Body: teacher, date, start_time,
+    duration (hours), optional lesson_type. Rates, status='trial' and the
+    batch are set by the view. Business rules live in validate() and surface
+    as the exact wire bodies the ticket fixes:
+      {"error": "teacher is not assigned to this student"}
+      {"error": "that month is already approved for this teacher"}
+      {"error": "student already has a trial lesson"}
+    Requires context={'student': <User>}.
+    """
+    teacher = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(user_type='teacher')
+    )
+    date = serializers.DateField()
+    start_time = serializers.TimeField()
+    # Same shape as RecurringLessonsSchedule.duration (max_digits=4, decimal_places=2).
+    duration = serializers.DecimalField(max_digits=4, decimal_places=2)
+    lesson_type = serializers.ChoiceField(
+        choices=Lesson.LESSON_TYPES, required=False, default='in_person'
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # School scope at the field: a teacher pk from another school is an
+        # invalid choice (DRF field error on 'teacher'), never resolved.
+        self.fields['teacher'].queryset = User.objects.filter(
+            user_type='teacher', school=self.context['student'].school
+        )
+
+    def validate_duration(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Duration must be greater than 0.")
+        return value
+
+    def validate(self, attrs):
+        student = self.context['student']
+        teacher = attrs['teacher']
+        lesson_date = attrs['date']
+
+        if not student.assigned_teachers.filter(pk=teacher.pk).exists():
+            raise serializers.ValidationError(
+                {'error': 'teacher is not assigned to this student'}
+            )
+
+        if MonthlyInvoiceBatch.objects.filter(
+            teacher=teacher,
+            school=student.school,
+            month=lesson_date.month,
+            year=lesson_date.year,
+            status='approved',
+        ).exists():
+            raise serializers.ValidationError(
+                {'error': 'that month is already approved for this teacher'}
+            )
+
+        # D4 one trial per student. An auto-detected trial item that is still in
+        # an open (draft/submitted) batch is not a second trial: the view demotes
+        # it to 'confirmed' (D6). Anything else counts: a trial Lesson row, a
+        # trial item in a closed batch, or an explicit (schedule-less, not
+        # one-off) trial item.
+        has_trial = (
+            Lesson.objects.filter(student=student, is_trial=True).exists()
+            or BatchLessonItem.objects.filter(student=student, status='trial')
+            .exclude(batch__status__in=['draft', 'submitted']).exists()
+            or BatchLessonItem.objects.filter(
+                student=student, status='trial',
+                recurring_schedule__isnull=True, is_one_off=False,
+            ).exists()
+        )
+        if has_trial:
+            raise serializers.ValidationError(
+                {'error': 'student already has a trial lesson'}
+            )
+        return attrs
+
+
 class MonthlyInvoiceBatchSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     lesson_items = BatchLessonItemSerializer(many=True, read_only=True)
