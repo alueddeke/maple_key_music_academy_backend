@@ -178,6 +178,7 @@ class TestCreateTrialLesson:
         assert resp.data["batch_status"] == "draft"
         assert resp.data["teacher"] == teacher_user.id
         assert resp.data["teacher_name"] == teacher_user.get_full_name()
+        assert resp.data["auto_detected"] is False
         assert resp.data["status"] == "trial"
         assert Decimal(resp.data["student_charge"]) == Decimal("0.00")
 
@@ -435,6 +436,32 @@ class TestGetAndDelete:
         assert resp.status_code == status.HTTP_204_NO_CONTENT
         assert not BatchLessonItem.objects.filter(student=new_student).exists()
         assert management_client.get(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND
+
+    def test_get_reports_auto_detected_schedule_trial(
+        self, management_client, teacher_client, new_student, teacher_user, school
+    ):
+        """Reverse order on the card: the auto-trial is shown as auto_detected so
+        management can still record the explicit one (D6)."""
+        year, month = _future_month()
+        start = _date_in(year, month, 10)
+        RecurringLessonsSchedule.objects.create(
+            teacher=teacher_user, student=new_student, school=school,
+            day_of_week=start.weekday(), start_time=time(15, 0),
+            duration=Decimal("1.00"), lesson_type="in_person",
+            start_date=start, is_active=True,
+        )
+        sync_batch(teacher_client, year, month)
+
+        resp = management_client.get(url_for(new_student))
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.data["auto_detected"] is True
+        assert resp.data["scheduled_date"] == start.isoformat()
+
+        created = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 2))
+        assert created.status_code == status.HTTP_201_CREATED, created.content
+        resp = management_client.get(url_for(new_student))
+        assert resp.data["auto_detected"] is False
+        assert resp.data["scheduled_date"] == _date_in(year, month, 2).isoformat()
 
     def test_delete_404_when_no_trial(self, management_client, new_student):
         assert management_client.delete(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND

@@ -942,6 +942,10 @@ def _trial_item_payload(item):
     data['batch_status'] = item.batch.status
     data['teacher'] = item.batch.teacher_id
     data['teacher_name'] = item.batch.teacher.get_full_name()
+    # False only for a management-entered trial (schedule-less, not a teacher
+    # one-off); True for the auto-detected fallback the card must not treat as
+    # final (D6: recording an explicit trial demotes it).
+    data['auto_detected'] = item.recurring_schedule_id is not None or item.is_one_off
     return data
 
 
@@ -975,12 +979,15 @@ def management_student_trial_lesson(request, student_id):
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
 
     def current_trial_item():
-        return (
+        # The explicit trial wins over an auto-detected one when both exist
+        # (only possible transiently); otherwise the earliest trial item.
+        items = (
             BatchLessonItem.objects.select_related('batch', 'batch__teacher')
             .filter(student=student, status='trial', batch__school=request.user.school)
             .order_by('created_at', 'id')
-            .first()
         )
+        explicit = items.filter(recurring_schedule__isnull=True, is_one_off=False).first()
+        return explicit or items.first()
 
     if request.method == 'GET':
         item = current_trial_item()
