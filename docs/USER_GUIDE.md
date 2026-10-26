@@ -701,7 +701,7 @@ The page displays:
 - Fallback: if no trial was recorded, the student's very first lesson is auto-detected as the trial
 - You get paid, student gets first lesson free
 
-> **💡 Important:** Once the batch is approved the trial can no longer be removed or changed.
+> **💡 Important:** Once the batch is **submitted** the trial can no longer be removed or changed.
 
 #### Rate Locking
 
