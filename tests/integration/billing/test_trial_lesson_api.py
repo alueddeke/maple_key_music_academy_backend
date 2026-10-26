@@ -234,6 +234,43 @@ class TestCreateTrialLesson:
             management_client.delete(url_for(new_student))
 
 
+@pytest.mark.django_db(transaction=True)
+class TestConcurrentCreate:
+
+    def test_concurrent_posts_create_one_item(self, management_user, new_student, teacher_user):
+        """Two first POSTs for the same student at the same time: the student-row
+        lock serialises them, so exactly one item exists, one 201, one 400."""
+        import threading
+        from django.db import connection
+
+        year, month = _future_month()
+        on_date = _date_in(year, month, 5)
+        barrier = threading.Barrier(2)
+        results = []
+
+        def worker():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=management_user)
+                barrier.wait(timeout=10)
+                resp = post_trial(client, new_student, teacher_user, on_date)
+                results.append((resp.status_code, resp.json()))
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert sorted(code for code, _ in results) == [201, 400], results
+        bodies = {code: body for code, body in results}
+        assert bodies[400] == {"error": "student already has a trial lesson"}
+        assert BatchLessonItem.objects.filter(student=new_student, status="trial").count() == 1
+        assert BatchLessonItem.objects.filter(student=new_student).count() == 1
+
+
 @pytest.mark.django_db
 class TestTrialAndScheduleInteraction:
 

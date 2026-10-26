@@ -1009,12 +1009,12 @@ def management_student_trial_lesson(request, student_id):
 
     # POST
     with transaction.atomic():
-        # Serialise concurrent POSTs for the same student: the second one sees
-        # the first item and fails the D4 check inside validate().
-        list(
-            BatchLessonItem.objects.select_for_update()
-            .filter(student=student, status='trial')
-        )
+        # Serialise concurrent POSTs for the same student: lock the student row
+        # (SELECT ... FOR UPDATE on custom_auth_user). Locking the student's
+        # existing trial items would lock nothing on a first POST, so two
+        # concurrent first POSTs would both create. The second request blocks
+        # here until the first commits, then fails the D4 check in validate().
+        student = User.objects.select_for_update().get(pk=student.pk)
         serializer = TrialLessonCreateSerializer(
             data=request.data, context={'request': request, 'student': student}
         )
