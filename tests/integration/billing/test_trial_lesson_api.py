@@ -436,8 +436,11 @@ class TestCreateValidation:
         new_student.assigned_teachers.add(foreign)
         year, month = _future_month()
         resp = post_trial(management_client, new_student, foreign, _date_in(year, month, 5))
+        # The teacher field's queryset is school-scoped, so a foreign pk is an
+        # invalid choice at the field (DRF error on 'teacher'), not a business rule.
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
-        assert resp.json() == {"error": "teacher is not assigned to this student"}
+        assert list(resp.json().keys()) == ["teacher"]
+        assert not BatchLessonItem.objects.filter(student=new_student).exists()
 
     def test_month_already_approved(self, management_client, new_student, teacher_user, school):
         year, month = _future_month()

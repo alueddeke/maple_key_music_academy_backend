@@ -341,6 +341,14 @@ class TrialLessonCreateSerializer(StrictFieldsMixin, serializers.Serializer):
         choices=Lesson.LESSON_TYPES, required=False, default='in_person'
     )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # School scope at the field: a teacher pk from another school is an
+        # invalid choice (DRF field error on 'teacher'), never resolved.
+        self.fields['teacher'].queryset = User.objects.filter(
+            user_type='teacher', school=self.context['student'].school
+        )
+
     def validate_duration(self, value):
         if value <= 0:
             raise serializers.ValidationError("Duration must be greater than 0.")
@@ -351,10 +359,7 @@ class TrialLessonCreateSerializer(StrictFieldsMixin, serializers.Serializer):
         teacher = attrs['teacher']
         lesson_date = attrs['date']
 
-        if (
-            teacher.school_id != student.school_id
-            or not student.assigned_teachers.filter(pk=teacher.pk).exists()
-        ):
+        if not student.assigned_teachers.filter(pk=teacher.pk).exists():
             raise serializers.ValidationError(
                 {'error': 'teacher is not assigned to this student'}
             )
