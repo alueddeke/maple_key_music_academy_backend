@@ -600,6 +600,35 @@ class TestGetAndDelete:
         resp = management_client.delete(url_for(new_student))
         assert resp.status_code == status.HTTP_409_CONFLICT
 
+    def test_delete_teacher_one_off_trial_409(
+        self, management_client, teacher_client, new_student, teacher_user
+    ):
+        """A teacher one-off that became the auto-trial is the teacher's item;
+        the management route must not remove it."""
+        year, month = _future_month()
+        batch = sync_batch(teacher_client, year, month)
+        resp = teacher_client.post(
+            reverse("batch_add_lesson", kwargs={"batch_id": batch.pk}),
+            {
+                "student": new_student.pk,
+                "scheduled_date": _date_in(year, month, 5).isoformat(),
+                "start_time": "16:00:00",
+                "duration": "1.00",
+                "lesson_type": "in_person",
+                "status": "confirmed",
+                "teacher_notes": "",
+            },
+            format="json",
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
+        item = BatchLessonItem.objects.get(student=new_student)
+        assert item.status == "trial" and item.is_one_off
+
+        resp = management_client.delete(url_for(new_student))
+        assert resp.status_code == status.HTTP_409_CONFLICT
+        assert resp.json() == {"error": "trial lesson can no longer be removed"}
+        assert BatchLessonItem.objects.filter(pk=item.pk).exists()
+
 
 @pytest.mark.django_db
 class TestApproval:

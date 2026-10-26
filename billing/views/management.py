@@ -1012,7 +1012,13 @@ def management_student_trial_lesson(request, student_id):
         item = current_trial_item()
         if item is None:
             return Response({'error': 'Trial lesson not found'}, status=status.HTTP_404_NOT_FOUND)
-        if item.recurring_schedule_id is not None or item.batch.status != 'draft':
+        # Only the explicit trial (schedule-less, not a teacher one-off) in a
+        # draft batch is removable here; teacher one-offs belong to the teacher.
+        if (
+            item.recurring_schedule_id is not None
+            or item.is_one_off
+            or item.batch.status != 'draft'
+        ):
             return Response(
                 {'error': 'trial lesson can no longer be removed'},
                 status=status.HTTP_409_CONFLICT,
