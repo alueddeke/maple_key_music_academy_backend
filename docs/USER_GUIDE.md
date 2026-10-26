@@ -466,7 +466,8 @@ You get paid one rate, students are charged a different rate:
 - First-time students get their first lesson free
 - **You still get paid** your normal rate
 - Student is charged $0
-- System auto-detects trial lessons
+- Management records the trial on the student's page (any date, time and teacher — it does not have to match the recurring schedule). It appears in your draft batch for that month as a `trial` item
+- Fallback: if no trial was recorded, the system still auto-detects a brand-new student's first lesson as the trial
 
 ---
 
@@ -693,12 +694,14 @@ The page displays:
 **Student Rate:** $0 (student not charged)
 **School Margin:** Negative (school pays you, student pays nothing)
 
-**How trial lessons are detected:**
-- System checks if this is the student's first completed lesson
-- If yes → Automatically marked as trial
+**How trial lessons are entered:**
+- Management opens the student's page and records the trial lesson: teacher, date, start time, duration. The date is free — it does not need to fall on the recurring schedule's weekday, and the schedule can start a week or more later
+- The trial lands in that teacher's draft batch for the month; one trial per student. It can be removed while the batch is still a draft
+- When the trial is recorded after the schedule's first lesson was already auto-marked as the trial, that first lesson becomes a normal billed lesson
+- Fallback: if no trial was recorded, the student's very first lesson is auto-detected as the trial
 - You get paid, student gets first lesson free
 
-> **💡 Important:** Trial status is auto-detected. You cannot manually override this after the lesson is completed.
+> **💡 Important:** Once the batch is **submitted** the trial can no longer be removed or changed.
 
 #### Rate Locking
 

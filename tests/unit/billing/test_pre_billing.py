@@ -349,6 +349,49 @@ class TestBillAheadGeneration:
         assert invoice.amount == expected_amount
         assert invoice.amount > 0
 
+    def test_future_period_projection_excludes_explicit_trial_item(
+        self, management_client, school, teacher_user
+    ):
+        """
+        MAP-284: a management-entered trial item (BatchLessonItem, no schedule)
+        in the same future month is not a schedule date, so the pre-billing draft
+        amount is the schedule's dates only; the trial stays at $0 to the student.
+        """
+        from billing.models import BatchLessonItem, MonthlyInvoiceBatch
+        student, _ = _make_student_with_contact(school)
+        student.assigned_teachers.add(teacher_user)
+        year, month = self._future_year_month()
+        sched = _make_schedule(teacher_user, student, school, day_of_week=0,
+                               student_rate=Decimal('60.00'),
+                               duration=Decimal('1.00'))
+        expected_dates = sched.generate_lessons_for_month(year, month)
+        # Trial on a date the schedule never projects (a Wednesday, day_of_week=0 is Monday).
+        trial_date = next(
+            date(year, month, d) for d in range(1, 8) if date(year, month, d).weekday() == 2
+        )
+        assert trial_date not in expected_dates
+
+        resp = management_client.post(
+            f'/api/billing/management/students/{student.pk}/trial-lesson/',
+            {'teacher': teacher_user.pk, 'date': trial_date.isoformat(),
+             'start_time': '16:00:00', 'duration': '1.00', 'lesson_type': 'online'},
+            format='json',
+        )
+        assert resp.status_code == 201, resp.content
+        assert BatchLessonItem.objects.filter(student=student, status='trial').count() == 1
+        assert MonthlyInvoiceBatch.objects.filter(
+            teacher=teacher_user, month=month, year=year, status='draft'
+        ).exists()
+
+        resp = management_client.post(
+            '/api/billing/management/pre-billing/generate/',
+            {'month': month, 'year': year}, format='json',
+        )
+        assert resp.status_code == 200, resp.content
+
+        invoice = PreBillingInvoice.objects.get(student=student, school=school)
+        assert invoice.amount == (Decimal('60.00') * Decimal('1.00')) * len(expected_dates)
+
     def test_future_period_biweekly_schedule_projects_alternate_weeks(
         self, management_client, school, teacher_user
     ):

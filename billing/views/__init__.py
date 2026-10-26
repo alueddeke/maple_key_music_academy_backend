@@ -23,6 +23,7 @@ from .management import (
     student_recurring_schedules,
     recurring_schedule_detail,
     student_pause_lessons,
+    management_student_trial_lesson,
     assign_teachers_to_student,
     unassign_teacher_from_student,
     teacher_students,
