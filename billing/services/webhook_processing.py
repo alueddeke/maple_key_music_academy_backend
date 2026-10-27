@@ -3,6 +3,7 @@ billing/services/webhook_processing.py — Helcim webhook credit reconciliation.
 
 Shared by:
   - billing/views/webhooks.py     (live webhook receipt + Helcim retry re-processing)
+  - sync_helcim_ach command       (bank payments — polled, Helcim has no bank webhooks)
   - retry_webhook_events command  (manual/scheduled recovery of stuck events)
   - HelcimWebhookEvent admin action
 
@@ -29,6 +30,12 @@ Money-safety rules enforced here:
     helcim_transaction_id regardless of caller (webhook view, retry command,
     sync command).
   - Helcim HTTP calls stay OUTSIDE transaction.atomic() (STATE.md hard rule).
+  - Bank (ACH) events (rail='ach', MAP-217) are never enriched from the card
+    API: sync_helcim_ach writes their fields in the canonical vocabulary
+    below, and a retry gates on those stored fields. From the event lock
+    onward a bank payment follows exactly the card rules (superseded number,
+    coverage, cap, paid flip), so a card and a bank payment on one invoice
+    are never both credited in full, in either order.
 """
 
 import logging
@@ -60,6 +67,16 @@ ALERT_STATES = {'enrichment_failed', 'no_invoice', 'no_account', 'needs_attentio
 
 CREDITABLE_TYPES = {'purchase', 'capture'}
 
+# Canonical vocabulary for bank (ACH) events. sync_helcim_ach translates
+# Helcim's raw values into these before storing them on the event, so nothing
+# in this module depends on Helcim's wire format.
+ACH_DEBIT_TYPE = 'ach_debit'
+ACH_APPROVED_STATUS = 'APPROVED'
+ACH_WAITING_STATUSES = {'PENDING', 'IN_PROGRESS'}
+ACH_REFUSED_STATUSES = {'DECLINED', 'CANCELLED'}
+
+PAID_VIA_BY_RAIL = {'card': 'card', 'ach': 'bank'}
+
 
 def process_webhook_event(event):
     """
@@ -82,11 +99,40 @@ def process_webhook_event(event):
     return event
 
 
+def _gate_ach(event):
+    """
+    Decide a bank (ACH) event from its stored fields. Returns the finalized
+    event when it must not be credited, None when it may enter the credit path.
+    """
+    if event.transaction_type != ACH_DEBIT_TYPE:
+        return _finalize(
+            event, 'needs_attention',
+            f'bank transaction type={event.transaction_type or "(missing)"} is not a known debit '
+            '— not credited, review in admin',
+        )
+    status = event.transaction_status.upper()
+    if status in ACH_WAITING_STATUSES:
+        return _finalize(event, 'awaiting_bank', f'bank authorization {status}')
+    if status in ACH_REFUSED_STATUSES:
+        return _finalize(event, 'not_approved', f'transaction status={event.transaction_status}')
+    if status != ACH_APPROVED_STATUS:
+        return _finalize(
+            event, 'needs_attention',
+            f'unknown bank authorization status={event.transaction_status or "(missing)"} '
+            '— not credited, review in admin',
+        )
+    return None
+
+
 def _process(event):
-    # Enrichment — outside any DB transaction. Re-fetch when either the
+    if event.rail == 'ach':
+        refused = _gate_ach(event)
+        if refused is not None:
+            return refused
+    # Card enrichment — outside any DB transaction. Re-fetch when either the
     # invoice number or the gating fields are missing (legacy rows predate
     # transaction_status).
-    if not event.invoice_id or not event.transaction_status:
+    elif not event.invoice_id or not event.transaction_status:
         client = HelcimClient(school=event.school)
         try:
             tx = client.get_card_transaction(event.helcim_transaction_id)
@@ -119,7 +165,7 @@ def _process(event):
     tx_type = event.transaction_type.lower()
     if tx_status != 'APPROVED':
         return _finalize(event, 'not_approved', f'transaction status={event.transaction_status or "(missing)"}')
-    if tx_type not in CREDITABLE_TYPES:
+    if event.rail == 'card' and tx_type not in CREDITABLE_TYPES:
         # Refunds/reversals are recorded but intentionally not auto-applied to
         # the wallet — surface for manual review in admin.
         return _finalize(event, 'non_purchase', f'transaction type={event.transaction_type or "(missing)"}')
@@ -244,7 +290,8 @@ def _process(event):
             covered = (prior + credit) >= invoice.amount
             if covered and invoice.status != 'paid':
                 invoice.status = 'paid'
-                invoice.save(update_fields=['status', 'updated_at'])
+                invoice.paid_via = PAID_VIA_BY_RAIL[event.rail]
+                invoice.save(update_fields=['status', 'paid_via', 'updated_at'])
 
             event.school = invoice.school
             event.processing_status = 'credited' if covered else 'credited_partial'

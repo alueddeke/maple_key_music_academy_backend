@@ -81,6 +81,15 @@ class School(models.Model):
             "first run looks back 30 days."
         ),
     )
+    helcim_ach_last_synced_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            "sync_helcim_ach checkpoint (MAP-217), separate from the card one: "
+            "the Helcim dateCreated every bank transaction up to which is "
+            "settled in the app. Held at the oldest transaction still awaiting "
+            "the bank. Null = never synced; the first run looks back 30 days."
+        ),
+    )
     payment_terms_days = models.PositiveIntegerField(default=7)
     cancellation_notice_hours = models.PositiveIntegerField(default=24)
 
@@ -1368,10 +1377,13 @@ class CreditTransaction(models.Model):
 
 class HelcimWebhookEvent(models.Model):
     """
-    Records a single Helcim payment webhook receipt.
+    Records a single Helcim payment: a card webhook receipt, or a bank (ACH)
+    transaction found by sync_helcim_ach (Helcim sends no bank webhooks).
 
-    helcim_transaction_id is the idempotency key (unique constraint) — duplicate
-    POSTs from Helcim retry mechanism (24 h+) are safely no-ops via get_or_create.
+    (rail, helcim_transaction_id) is the idempotency key (unique constraint) —
+    duplicate POSTs from Helcim retry mechanism (24 h+) and repeated sync runs
+    are safely no-ops via get_or_create. Card and bank ids are separate number
+    spaces, so the same id may exist once per rail (MAP-217).
 
     school FK is null at receipt time (unauthenticated webhook, no user context).
     Phase 20 sets school when the invoice is resolved (Pitfall 2 / RESEARCH.md).
@@ -1385,10 +1397,19 @@ class HelcimWebhookEvent(models.Model):
         related_name='helcim_webhook_events',
         help_text="Set by Phase 20 credit reconciliation. Null until invoice resolved.",
     )
+    RAIL_CHOICES = [
+        ('card', 'Card'),
+        ('ach', 'Bank (ACH/EFT)'),
+    ]
+    rail = models.CharField(
+        max_length=10,
+        choices=RAIL_CHOICES,
+        default='card',
+        help_text="Payment rail the transaction id belongs to (MAP-217).",
+    )
     helcim_transaction_id = models.CharField(
         max_length=100,
-        unique=True,
-        help_text="Idempotency key — unique per Helcim transaction. Duplicate POSTs are no-ops.",
+        help_text="Idempotency key — unique per rail and Helcim transaction. Duplicates are no-ops.",
     )
     raw_payload = models.JSONField(
         help_text="Full webhook body stored for debugging and audit. PCI-safe: Helcim sends only id/type, no card data.",
@@ -1432,6 +1453,9 @@ class HelcimWebhookEvent(models.Model):
         # Payment arrived on an invoice number an adjustment superseded
         # (MAP-184). Terminal — never credited, never retried; admin review.
         ('needs_attention', 'Needs attention'),
+        # Bank payment not authorized yet (MAP-217). Re-read by sync_helcim_ach
+        # every tick; neither retried by retry_webhook_events nor alerted on.
+        ('awaiting_bank', 'Awaiting bank'),
     ]
     processing_status = models.CharField(
         max_length=30,
@@ -1455,6 +1479,12 @@ class HelcimWebhookEvent(models.Model):
         ordering = ['-received_at']
         verbose_name = 'Helcim Webhook Event'
         verbose_name_plural = 'Helcim Webhook Events'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['rail', 'helcim_transaction_id'],
+                name='one_event_per_rail_transaction',
+            ),
+        ]
 
     def __str__(self):
         return f"HelcimWebhookEvent #{self.helcim_transaction_id} — {self.received_at}"
@@ -1750,6 +1780,18 @@ class PreBillingInvoice(models.Model):
         choices=CANCEL_OUTCOME_CHOICES,
         default='none',
         help_text="Outcome of voiding previous_helcim_invoice_id after the last removal (MAP-184).",
+    )
+    PAID_VIA_CHOICES = [
+        ('card', 'Card'),
+        ('bank', 'Bank (ACH/EFT)'),
+        ('offline', 'Offline'),
+    ]
+    paid_via = models.CharField(
+        max_length=10,
+        choices=PAID_VIA_CHOICES,
+        blank=True,
+        default='',
+        help_text="How the payment that marked this invoice paid arrived. Blank until paid (MAP-217).",
     )
     send_attempt_id = models.UUIDField(
         null=True,
