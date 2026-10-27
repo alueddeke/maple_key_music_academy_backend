@@ -495,6 +495,7 @@ def test_finding_08_enrichment_failed_recovered_by_scheduler_tick(school, studen
 
     with mock.patch('billing.services.helcim_client.HelcimClient.get_card_transaction', return_value=transaction), \
          mock.patch('billing.services.helcim_client.HelcimClient.list_card_transactions', return_value=[]), \
+         mock.patch('billing.services.helcim_client.HelcimClient.list_ach_transactions', return_value=[]), \
          mock.patch('billing.management.commands.run_scheduler.start_http_server'):
         call_command('run_scheduler', '--once', stdout=StringIO())
 

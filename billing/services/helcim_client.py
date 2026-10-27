@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 HELCIM_API_BASE = 'https://api.helcim.com/v2'
 HELCIM_TIMEOUT = 10  # seconds — matches Google OAuth 10-second pattern (D-03)
+# Documented maximum page size of GET /v2/ach/transactions (card list: no known cap).
+ACH_PAGE_LIMIT = 125
 
 
 class HelcimAPIError(Exception):
@@ -354,6 +356,79 @@ class HelcimClient:
         data = response.json()
         # Helcim returns either a bare list or an object wrapping one.
         return data if isinstance(data, list) else data.get('data', [])
+
+    def list_ach_transactions(self, limit=ACH_PAGE_LIMIT, date_from=None, status_auth=None,
+                              status_clearing=None, search=None, page=None):
+        """
+        GET /v2/ach/transactions — one page of bank (ACH/EFT) transactions.
+
+        Used by sync_helcim_ach: Helcim sends webhooks for cards only, so bank
+        payments are found by polling (Helcim tier-2, 2026-09-28).
+
+        Built from Helcim's API reference (getmanyachtransactions), not from an
+        observed response: no bank transaction existed on the test or the
+        production account on 2026-10-05 (MAP-270). Parameter names and the
+        response envelope are the documented ones; correct them here if a real
+        call disagrees.
+
+        Args:
+            limit: page size (documented maximum 125)
+            date_from: optional datetime.date — sent as startDate (YYYY-MM-DD)
+            status_auth: optional name or list of names (APPROVED, PENDING, ...)
+            status_clearing: optional name or list of names (OPENED, CLEARED, ...)
+            search: optional free-text search (id, order id, batch id, ...)
+            page: optional 1-based page number
+
+        Returns:
+            list of transaction dicts; [] when Helcim answers 204 No Content
+
+        Raises:
+            HelcimAPIError: on non-2xx response or timeout
+        """
+        params = {'limit': limit}
+        if date_from is not None:
+            params['startDate'] = date_from.isoformat()
+        if status_auth is not None:
+            params['statusAuth'] = status_auth
+        if status_clearing is not None:
+            params['statusClearing'] = status_clearing
+        if search is not None:
+            params['search'] = search
+        if page is not None:
+            params['page'] = page
+        try:
+            response = requests.get(
+                f'{HELCIM_API_BASE}/ach/transactions',
+                params=params,
+                headers=self._headers(),
+                timeout=HELCIM_TIMEOUT,
+            )
+        except requests.Timeout:
+            logger.error('Helcim %s timeout after %ds', 'list_ach_transactions', HELCIM_TIMEOUT)
+            raise HelcimAPIError('Helcim list_ach_transactions timeout', status_code=None)
+
+        if not response.ok:
+            logger.error(
+                'Helcim %s failed: status=%s body=%s',
+                'list_ach_transactions',
+                response.status_code,
+                response.text,
+            )
+            raise HelcimAPIError(
+                f'Helcim list_ach_transactions failed: {response.status_code}',
+                status_code=response.status_code,
+                raw_response=response.text,
+            )
+
+        # An account with no matching bank transactions answers 204 with an
+        # empty body (probed 2026-10-04 on test, 2026-10-05 on production).
+        if response.status_code == 204 or not response.content:
+            return []
+        data = response.json()
+        # A bare list, or an object wrapping one.
+        if isinstance(data, list):
+            return data
+        return data.get('transactions') or data.get('data') or []
 
     def get_card_transaction(self, transaction_id):
         """
