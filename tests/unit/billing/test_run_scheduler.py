@@ -206,6 +206,100 @@ def test_bank_sync_runs_once_per_retry_window(school, ach_list):
     assert calls_after_each_tick == [schools, schools, 2 * schools]
 
 
+# --- command output as structured log lines (MAP-291) ------------------------
+# Command stdout/stderr never reached `docker logs` in prod; each command's
+# output is captured and logged through the JSON logger instead.
+
+SCHEDULER_LOGGER = 'billing.management.commands.run_scheduler'
+CALL_COMMAND_TARGET = 'billing.management.commands.run_scheduler.call_command'
+
+
+def _scheduler_records(caplog, command, level):
+    return [r for r in caplog.records
+            if r.name == SCHEDULER_LOGGER and r.levelno == level
+            and r.getMessage().startswith(f'{command}: ')]
+
+
+@pytest.mark.django_db
+def test_tick_logs_one_line_per_command_with_its_output(school, caplog):
+    """
+    A tick at 04:00 UTC runs all three commands; each gets exactly one INFO
+    line carrying its name and the text it printed. The expected text is the
+    command's own output, run standalone under the same mocks (nothing to
+    retry, no Helcim rows → the standalone run changes no state).
+    """
+    frozen = datetime(2026, 9, 13, 4, 0, 0, tzinfo=dt_timezone.utc)
+    commands = ('retry_webhook_events', 'sync_helcim_ach', 'sync_helcim_payments')
+
+    with mock.patch(NOW_TARGET, return_value=frozen), \
+         mock.patch(LIST_TARGET, return_value=[]), mock.patch(GET_TARGET):
+        expected = {}
+        for command in commands:
+            out = StringIO()
+            call_command(command, stdout=out, stderr=StringIO(), no_color=True)
+            expected[command] = out.getvalue().strip()
+
+        with caplog.at_level(logging.INFO, logger=SCHEDULER_LOGGER):
+            _tick()
+
+    for command in commands:
+        records = _scheduler_records(caplog, command, logging.INFO)
+        assert len(records) == 1, f'{command}: {len(records)} log lines'
+        assert expected[command]
+        assert records[0].getMessage() == f'{command}: {expected[command]}'
+        assert '\x1b[' not in records[0].getMessage()  # no ANSI colour codes in the JSON line
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('out_text, err_text, expected_info', [
+    ('', '', '(no output)'),
+    ('2 row(s) synced\n', '', '2 row(s) synced'),
+    ('', 'Helcim said no\n', '(no output)'),
+])
+def test_run_logs_captured_output_and_stderr_as_warning(school, caplog, out_text, err_text, expected_info):
+    """
+    Each command logs one INFO line ('(no output)' when it printed nothing, so
+    quiet ticks are visible) and one WARNING line only when it wrote to stderr.
+    """
+    def fake_command(name, stdout, stderr, **_options):
+        stdout.write(out_text)
+        stderr.write(err_text)
+
+    with mock.patch(CALL_COMMAND_TARGET, side_effect=fake_command), \
+         caplog.at_level(logging.INFO, logger=SCHEDULER_LOGGER):
+        _tick()
+
+    for command in ('retry_webhook_events', 'sync_helcim_ach'):
+        info = _scheduler_records(caplog, command, logging.INFO)
+        assert [r.getMessage() for r in info] == [f'{command}: {expected_info}']
+        warnings = _scheduler_records(caplog, command, logging.WARNING)
+        if err_text:
+            assert [r.getMessage() for r in warnings] == [f'{command}: {err_text.strip()}']
+        else:
+            assert warnings == []
+
+
+@pytest.mark.django_db
+def test_failing_command_is_logged_and_the_tick_continues(school, caplog):
+    """A command that raises is logged as an exception; the next command still runs."""
+    ran = []
+
+    def fake_command(name, stdout, stderr, **_options):
+        ran.append(name)
+        if name == 'retry_webhook_events':
+            raise RuntimeError('boom')
+        stdout.write('ok')
+
+    with mock.patch(CALL_COMMAND_TARGET, side_effect=fake_command), \
+         caplog.at_level(logging.INFO, logger=SCHEDULER_LOGGER):
+        _tick()
+
+    assert ran[:2] == ['retry_webhook_events', 'sync_helcim_ach']
+    assert 'Scheduler: retry_webhook_events raised; continuing' in caplog.text
+    assert [r.getMessage() for r in _scheduler_records(caplog, 'sync_helcim_ach', logging.INFO)] \
+        == ['sync_helcim_ach: ok']
+
+
 # --- maplekey_webhook_events_failed_15m (MAP-231) ---------------------------
 # The webhook-failures alert reads this gauge: a count from the DB, so one
 # event is enough to fire (the per-process counter's increase() missed it).

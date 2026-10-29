@@ -25,6 +25,7 @@ import os
 import signal
 import threading
 from datetime import timedelta
+from io import StringIO
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
@@ -108,10 +109,19 @@ class Command(BaseCommand):
         self._refresh_gauges(now)
 
     def _run(self, command):
+        # Command output goes through the JSON logger, one line per command
+        # per tick: written to the process stdout it never reached docker logs
+        # or Loki (MAP-291). '(no output)' keeps quiet ticks visible.
+        out, err = StringIO(), StringIO()
         try:
-            call_command(command, stdout=self.stdout, stderr=self.stderr)
+            call_command(command, stdout=out, stderr=err, no_color=True)
         except Exception:  # noqa: BLE001 — the loop must outlive any one failure
             logger.exception('Scheduler: %s raised; continuing', command)
+            return
+        logger.info('%s: %s', command, out.getvalue().strip() or '(no output)')
+        err_text = err.getvalue().strip()
+        if err_text:
+            logger.warning('%s: %s', command, err_text)
 
     def _refresh_gauges(self, now):
         unresolved = HelcimWebhookEvent.objects.filter(
