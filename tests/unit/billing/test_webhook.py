@@ -15,7 +15,7 @@ Coverage:
 
 All tests are unauthenticated — payment_callback is @permission_classes([AllowAny]).
 School FK is None by design (Phase 20 sets it during credit reconciliation).
-HELCIM_WEBHOOK_SECRET test value: 'dGVzdC1zZWNyZXQ=' (base64 of "test-secret"), set by helcim_test_env.py.
+HELCIM_WEBHOOK_SECRET test value: base64 of "test-secret", set by maple_key_backend/settings_pytest.py.
 """
 
 import base64
