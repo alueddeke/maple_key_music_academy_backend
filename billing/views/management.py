@@ -1377,7 +1377,8 @@ def management_generate_teacher_invoice(request, batch_id):
         win new clients — the teacher is paid, the student is charged $0.
       - forfeited: paid. Student no-show — the student is still charged, the teacher
         is still paid.
-      - waived / cancelled: $0.
+      - promo: paid at the teacher's normal rate, like trial (MAP-272).
+      - waived / cancelled / teacher_cancelled: $0.
 
     Atomically:
       1. Creates Invoice(invoice_type='teacher_payment') with total_amount =
@@ -1388,6 +1389,8 @@ def management_generate_teacher_invoice(request, batch_id):
          next-month student credit. Charged-at-approval is determined by membership in a
          StudentInvoice.lesson_items M2M — an item waived while the batch was still a
          draft was excluded from the invoice (never charged), so it gets no rollover.
+         teacher_cancelled items get the same treatment under their own ledger type,
+         teacher_cancel_refund (MAP-271), so reports never mix the two.
       4. Posts ledger forfeited (balance-neutral, source_batch_item=item) per forfeited
          item — the single no-show record (MAP-186). The student was charged at
          approval via lesson_charge/shortfall; this row only records WHY the charge
@@ -1438,7 +1441,7 @@ def _generate_teacher_invoice_locked(request, batch_id, ledger, CreditTransactio
 
     # Teacher pay = Σ calculate_teacher_payment() over every item, so the invoice
     # total can never drift from the canonical per-lesson rule (pays completed,
-    # confirmed, trial, forfeited; $0 for waived and cancelled). Summing the model
+    # confirmed, trial, promo, forfeited; $0 for waived, cancelled and teacher_cancelled). Summing the model
     # method instead of a hardcoded status filter is what fixes the historical
     # bug where an all-'confirmed' batch generated a $0 teacher invoice.
     all_items = list(batch.lesson_items.all())
@@ -1467,10 +1470,18 @@ def _generate_teacher_invoice_locked(request, batch_id, ledger, CreditTransactio
     # M2M is the approval-time record of what was billed. A lesson waived while the
     # batch was still a draft was excluded from the invoice — crediting it anyway
     # would gift the parent a free lesson credit (verified live 2026-08-27).
+    # MAP-271: a charged lesson the teacher cancelled is refunded the same way,
+    # as teacher_cancel_refund.
     waived_items = list(
         batch.lesson_items.filter(status='waived', student_invoice__isnull=False)
     )
-    for item in waived_items:
+    teacher_cancelled_items = list(
+        batch.lesson_items.filter(status='teacher_cancelled', student_invoice__isnull=False)
+    )
+    refunds = [(item, 'waived_rollover') for item in waived_items] + [
+        (item, 'teacher_cancel_refund') for item in teacher_cancelled_items
+    ]
+    for item, refund_type in refunds:
         lesson_rate = item.student_rate * item.duration
         if lesson_rate > Decimal('0.00'):
             # get_or_create then re-acquire with select_for_update (REC-02 pattern)
@@ -1484,7 +1495,7 @@ def _generate_teacher_invoice_locked(request, batch_id, ledger, CreditTransactio
             )
             ledger.post(
                 account,
-                type='waived_rollover',
+                type=refund_type,
                 amount=lesson_rate,
                 source_batch_item=item,
             )
@@ -1617,7 +1628,10 @@ def management_edit_lesson_notes(request, batch_id, item_id):
     ]
 
     if 'status' in request.data:
-        allowed_statuses = ['trial', 'completed', 'confirmed', 'cancelled', 'forfeited', 'waived']
+        allowed_statuses = [
+            'trial', 'completed', 'confirmed', 'cancelled', 'forfeited', 'waived',
+            'teacher_cancelled', 'promo',
+        ]
         if request.data['status'] not in allowed_statuses:
             return Response(
                 {'error': f"Invalid status. Allowed values: {', '.join(allowed_statuses)}"},
@@ -1698,10 +1712,15 @@ def management_approve_batch(request, batch_id):
             for item in batch.lesson_items.filter(status='trial'):
                 trial_items.append(item)
 
-            # Phase 20: forfeited/waived items are also valid batch content
+            # Phase 20: forfeited/waived items are also valid batch content;
+            # promo (MAP-272) counts like trial. teacher_cancelled, like cancelled, does not.
             forfeited_items_count = batch.lesson_items.filter(status='forfeited').count()
             waived_items_count = batch.lesson_items.filter(status='waived').count()
-            if not completed_items_by_student and not trial_items and not forfeited_items_count and not waived_items_count:
+            promo_items_count = batch.lesson_items.filter(status='promo').count()
+            if (
+                not completed_items_by_student and not trial_items and not promo_items_count
+                and not forfeited_items_count and not waived_items_count
+            ):
                 raise ValueError('No billable lessons in batch')
 
             # Create Lesson records for trial items (teacher paid, student not invoiced)
@@ -1823,6 +1842,29 @@ def management_approve_batch(request, batch_id):
                 item.created_lesson = lesson
                 item.save(update_fields=['created_lesson'])
                 waived_items_by_student[item.student].append(item)
+
+            # MAP-271 / MAP-272: record teacher_cancelled and promo items as Lessons so
+            # history and analytics see them. Neither joins a StudentInvoice nor touches
+            # the wallet: the student is charged $0 for both. Promo keeps the teacher
+            # rate (teacher paid, like trial) with student_rate $0.
+            for item in batch.lesson_items.filter(status__in=['teacher_cancelled', 'promo']):
+                lesson = Lesson(
+                    teacher=batch.teacher,
+                    student=item.student,
+                    school=batch.school,
+                    lesson_type=item.lesson_type,
+                    is_trial=False,
+                    scheduled_date=item.scheduled_date,
+                    duration=item.duration,
+                    teacher_rate=item.teacher_rate,
+                    student_rate=Decimal('0.00') if item.status == 'promo' else item.student_rate,
+                    status=item.status,
+                    teacher_notes=item.teacher_notes,
+                )
+                lesson._is_trial_explicitly_set = True
+                lesson.save()
+                item.created_lesson = lesson
+                item.save(update_fields=['created_lesson'])
 
             # Phase 20 (D-08): forfeited added to StudentInvoice M2M; waived excluded
             # CRITICAL: StudentInvoice.lesson_items M2M target is BatchLessonItem (NOT Lesson).
