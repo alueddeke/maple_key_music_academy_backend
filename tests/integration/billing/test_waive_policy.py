@@ -380,6 +380,41 @@ class TestTeacherWaiveConversion:
         item.refresh_from_db()
         assert item.status == 'waived'
 
+    def test_teacher_cancels_do_not_consume_waive_allowance(
+        self, policy_on, teacher_client, student_user, draft_batch
+    ):
+        """MAP-271: teacher_cancelled is not a waive event — usage stays at zero."""
+        for offset in range(policy_on.waive_limit + 1):
+            item = make_item(draft_batch, student_user, day_offset=-(offset + 1))
+            response = teacher_client.put(
+                item_url(draft_batch.id, item.id), {'status': 'teacher_cancelled'}, format='json'
+            )
+            assert response.status_code == status.HTTP_200_OK
+            assert 'waive_converted_to_forfeited' not in response.data
+        assert BatchLessonItem.objects.filter(
+            student=student_user, status='teacher_cancelled'
+        ).count() == policy_on.waive_limit + 1
+        usage = get_waive_usage(student_user, draft_batch.school)
+        assert usage['used'] == 0
+        assert usage['remaining'] == policy_on.waive_limit
+
+    def test_teacher_cancel_past_limit_never_converted(
+        self, policy_on, teacher_client, student_user, draft_batch
+    ):
+        """MAP-271: with the waive allowance spent, teacher_cancelled stays teacher_cancelled."""
+        for offset in range(policy_on.waive_limit):
+            make_item(draft_batch, student_user, day_offset=-(offset + 7), status='waived')
+        item = make_item(draft_batch, student_user, day_offset=-1)
+
+        response = teacher_client.put(
+            item_url(draft_batch.id, item.id), {'status': 'teacher_cancelled'}, format='json'
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert 'waive_converted_to_forfeited' not in response.data
+        item.refresh_from_db()
+        assert item.status == 'teacher_cancelled'
+        assert item.cancellation_reason == ''
+
 
 @pytest.mark.django_db
 class TestAdjustmentEndpointGuard:

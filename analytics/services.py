@@ -19,6 +19,7 @@ from django.db.models import Count, Max, Min, Sum
 from django.utils import timezone
 
 from billing.models import (
+    BatchLessonItem,
     CreditTransaction,
     Invoice,
     Lesson,
@@ -209,6 +210,18 @@ def compute_month_rows(school, months=6, today=None):
             ),
             'student__email',
         ).count()
+        # MAP-271: counted on the batch item, not the Lesson — a teacher cancel in
+        # the adjustment window leaves the approval-time Lesson 'confirmed'.
+        cancellations_teacher = _exclude_test(
+            BatchLessonItem.objects.filter(
+                batch__school=school,
+                batch__status='approved',
+                status='teacher_cancelled',
+                scheduled_date__year=year,
+                scheduled_date__month=month,
+            ),
+            'student__email',
+        ).count()
         credit_counts = dict(
             _exclude_test(
                 CreditTransaction.objects.filter(
@@ -235,6 +248,7 @@ def compute_month_rows(school, months=6, today=None):
             'cancelled_lessons': cancelled_lessons,
             'cancellations_forfeited': credit_counts.get('forfeited', 0),
             'cancellations_waived': credit_counts.get('waived_rollover', 0),
+            'cancellations_teacher': cancellations_teacher,
         })
         prev_active_count = active_students
 

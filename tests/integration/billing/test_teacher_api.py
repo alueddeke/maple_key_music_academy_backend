@@ -462,7 +462,11 @@ class TestTeacherBatchAddLesson:
         assert response.data == {'error': ['unknown_fields'], 'fields': sorted(extra)}
         assert not BatchLessonItem.objects.exists()
 
-    @pytest.mark.parametrize('bad_status', ['waived', 'trial', 'requested', 'forfeited'])
+    # MAP-271 Q2 / MAP-272: teacher_cancelled and promo are not offered in the one-off add.
+    @pytest.mark.parametrize(
+        'bad_status',
+        ['waived', 'trial', 'requested', 'forfeited', 'teacher_cancelled', 'promo'],
+    )
     def test_status_outside_teacher_choices_is_rejected(
         self, authenticated_teacher_client, draft_batch, assigned_student, school_settings, bad_status
     ):

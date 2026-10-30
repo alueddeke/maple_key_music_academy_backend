@@ -197,6 +197,51 @@ class TestTeacherAdjustmentEndpoint:
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
+    def test_future_lesson_accepts_teacher_cancelled(
+        self, teacher_client, teacher_user, student_user, school, school_settings
+    ):
+        """MAP-271: a teacher may cancel ahead — future-dated teacher_cancelled is accepted."""
+        batch = _make_approved_batch(teacher_user, school)
+        tomorrow = date.today() + timedelta(days=1)
+        item = _make_item(batch, student_user, scheduled_date=tomorrow, status='confirmed')
+
+        url = reverse('teacher_batch_adjustment_item', kwargs={'batch_id': batch.id, 'item_id': item.id})
+        response = teacher_client.patch(url, {'status': 'teacher_cancelled'}, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        item.refresh_from_db()
+        assert item.status == 'teacher_cancelled'
+
+    def test_future_lesson_still_rejects_forfeited(
+        self, teacher_client, teacher_user, student_user, school, school_settings
+    ):
+        """Regression next to MAP-271: future-dated forfeited stays refused."""
+        batch = _make_approved_batch(teacher_user, school)
+        tomorrow = date.today() + timedelta(days=1)
+        item = _make_item(batch, student_user, scheduled_date=tomorrow, status='confirmed')
+
+        url = reverse('teacher_batch_adjustment_item', kwargs={'batch_id': batch.id, 'item_id': item.id})
+        response = teacher_client.patch(url, {'status': 'forfeited'}, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        item.refresh_from_db()
+        assert item.status == 'confirmed'
+
+    def test_adjustment_rejects_promo(
+        self, teacher_client, teacher_user, student_user, school, school_settings
+    ):
+        """MAP-272 (owner ruling 2026-10-30): promo is set on draft/submitted batches only,
+        never in the post-approval adjustment window."""
+        batch = _make_approved_batch(teacher_user, school)
+        item = _make_item(batch, student_user, status='confirmed')
+
+        url = reverse('teacher_batch_adjustment_item', kwargs={'batch_id': batch.id, 'item_id': item.id})
+        response = teacher_client.patch(url, {'status': 'promo'}, format='json')
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        item.refresh_from_db()
+        assert item.status == 'confirmed'
+
     def test_teacher_adjustment_blocked_after_invoice_generated(
         self, teacher_client, teacher_user, student_user, school, school_settings, management_user
     ):
@@ -388,6 +433,85 @@ class TestGenerateTeacherInvoiceEndpoint:
         account = StudentCreditAccount.objects.get(student=student_user, school=school)
         assert account.balance == Decimal('60.00')
         assert response.data['waived_credits_written'] == 1
+
+    def test_teacher_cancel_after_approval_refunds_charge(
+        self, management_client, teacher_client, teacher_user, student_user, school, school_settings
+    ):
+        """MAP-271: approve (wallet charged) → teacher marks teacher_cancelled → generate
+        posts one teacher_cancel_refund, restores the charge, excludes it from teacher pay;
+        a second generate is refused and writes nothing."""
+        BillableContact.objects.create(
+            student=student_user, school=school, contact_type='parent',
+            first_name='Pat', last_name='Parent', email='pat.parent@example.com',
+            phone='416-555-0100', street_address='1 Test St', city='Toronto',
+            province='ON', postal_code='M5H 2N2', is_primary=True,
+        )
+        opening = Decimal('500.00')
+        StudentCreditAccount.objects.create(student=student_user, school=school, balance=opening)
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=6, year=2026, status='submitted',
+        )
+        kept = _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed')
+        cancelled = _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='completed')
+
+        approve = management_client.post(
+            reverse('management_approve_batch', kwargs={'batch_id': batch.id})
+        )
+        assert approve.status_code == status.HTTP_200_OK
+        account = StudentCreditAccount.objects.get(student=student_user, school=school)
+        charged = kept.calculate_student_charge() + cancelled.calculate_student_charge()
+        assert account.balance == opening - charged
+
+        adjust = teacher_client.patch(
+            reverse('teacher_batch_adjustment_item',
+                    kwargs={'batch_id': batch.id, 'item_id': cancelled.id}),
+            {'status': 'teacher_cancelled'}, format='json',
+        )
+        assert adjust.status_code == status.HTTP_200_OK
+        cancelled.refresh_from_db()
+        assert cancelled.status == 'teacher_cancelled'
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+        assert response.status_code == status.HTTP_200_OK
+
+        refunds = CreditTransaction.objects.filter(type='teacher_cancel_refund')
+        assert refunds.count() == 1
+        refund = refunds.get()
+        assert refund.source_batch_item_id == cancelled.id
+        assert refund.amount == cancelled.student_rate * cancelled.duration
+        assert not CreditTransaction.objects.filter(type='waived_rollover').exists()
+        account.refresh_from_db()
+        assert account.balance == opening - kept.calculate_student_charge()
+        assert Decimal(response.data['total_amount']) == kept.calculate_teacher_payment()
+
+        again = management_client.post(url, format='json')
+        assert again.status_code == status.HTTP_409_CONFLICT
+        assert CreditTransaction.objects.filter(type='teacher_cancel_refund').count() == 1
+        account.refresh_from_db()
+        assert account.balance == opening - kept.calculate_student_charge()
+
+    def test_draft_time_teacher_cancel_gets_no_refund(
+        self, management_client, teacher_user, student_user, school, school_settings
+    ):
+        """MAP-271: a teacher_cancelled item never charged at approval (not a
+        StudentInvoice member) gets no refund at generation."""
+        StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('0.00')
+        )
+        batch = _make_approved_batch(teacher_user, school)
+        completed = _make_item(batch, student_user, scheduled_date=date(2026, 6, 1), status='completed')
+        _make_item(batch, student_user, scheduled_date=date(2026, 6, 8), status='teacher_cancelled')
+        _make_student_invoice(batch, student_user, school, [completed])
+
+        url = reverse('management_generate_teacher_invoice', kwargs={'batch_id': batch.id})
+        response = management_client.post(url, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        assert not CreditTransaction.objects.filter(type='teacher_cancel_refund').exists()
+        account = StudentCreditAccount.objects.get(student=student_user, school=school)
+        assert account.balance == Decimal('0.00')
+        assert Decimal(response.data['total_amount']) == completed.calculate_teacher_payment()
 
     def test_generate_pays_teacher_for_confirmed_lessons(
         self, management_client, teacher_user, student_user, school, school_settings, management_user

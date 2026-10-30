@@ -8,12 +8,14 @@ never touch `account.balance` directly.
 Balance effect by type:
     pre_billing_payment  +amount
     waived_rollover      +amount
+    teacher_cancel_refund +amount (MAP-271: charged lesson the teacher cancelled)
     lesson_charge        -amount
     forfeited            0 (informational: the no-show record)
     shortfall            0 (informational: uncovered remainder at approval)
 
 Invariant (for accounts created after migration 0074):
-    balance == Σ(pre_billing_payment + waived_rollover) − Σ(lesson_charge)
+    balance == Σ(pre_billing_payment + waived_rollover + teacher_cancel_refund)
+               − Σ(lesson_charge)
 
 `post` runs inside the caller's transaction.atomic() block. It never opens an
 outer transaction of its own: select_for_update outside atomic raises, and a
@@ -27,6 +29,7 @@ from ..models import CreditTransaction, StudentCreditAccount
 BALANCE_EFFECT = {
     'pre_billing_payment': Decimal('1'),
     'waived_rollover': Decimal('1'),
+    'teacher_cancel_refund': Decimal('1'),
     'lesson_charge': Decimal('-1'),
     'forfeited': Decimal('0'),
     'shortfall': Decimal('0'),
