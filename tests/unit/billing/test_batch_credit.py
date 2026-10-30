@@ -453,6 +453,84 @@ class TestBatchApprovalWaived:
         assert item.calculate_teacher_payment() == Decimal('0.00')
 
 
+@pytest.mark.django_db
+class TestBatchApprovalTeacherCancelledAndPromo:
+    """MAP-271 / MAP-272: teacher_cancelled and promo at batch approval."""
+
+    def _submitted_batch(self, teacher, school, number):
+        batch = _make_batch(teacher, school, batch_number=number)
+        batch.status = 'submitted'
+        batch.save()
+        return batch
+
+    def test_teacher_cancelled_creates_lesson_no_invoice_no_ledger(
+        self, school, teacher_user, student_user, management_user, school_settings
+    ):
+        _setup_billable_contact(student_user, school)
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('100.00'),
+        )
+        batch = self._submitted_batch(teacher_user, school, 'BATCH-271-A1')
+        completed = _make_batch_lesson_item(batch, student_user, status='completed')
+        cancelled = _make_batch_lesson_item(batch, student_user, status='teacher_cancelled')
+
+        response = _approve_batch(management_user, batch)
+        assert response.status_code == 200
+
+        cancelled.refresh_from_db()
+        assert cancelled.created_lesson is not None
+        assert cancelled.created_lesson.status == 'teacher_cancelled'
+        student_invoice = StudentInvoice.objects.get(batch=batch, student=student_user)
+        assert not student_invoice.lesson_items.filter(pk=cancelled.pk).exists()
+        assert student_invoice.amount == completed.calculate_student_charge()
+        assert not CreditTransaction.objects.filter(source_batch_item=cancelled).exists()
+        account.refresh_from_db()
+        assert account.balance == Decimal('100.00') - completed.calculate_student_charge()
+
+    def test_promo_creates_lesson_teacher_paid_student_not_invoiced(
+        self, school, teacher_user, student_user, management_user, school_settings
+    ):
+        _setup_billable_contact(student_user, school)
+        account = StudentCreditAccount.objects.create(
+            student=student_user, school=school, balance=Decimal('100.00'),
+        )
+        batch = self._submitted_batch(teacher_user, school, 'BATCH-272-A1')
+        completed = _make_batch_lesson_item(batch, student_user, status='completed')
+        promo = _make_batch_lesson_item(batch, student_user, status='promo')
+
+        response = _approve_batch(management_user, batch)
+        assert response.status_code == 200
+
+        promo.refresh_from_db()
+        lesson = promo.created_lesson
+        assert lesson is not None
+        assert lesson.status == 'promo'
+        assert lesson.is_trial is False
+        assert lesson.student_rate == Decimal('0.00')
+        assert lesson.teacher_rate == promo.teacher_rate
+        student_invoice = StudentInvoice.objects.get(batch=batch, student=student_user)
+        assert not student_invoice.lesson_items.filter(pk=promo.pk).exists()
+        assert not CreditTransaction.objects.filter(source_batch_item=promo).exists()
+        account.refresh_from_db()
+        assert account.balance == Decimal('100.00') - completed.calculate_student_charge()
+
+    def test_promo_only_batch_is_approvable(
+        self, school, teacher_user, student_user, management_user, school_settings
+    ):
+        """Promo counts as batch content like trial; no StudentInvoice is created."""
+        _setup_billable_contact(student_user, school)
+        history = _make_batch(teacher_user, school, batch_number='BATCH-272-H', month=5)
+        _make_batch_lesson_item(history, student_user, status='completed')  # no auto-trial
+        batch = self._submitted_batch(teacher_user, school, 'BATCH-272-A2')
+        promo = _make_batch_lesson_item(batch, student_user, status='promo')
+        assert promo.status == 'promo'
+
+        response = _approve_batch(management_user, batch)
+        assert response.status_code == 200
+        assert response.data['invoice_count'] == 0
+        assert Lesson.objects.filter(student=student_user, status='promo').count() == 1
+
+
 # ---------------------------------------------------------------------------
 # Class 4 — StudentInvoice credit fields (REC-06)
 # ---------------------------------------------------------------------------

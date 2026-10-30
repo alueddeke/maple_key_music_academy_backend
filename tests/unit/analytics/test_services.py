@@ -1,6 +1,6 @@
 """Metric formula tests (deterministic via injected `today`)."""
 
-from datetime import date
+from datetime import date, time
 from decimal import Decimal
 
 import pytest
@@ -13,7 +13,7 @@ from analytics.services import (
     compute_month_rows,
     compute_overview,
 )
-from billing.models import Lesson, SchoolExpenseItem
+from billing.models import BatchLessonItem, Lesson, MonthlyInvoiceBatch, SchoolExpenseItem
 
 # June 2026 has 5 Mondays (1, 8, 15, 22, 29)
 JUNE = date(2026, 6, 15)
@@ -79,6 +79,38 @@ class TestMonthRows:
             today=date(first_month.year, first_month.month, 15),
         )
         assert rows[0]['new_enrollments'] == 1
+
+    def test_cancellations_teacher_counts_approved_batch_items(
+        self, school, teacher_user, student_user
+    ):
+        """MAP-271: teacher cancels in approved batches, scheduled in the month.
+        Draft batches, promo and bare cancelled are not counted."""
+        approved = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=6, year=2026, status='approved',
+        )
+        draft = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=7, year=2026, status='draft',
+        )
+
+        def item(batch, day, item_status, month=6):
+            return BatchLessonItem.objects.create(
+                batch=batch, student=student_user,
+                scheduled_date=date(2026, month, day), start_time=time(15, 0),
+                duration=Decimal('1.0'), lesson_type='online',
+                teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'),
+                status=item_status,
+            )
+
+        item(approved, 1, 'teacher_cancelled')
+        item(approved, 8, 'teacher_cancelled')
+        item(approved, 15, 'promo')
+        item(approved, 22, 'cancelled')
+        item(draft, 29, 'teacher_cancelled')
+        item(approved, 2, 'teacher_cancelled', month=5)
+
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        assert rows[0]['cancellations_teacher'] == 2
+        assert rows[0]['cancelled_lessons'] == 0
 
 
 @pytest.mark.django_db
