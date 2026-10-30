@@ -739,7 +739,12 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    allowed_statuses = ['confirmed', 'completed', 'cancelled', 'trial', 'waived', 'forfeited']
+    # MAP-271: teacher_cancelled is allowed on future dates (teacher cancels ahead).
+    # promo is not offered here: it is set on draft or submitted batches only (MAP-272).
+    allowed_statuses = [
+        'confirmed', 'completed', 'cancelled', 'trial', 'waived', 'forfeited',
+        'teacher_cancelled',
+    ]
     if new_status and new_status not in allowed_statuses:
         return Response(
             {'error': f'Invalid status. Allowed: {allowed_statuses}'},
