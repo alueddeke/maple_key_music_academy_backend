@@ -36,6 +36,7 @@ from .management import (
     management_rejected_batches,
     management_batch_detail,
     management_edit_lesson_notes,
+    management_batch_lesson_items_bulk,
     management_approve_batch,
     management_reject_batch,
     management_batch_rejection_snapshots,
@@ -65,6 +66,7 @@ from .teacher import (
     batch_detail,
     batch_add_lesson,
     batch_lesson_item,
+    batch_lesson_items_bulk,
     batch_submit,
     download_paystub,
     # Phase 22: Month-End Adjustments
