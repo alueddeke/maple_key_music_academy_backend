@@ -72,6 +72,7 @@ urlpatterns = [
     path('teacher/batches/<int:batch_id>/', views.batch_detail, name='batch_detail'),
     path('teacher/batches/<int:batch_id>/add-lesson/', views.batch_add_lesson, name='batch_add_lesson'),
     path('teacher/batches/<int:batch_id>/lessons/<int:item_id>/', views.batch_lesson_item, name='batch_lesson_item'),
+    path('teacher/batches/<int:batch_id>/lessons/bulk/', views.batch_lesson_items_bulk, name='batch_lesson_items_bulk'),
     path('teacher/batches/<int:batch_id>/submit/', views.batch_submit, name='batch_submit'),
     path('teacher/batches/<int:batch_id>/paystub/', views.download_paystub, name='download_paystub'),
     path('teacher/batches/<int:batch_id>/adjustment/<int:item_id>/', views.teacher_batch_adjustment_item, name='teacher_batch_adjustment_item'),

@@ -100,6 +100,7 @@ ROUTE_MANIFEST = {
     'batch_detail': TEACHER_OR_MANAGEMENT,
     'batch_add_lesson': TEACHER_ONLY,
     'batch_lesson_item': TEACHER_ONLY,
+    'batch_lesson_items_bulk': TEACHER_ONLY,
     'batch_submit': TEACHER_ONLY,
     'download_paystub': TEACHER_OR_MANAGEMENT,
     'teacher_batch_adjustment_item': TEACHER_ONLY,
