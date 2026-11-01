@@ -36,6 +36,7 @@ from .management import (
     management_rejected_batches,
     management_batch_detail,
     management_edit_lesson_notes,
+    management_batch_lesson_items_bulk,
     management_approve_batch,
     management_reject_batch,
     management_batch_rejection_snapshots,

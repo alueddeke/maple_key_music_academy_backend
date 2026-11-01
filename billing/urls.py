@@ -87,6 +87,7 @@ urlpatterns = [
     path('management/batches/month-end-queue/', views.management_month_end_queue, name='management_month_end_queue'),
     path('management/batches/<int:batch_id>/', views.management_batch_detail, name='management_batch_detail'),
     path('management/batches/<int:batch_id>/lessons/<int:item_id>/', views.management_edit_lesson_notes, name='management_edit_lesson_notes'),
+    path('management/batches/<int:batch_id>/lessons/bulk/', views.management_batch_lesson_items_bulk, name='management_batch_lesson_items_bulk'),
     path('management/batches/<int:batch_id>/approve/', views.management_approve_batch, name='management_approve_batch'),
     path('management/batches/<int:batch_id>/reject/', views.management_reject_batch, name='management_reject_batch'),
     path('management/batches/<int:batch_id>/rejection-snapshots/', views.management_batch_rejection_snapshots, name='management_batch_rejection_snapshots'),

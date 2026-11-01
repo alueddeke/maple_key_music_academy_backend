@@ -15,6 +15,7 @@ from ..serializers import (
     BatchRejectionSnapshotSerializer, TeacherDetailSerializer, TeacherUpdateSerializer,
     TrialLessonCreateSerializer
 )
+from ..services.bulk_lesson_items import bulk_update_lesson_items
 from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
 from custom_auth.decorators import (
@@ -1644,6 +1645,45 @@ def management_edit_lesson_notes(request, batch_id, item_id):
         serializer.save()
         return Response(serializer.data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# Same list as management_edit_lesson_notes (incl. MAP-271/272 statuses).
+BULK_ALLOWED_STATUSES = [
+    'trial', 'completed', 'confirmed', 'cancelled', 'forfeited', 'waived',
+    'teacher_cancelled', 'promo',
+]
+
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@management_required
+def management_batch_lesson_items_bulk(request, batch_id):
+    """
+    PUT: one status + one note on many items of a submitted batch (MAP-176).
+    All-or-nothing; body and responses in billing/services/bulk_lesson_items.py.
+    No waive-limit conversion: management edits are the override (MAP-101).
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'submitted':
+        return Response(
+            {'error': 'Can only edit notes for batches in submitted status'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    code, body = bulk_update_lesson_items(
+        batch,
+        request.data,
+        fields=['status', 'cancellation_reason', 'teacher_notes', 'admin_notes'],
+        allowed_statuses=BULK_ALLOWED_STATUSES,
+    )
+    return Response(body, status=code)
 
 
 @api_view(['POST'])

@@ -110,6 +110,7 @@ ROUTE_MANIFEST = {
     'management_month_end_queue': MANAGEMENT_ONLY,
     'management_batch_detail': MANAGEMENT_ONLY,
     'management_edit_lesson_notes': MANAGEMENT_ONLY,
+    'management_batch_lesson_items_bulk': MANAGEMENT_ONLY,
     'management_approve_batch': MANAGEMENT_ONLY,
     'management_reject_batch': MANAGEMENT_ONLY,
     'management_batch_rejection_snapshots': MANAGEMENT_ONLY,
