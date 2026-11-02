@@ -374,6 +374,10 @@ class Lesson(models.Model):
         ('trial', 'Trial'),
         ('forfeited', 'Forfeited'),
         ('waived', 'Waived'),
+        # MAP-271: teacher cancelled — student not charged, no waive used, teacher not paid
+        ('teacher_cancelled', 'Teacher cancelled'),
+        # MAP-272: referral promotion — trial semantics (student $0, teacher paid)
+        ('promo', 'Promo lesson'),
     ]
 
     LESSON_TYPES = [
@@ -1007,22 +1011,23 @@ class BatchLessonItem(models.Model):
 
     def calculate_teacher_payment(self):
         """Calculate what teacher gets paid for this lesson.
-        Returns $0.00 for cancelled and waived lessons (D-06 Phase 20)."""
+        Returns $0.00 for cancelled, waived (D-06 Phase 20) and teacher_cancelled
+        (MAP-271) lessons."""
         from decimal import Decimal
 
-        if self.status in ('cancelled', 'waived'):
+        if self.status in ('cancelled', 'waived', 'teacher_cancelled'):
             return Decimal('0.00')
 
-        # Trial lessons: teacher is paid at their normal rate (student is not charged)
+        # Trial and promo lessons: teacher is paid at their normal rate (student is not charged)
         return self.teacher_rate * self.duration
 
     def calculate_student_charge(self):
         """Calculate what student is billed for this lesson"""
         from decimal import Decimal
 
-        # Cancelled, trial, or waived: student not charged
+        # Cancelled, trial, waived, teacher_cancelled or promo: student not charged
         # forfeited: student IS charged (credit consumed by Phase 20 reconciliation)
-        if self.status in ('cancelled', 'trial', 'waived'):
+        if self.status in ('cancelled', 'trial', 'waived', 'teacher_cancelled', 'promo'):
             return Decimal('0.00')
 
         return self.student_rate * self.duration
@@ -1268,10 +1273,12 @@ class CreditTransaction(models.Model):
     Amount is ALWAYS positive; the balance effect is implied by type:
       pre_billing_payment → balance += amount
       waived_rollover     → balance += amount
+      teacher_cancel_refund → balance += amount (MAP-271)
       lesson_charge       → balance -= amount
       forfeited           → informational, balance unchanged
       shortfall           → informational, balance unchanged
-    Invariant: balance == Σ(pre_billing_payment + waived_rollover) − Σ(lesson_charge).
+    Invariant: balance == Σ(pre_billing_payment + waived_rollover + teacher_cancel_refund)
+               − Σ(lesson_charge).
     Never use signed amounts (D-09: guards against sign-flip bugs).
 
     `legacy=True` marks rows that existed before the source constraint was
@@ -1283,6 +1290,7 @@ class CreditTransaction(models.Model):
         ('waived_rollover', 'Waived Rollover'),
         ('lesson_charge', 'Lesson Charge'),
         ('shortfall', 'Shortfall'),
+        ('teacher_cancel_refund', 'Teacher Cancel Refund'),
     ]
 
     account = models.ForeignKey(

@@ -6,6 +6,9 @@ This module NEVER writes to billing tables. Money math is Decimal throughout.
 Definitions locked with product (2026-07-06):
 - MRR = scheduled revenue (active schedules × locked student_rate × lessons that month).
 - Churn(M) = active in M-1, now deactivated OR without any active schedule. Pause ≠ churn.
+- Teacher pay(M) = every approved batch in M: payroll invoice total when generated,
+  else Σ BatchLessonItem.calculate_teacher_payment() (MAP-314). Gross margin =
+  billed − teacher pay − expenses.
 """
 
 from collections import Counter, defaultdict
@@ -19,8 +22,8 @@ from django.db.models import Count, Max, Min, Sum
 from django.utils import timezone
 
 from billing.models import (
+    BatchLessonItem,
     CreditTransaction,
-    Invoice,
     Lesson,
     MonthlyInvoiceBatch,
     PreBillingInvoice,
@@ -28,6 +31,8 @@ from billing.models import (
     SchoolExpenseItem,
     StudentInvoice,
 )
+
+from billing.services.teacher_pay import approved_teacher_pay
 
 from .models import MetricGoal, ScheduleInstrument, StudentExitRecord
 
@@ -164,15 +169,14 @@ def compute_month_rows(school, months=6, today=None):
             period_start__month=month,
         ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
 
-        teacher_pay = _exclude_test(
-            Invoice.objects.filter(
-                school=school,
-                invoice_type='teacher_payment',
-                source_batch__year=year,
-                source_batch__month=month,
-            ),
-            'teacher__email',
-        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0')
+        # MAP-314: every approved batch counts — payroll invoice total when
+        # generated, else the per-lesson rule — so Teacher Pay is complete as
+        # soon as Billed is, instead of trailing the manual payroll step.
+        pay = approved_teacher_pay(
+            school, year, month,
+            exclude=lambda qs: _exclude_test(qs, 'teacher__email'),
+        )
+        teacher_pay = pay['total']
 
         active_students = (
             _exclude_test(
@@ -209,6 +213,18 @@ def compute_month_rows(school, months=6, today=None):
             ),
             'student__email',
         ).count()
+        # MAP-271: counted on the batch item, not the Lesson — a teacher cancel in
+        # the adjustment window leaves the approval-time Lesson 'confirmed'.
+        cancellations_teacher = _exclude_test(
+            BatchLessonItem.objects.filter(
+                batch__school=school,
+                batch__status='approved',
+                status='teacher_cancelled',
+                scheduled_date__year=year,
+                scheduled_date__month=month,
+            ),
+            'student__email',
+        ).count()
         credit_counts = dict(
             _exclude_test(
                 CreditTransaction.objects.filter(
@@ -227,6 +243,8 @@ def compute_month_rows(school, months=6, today=None):
             'billed_revenue': _money(billed),
             'expenses': _money(expenses),
             'teacher_pay': _money(teacher_pay),
+            'teacher_pay_generated': _money(pay['generated']),
+            'teacher_pay_pending': _money(pay['pending']),
             'gross_margin': _money(billed - teacher_pay - expenses),
             'active_students': active_students,
             'new_enrollments': new_enrollments,
@@ -235,6 +253,7 @@ def compute_month_rows(school, months=6, today=None):
             'cancelled_lessons': cancelled_lessons,
             'cancellations_forfeited': credit_counts.get('forfeited', 0),
             'cancellations_waived': credit_counts.get('waived_rollover', 0),
+            'cancellations_teacher': cancellations_teacher,
         })
         prev_active_count = active_students
 

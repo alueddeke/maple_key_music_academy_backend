@@ -462,7 +462,11 @@ class TestTeacherBatchAddLesson:
         assert response.data == {'error': ['unknown_fields'], 'fields': sorted(extra)}
         assert not BatchLessonItem.objects.exists()
 
-    @pytest.mark.parametrize('bad_status', ['waived', 'trial', 'requested', 'forfeited'])
+    # MAP-271 Q2 / MAP-272: teacher_cancelled and promo are not offered in the one-off add.
+    @pytest.mark.parametrize(
+        'bad_status',
+        ['waived', 'trial', 'requested', 'forfeited', 'teacher_cancelled', 'promo'],
+    )
     def test_status_outside_teacher_choices_is_rejected(
         self, authenticated_teacher_client, draft_batch, assigned_student, school_settings, bad_status
     ):
@@ -579,3 +583,378 @@ class TestTeacherBatchAddLesson:
         accepted = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student))
         assert accepted.status_code == status.HTTP_201_CREATED
         assert BatchLessonItem.objects.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# MAP-176: teacher bulk status change — PUT teacher/batches/<id>/lessons/bulk/
+# ---------------------------------------------------------------------------
+
+from datetime import date as _date, time as _time
+
+from billing.models import SchoolSettings
+from billing.services.bulk_lesson_items import BULK_LESSON_ITEMS_MAX
+
+ITEM_STATE_FIELDS = ('id', 'status', 'teacher_notes', 'cancellation_reason', 'admin_notes', 'scheduled_date')
+
+
+def _bulk_item(batch, student, school_settings, day, status='confirmed', is_one_off=False):
+    return BatchLessonItem.objects.create(
+        batch=batch, student=student,
+        scheduled_date=_date(batch.year, batch.month, day), start_time=_time(15, 0),
+        duration=Decimal('1.0'), lesson_type='online',
+        teacher_rate=school_settings.online_teacher_rate,
+        student_rate=school_settings.online_student_rate,
+        status=status, is_one_off=is_one_off,
+    )
+
+
+def _item_state(ids):
+    return list(BatchLessonItem.objects.filter(id__in=ids).order_by('id').values(*ITEM_STATE_FIELDS))
+
+
+@pytest.mark.django_db
+class TestTeacherBulkLessonStatus:
+
+    def _put(self, client, batch, body):
+        return client.put(
+            reverse('batch_lesson_items_bulk', kwargs={'batch_id': batch.id}), body, format='json'
+        )
+
+    @pytest.fixture
+    def items(self, draft_batch, assigned_student, school_settings):
+        return [_bulk_item(draft_batch, assigned_student, school_settings, day) for day in (3, 10, 17)]
+
+    def test_bulk_status_update_applies_to_all_selected_items(
+        self, authenticated_teacher_client, draft_batch, items
+    ):
+        ids = [item.id for item in items]
+        response = self._put(authenticated_teacher_client, draft_batch, {
+            'item_ids': ids, 'status': 'cancelled',
+            'cancellation_reason': 'Entered in error', 'teacher_notes': 'Not my student',
+        })
+
+        assert response.status_code == status.HTTP_200_OK
+        assert [row['id'] for row in response.data['updated']] == ids
+        for row in _item_state(ids):
+            assert row['status'] == 'cancelled'
+            assert row['cancellation_reason'] == 'Entered in error'
+            assert row['teacher_notes'] == 'Not my student'
+
+    def test_updated_follows_request_order(self, authenticated_teacher_client, draft_batch, items):
+        ids = [item.id for item in reversed(items)]
+
+        response = self._put(authenticated_teacher_client, draft_batch, {'item_ids': ids, 'status': 'completed'})
+
+        assert response.status_code == status.HTTP_200_OK
+        assert [row['id'] for row in response.data['updated']] == ids
+
+    def test_unselected_items_are_untouched(
+        self, authenticated_teacher_client, draft_batch, items, assigned_student, school_settings
+    ):
+        other = _bulk_item(draft_batch, assigned_student, school_settings, 24)
+        before = _item_state([other.id])
+
+        response = self._put(authenticated_teacher_client, draft_batch, {
+            'item_ids': [item.id for item in items], 'status': 'cancelled',
+        })
+
+        assert response.status_code == status.HTTP_200_OK
+        assert _item_state([other.id]) == before
+
+    @pytest.mark.parametrize('batch_status', ['submitted', 'approved'])
+    def test_bulk_status_update_rejects_non_draft_batch(
+        self, authenticated_teacher_client, draft_batch, items, batch_status
+    ):
+        draft_batch.status = batch_status
+        draft_batch.save()
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(authenticated_teacher_client, draft_batch, {'item_ids': ids, 'status': 'cancelled'})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert _item_state(ids) == before
+
+    @pytest.mark.django_db(transaction=True)
+    def test_bulk_status_update_invalid_status_changes_nothing(
+        self, authenticated_teacher_client, draft_batch, items
+    ):
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(authenticated_teacher_client, draft_batch, {
+            'item_ids': ids, 'status': 'not-a-status', 'teacher_notes': 'should not land',
+        })
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert set(response.data['errors']) == {str(i) for i in ids}
+        assert all('status' in err for err in response.data['errors'].values())
+        assert _item_state(ids) == before
+
+    @pytest.mark.django_db(transaction=True)
+    def test_bulk_status_update_foreign_or_unknown_item_404_changes_nothing(
+        self, authenticated_teacher_client, draft_batch, items, teacher_user, school,
+        assigned_student, school_settings
+    ):
+        other_batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=10, year=2026, status='draft'
+        )
+        foreign = _bulk_item(other_batch, assigned_student, school_settings, 5)
+        ids = [item.id for item in items]
+        missing = BatchLessonItem.objects.order_by('-id').first().id + 1000
+        before = _item_state(ids + [foreign.id])
+
+        for stray in (foreign.id, missing):
+            response = self._put(authenticated_teacher_client, draft_batch, {
+                'item_ids': ids + [stray], 'status': 'cancelled',
+            })
+            assert response.status_code == status.HTTP_404_NOT_FOUND
+
+        assert _item_state(ids + [foreign.id]) == before
+
+    def test_other_teachers_batch_is_404(
+        self, api_client, draft_batch, items, school
+    ):
+        other_teacher = User.objects.create_user(
+            email='other.teacher@test.com', password='testpass123', user_type='teacher',
+            first_name='Other', last_name='Teacher', school=school, is_approved=True,
+        )
+        api_client.force_authenticate(user=other_teacher)
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(api_client, draft_batch, {'item_ids': ids, 'status': 'cancelled'})
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert _item_state(ids) == before
+
+    def test_more_than_the_cap_is_rejected(self, authenticated_teacher_client, draft_batch, items):
+        ids = [item.id for item in items]
+        filler = range(10**6, 10**6 + BULK_LESSON_ITEMS_MAX + 1 - len(ids))
+        body = {'item_ids': ids + list(filler), 'status': 'cancelled'}
+        assert len(body['item_ids']) == BULK_LESSON_ITEMS_MAX + 1
+        before = _item_state(ids)
+
+        response = self._put(authenticated_teacher_client, draft_batch, body)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'error' in response.data
+        assert _item_state(ids) == before
+
+    @pytest.mark.parametrize('body', [
+        {'status': 'cancelled'},
+        {'item_ids': [], 'status': 'cancelled'},
+        {'item_ids': 'all', 'status': 'cancelled'},
+        {'item_ids': ['1'], 'status': 'cancelled'},
+        {'item_ids': [True], 'status': 'cancelled'},
+        {'item_ids': None},
+    ])
+    def test_malformed_body_is_rejected(self, authenticated_teacher_client, draft_batch, items, body):
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(authenticated_teacher_client, draft_batch, body)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'error' in response.data
+        assert _item_state(ids) == before
+
+    def test_missing_status_is_rejected(self, authenticated_teacher_client, draft_batch, items):
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(authenticated_teacher_client, draft_batch, {'item_ids': ids, 'teacher_notes': 'x'})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert _item_state(ids) == before
+
+    def test_duplicate_ids_are_rejected(self, authenticated_teacher_client, draft_batch, items):
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(authenticated_teacher_client, draft_batch, {
+            'item_ids': ids + [ids[0]], 'status': 'cancelled',
+        })
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert _item_state(ids) == before
+
+    def test_date_and_admin_fields_in_body_are_ignored(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        one_off = _bulk_item(draft_batch, assigned_student, school_settings, 8, is_one_off=True)
+        before = _item_state([one_off.id])[0]
+
+        response = self._put(authenticated_teacher_client, draft_batch, {
+            'item_ids': [one_off.id], 'status': 'cancelled',
+            'scheduled_date': '2026-09-28', 'admin_notes': 'teacher cannot write this',
+        })
+
+        assert response.status_code == status.HTTP_200_OK
+        after = _item_state([one_off.id])[0]
+        assert after['status'] == 'cancelled'
+        assert after['scheduled_date'] == before['scheduled_date']
+        assert after['admin_notes'] == before['admin_notes']
+
+    def test_waive_limit_applies_per_row_in_request_order(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings, school
+    ):
+        settings = SchoolSettings.get_settings_for_school(school)
+        settings.waive_limit_enabled = True
+        settings.waive_limit = 2
+        settings.waive_period_type = 'rolling'
+        settings.waive_period_months = 4
+        settings.save()
+        rows = [
+            _bulk_item(draft_batch, assigned_student, school_settings, day)
+            for day in range(1, settings.waive_limit + 3)
+        ]
+        ids = [row.id for row in rows]
+
+        response = self._put(authenticated_teacher_client, draft_batch, {'item_ids': ids, 'status': 'waived'})
+
+        assert response.status_code == status.HTTP_200_OK
+        statuses = [row['status'] for row in response.data['updated']]
+        assert statuses == (
+            ['waived'] * settings.waive_limit + ['forfeited'] * (len(ids) - settings.waive_limit)
+        )
+        converted = [row for row in response.data['updated'] if row['status'] == 'forfeited']
+        assert all(row['waive_converted_to_forfeited'] is True for row in converted)
+        assert all(row['waive_usage']['remaining'] == 0 for row in converted)
+        assert [r['status'] for r in sorted(_item_state(ids), key=lambda r: ids.index(r['id']))] == statuses
+
+    def test_management_cannot_call_teacher_bulk_route(
+        self, authenticated_management_client, draft_batch, items
+    ):
+        ids = [item.id for item in items]
+        before = _item_state(ids)
+
+        response = self._put(authenticated_management_client, draft_batch, {'item_ids': ids, 'status': 'cancelled'})
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert _item_state(ids) == before
+
+
+# ---------------------------------------------------------------------------
+# MAP-313: a teacher states the actual length of any lesson in a draft batch,
+# schedule-generated ones included. Only duration opens up; the recurring
+# item's date, time and type stay server-owned.
+# ---------------------------------------------------------------------------
+
+from billing.models import RecurringLessonsSchedule
+
+
+def _schedule(teacher, student, school, school_settings):
+    return RecurringLessonsSchedule.objects.create(
+        teacher=teacher, student=student, school=school,
+        day_of_week=0, start_time=_time(15, 0), duration=Decimal('1.00'),
+        lesson_type='online',
+        teacher_rate=school_settings.online_teacher_rate,
+        student_rate=school_settings.online_student_rate,
+        start_date=_date(2026, 1, 5),
+    )
+
+
+def _recurring_item(batch, schedule, day):
+    return BatchLessonItem.objects.create(
+        batch=batch, student=schedule.student,
+        scheduled_date=_date(batch.year, batch.month, day), start_time=schedule.start_time,
+        duration=schedule.duration, lesson_type=schedule.lesson_type,
+        teacher_rate=schedule.teacher_rate, student_rate=schedule.student_rate,
+        status='completed', recurring_schedule=schedule, is_one_off=False,
+    )
+
+
+@pytest.mark.django_db
+class TestTeacherRecurringLessonDuration:
+
+    def _put(self, client, batch, item, body):
+        return client.put(
+            reverse('batch_lesson_item', kwargs={'batch_id': batch.id, 'item_id': item.id}),
+            body, format='json',
+        )
+
+    @pytest.fixture
+    def schedule(self, teacher_user, assigned_student, school, school_settings):
+        return _schedule(teacher_user, assigned_student, school, school_settings)
+
+    @pytest.fixture
+    def recurring(self, draft_batch, schedule):
+        return _recurring_item(draft_batch, schedule, 7)
+
+    def test_recurring_item_duration_is_editable_in_a_draft_batch(
+        self, authenticated_teacher_client, draft_batch, recurring, schedule
+    ):
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'duration': '0.75'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('0.75')
+        assert recurring.status == 'completed'
+        assert Decimal(response.data['duration']) == Decimal('0.75')
+        assert Decimal(response.data['teacher_payment']) == recurring.teacher_rate * Decimal('0.75')
+        assert Decimal(response.data['student_charge']) == recurring.student_rate * Decimal('0.75')
+        # The schedule's planned length is still reported for management review.
+        assert Decimal(response.data['schedule_duration']) == schedule.duration
+
+    def test_recurring_item_duration_is_locked_once_submitted(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        draft_batch.status = 'submitted'
+        draft_batch.save(update_fields=['status'])
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'duration': '0.75'})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {'error': 'Cannot modify non-draft batch'}
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('1.00')
+
+    def test_recurring_item_keeps_its_date_time_and_type(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        before = (recurring.scheduled_date, recurring.start_time, recurring.lesson_type)
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'duration': '0.50', 'scheduled_date': '2026-09-28',
+            'start_time': '09:00:00', 'lesson_type': 'in_person',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('0.50')
+        assert (recurring.scheduled_date, recurring.start_time, recurring.lesson_type) == before
+
+    @pytest.mark.parametrize('bad', ['0', '0.00', '-1'])
+    def test_non_positive_duration_is_rejected(
+        self, authenticated_teacher_client, draft_batch, recurring, bad
+    ):
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'duration': bad})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'duration' in response.data
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('1.00')
+
+    def test_schedule_duration_is_null_for_a_one_off(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        one_off = _bulk_item(draft_batch, assigned_student, school_settings, 8, is_one_off=True)
+
+        response = self._put(authenticated_teacher_client, draft_batch, one_off, {'duration': '1.50'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert response.data['schedule_duration'] is None
+        assert Decimal(response.data['duration']) == Decimal('1.50')
+
+    def test_schedule_duration_is_null_when_the_schedule_was_deleted(
+        self, authenticated_teacher_client, draft_batch, recurring, schedule
+    ):
+        schedule.delete()
+        recurring.refresh_from_db()
+        assert recurring.recurring_schedule_id is None
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'teacher_notes': 'ok'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert response.data['schedule_duration'] is None

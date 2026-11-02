@@ -293,8 +293,12 @@ Both roles have a collapsible sidebar on the left with:
    - Look through the lesson items table
    - For each lesson, update the status:
      - **Completed** - Lesson was taught
-     - **Cancelled** - Lesson was cancelled (select who cancelled and why)
+     - **Teacher cancelled** - You cancelled the lesson. The student is not charged and does not lose a waive; you are not paid for it. Allowed for future dates too
+     - **Waived** - The student cancelled with notice. Not charged; uses one of the student's waives
+     - **Forfeited** - The student cancelled late or did not show. Charged; you are paid
+     - **Promo lesson** - Free referral-promotion lesson. The student is not charged; you are paid your normal rate (works like a trial). Set by you on a draft batch or by management before approval
      - **Confirmed** - Lesson is scheduled but not yet taught
+     - **Cancelled (legacy)** - Older records from before "Teacher cancelled" existed. Read-only; use one of the statuses above for new cancellations
 
 4. **Add One-Off Lessons (if any)**
    - Click "Add Lesson" if you taught extra lessons not in your schedule
@@ -1248,7 +1252,7 @@ You'll see **three tabs:**
 - **Time** - Lesson time
 - **Duration** - Hours (e.g., 1.0, 0.5)
 - **Type** - Online or In-Person (badge)
-- **Status** - Completed, Cancelled, Confirmed (badge with color)
+- **Status** - Completed, Confirmed, Trial, Promo lesson, Waived, Forfeited, Teacher cancelled, Cancelled (legacy) (badge with color)
 - **Teacher Payment** - Amount teacher receives
 - **Student Charge** - Amount student is billed
 - **Notes** - Teacher notes, cancellation reasons

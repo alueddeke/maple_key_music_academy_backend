@@ -11,7 +11,8 @@ Coverage (Phase 16 Principles):
   - income_pre_expenses = sum of StudentInvoice.amount for the period
   - expenses_amount from SchoolExpenseItem sum (0.00 if no records)
   - income_after_expenses = income_pre_expenses - expenses_amount
-  - total_teacher_pay = sum of Invoice.total_amount for teacher_payment invoices in period
+  - total_teacher_pay = every approved batch in the period: payroll Invoice.total_amount
+    when generated, else Σ BatchLessonItem.calculate_teacher_payment() (MAP-314)
   - income_after_payroll = income_after_expenses - total_teacher_pay
   - No floor: income_after_payroll can be negative
 """
@@ -23,6 +24,7 @@ from datetime import date
 from django.contrib.auth import get_user_model
 
 from billing.models import (
+    BatchLessonItem,
     MonthlyInvoiceBatch,
     StudentInvoice,
     Invoice,
@@ -284,3 +286,66 @@ def test_summary_aggregation_negative_after_payroll(school, teacher_user, db):
     assert result['income_after_payroll'] == '-150.00', (
         f"Expected '-150.00' (50 - 200, no floor), got '{result['income_after_payroll']}'"
     )
+
+
+@pytest.mark.django_db
+def test_summary_counts_approved_batch_without_payroll_invoice(school, teacher_user, db):
+    """MAP-314: an approved batch whose payroll invoice has not been generated
+    still reduces income_after_payroll by its per-lesson teacher pay."""
+    student = User.objects.create_user(
+        email="pend_student@test.com", password="testpass123",
+        user_type="student", first_name="P", last_name="Test",
+        school=school, is_approved=True,
+    )
+    generated = _make_batch(teacher_user, school)
+    generated.invoice = _make_teacher_invoice(school, teacher_user, total_amount=Decimal("150.00"))
+    generated.save()
+    _make_student_invoice(generated, student, school, amount=Decimal("600.00"))
+
+    other_teacher = User.objects.create_user(
+        email="pend_teacher@test.com", password="testpass123",
+        user_type="teacher", first_name="T2", last_name="Test",
+        school=school, is_approved=True,
+    )
+    pending = _make_batch(other_teacher, school)
+    item = BatchLessonItem.objects.create(
+        batch=pending, student=student, scheduled_date=date(2026, 6, 8),
+        start_time="15:00", duration=Decimal("1.0"), lesson_type="online",
+        teacher_rate=Decimal("45.00"), student_rate=Decimal("60.00"), status="confirmed",
+    )
+    pending_pay = item.calculate_teacher_payment()
+    assert pending_pay > 0
+
+    result = compute_dashboard_summary(generated, school)
+
+    assert Decimal(result['teacher_pay_pending']) == pending_pay
+    assert Decimal(result['teacher_pay_total']) == Decimal("150.00") + pending_pay
+    assert Decimal(result['income_after_payroll']) == Decimal("600.00") - Decimal("150.00") - pending_pay
+
+
+@pytest.mark.django_db
+def test_summary_pending_pay_is_two_decimal_places_on_the_wire(school, teacher_user, db):
+    """MAP-314 follow-up: a per-lesson pay is rate × duration (4dp). The summary
+    must still render every money value as a 2dp string, or the frontend's
+    strict money schema rejects the whole dashboard payload."""
+    import re
+    student = User.objects.create_user(
+        email="dp_student@test.com", password="testpass123",
+        user_type="student", first_name="D", last_name="Test",
+        school=school, is_approved=True,
+    )
+    pending = _make_batch(teacher_user, school)
+    _make_student_invoice(pending, student, school, amount=Decimal("100.00"))
+    BatchLessonItem.objects.create(
+        batch=pending, student=student, scheduled_date=date(2026, 6, 8),
+        start_time="15:00", duration=Decimal("0.75"), lesson_type="online",
+        teacher_rate=Decimal("45.00"), student_rate=Decimal("60.00"), status="confirmed",
+    )
+
+    result = compute_dashboard_summary(pending, school)
+
+    money = re.compile(r"^-?(?:0|[1-9]\d{0,7})\.\d{2}$")
+    for key, value in result.items():
+        assert money.match(value), f"{key} = {value!r} is not a 2dp money string"
+    assert result['teacher_pay_pending'] == '33.75'
+    assert result['income_after_payroll'] == '66.25'

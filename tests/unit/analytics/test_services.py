@@ -1,6 +1,6 @@
 """Metric formula tests (deterministic via injected `today`)."""
 
-from datetime import date
+from datetime import date, time
 from decimal import Decimal
 
 import pytest
@@ -13,7 +13,14 @@ from analytics.services import (
     compute_month_rows,
     compute_overview,
 )
-from billing.models import Lesson, SchoolExpenseItem
+from billing.models import (
+    BatchLessonItem,
+    Invoice,
+    Lesson,
+    MonthlyInvoiceBatch,
+    SchoolExpenseItem,
+    StudentInvoice,
+)
 
 # June 2026 has 5 Mondays (1, 8, 15, 22, 29)
 JUNE = date(2026, 6, 15)
@@ -79,6 +86,165 @@ class TestMonthRows:
             today=date(first_month.year, first_month.month, 15),
         )
         assert rows[0]['new_enrollments'] == 1
+
+    def test_cancellations_teacher_counts_approved_batch_items(
+        self, school, teacher_user, student_user
+    ):
+        """MAP-271: teacher cancels in approved batches, scheduled in the month.
+        Draft batches, promo and bare cancelled are not counted."""
+        approved = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=6, year=2026, status='approved',
+        )
+        draft = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user, school=school, month=7, year=2026, status='draft',
+        )
+
+        def item(batch, day, item_status, month=6):
+            return BatchLessonItem.objects.create(
+                batch=batch, student=student_user,
+                scheduled_date=date(2026, month, day), start_time=time(15, 0),
+                duration=Decimal('1.0'), lesson_type='online',
+                teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'),
+                status=item_status,
+            )
+
+        item(approved, 1, 'teacher_cancelled')
+        item(approved, 8, 'teacher_cancelled')
+        item(approved, 15, 'promo')
+        item(approved, 22, 'cancelled')
+        item(draft, 29, 'teacher_cancelled')
+        item(approved, 2, 'teacher_cancelled', month=5)
+
+        rows = compute_month_rows(school, months=1, today=JUNE)
+        assert rows[0]['cancellations_teacher'] == 2
+        assert rows[0]['cancelled_lessons'] == 0
+
+
+
+def _batch(school, teacher, status='approved', month=6):
+    return MonthlyInvoiceBatch.objects.create(
+        teacher=teacher, school=school, month=month, year=2026, status=status,
+    )
+
+
+def _item(batch, student, day, item_status='confirmed', *, teacher_rate, student_rate):
+    return BatchLessonItem.objects.create(
+        batch=batch, student=student,
+        scheduled_date=date(2026, batch.month, day), start_time=time(15, 0),
+        duration=Decimal('1.0'), lesson_type='online',
+        teacher_rate=teacher_rate, student_rate=student_rate,
+        status=item_status,
+    )
+
+
+def _payroll_invoice(school, teacher, batch, total):
+    invoice = Invoice.objects.create(
+        invoice_type='teacher_payment', teacher=teacher, school=school,
+        status='pending', created_by=teacher,
+        total_amount=total, payment_balance=total,
+    )
+    batch.invoice = invoice
+    batch.save(update_fields=['invoice'])
+    return invoice
+
+
+def _student_invoice(batch, student, amount):
+    return StudentInvoice.objects.create(
+        batch=batch, student=student, school=batch.school,
+        invoice_number=f'INV-T-{batch.pk}-{student.pk}', amount=amount,
+        credit_applied=Decimal('0.00'), amount_after_credit=amount,
+        billing_contact_name='x', billing_email=student.email, billing_phone='1',
+        billing_street_address='1', billing_city='T', billing_province='ON',
+        billing_postal_code='M5H 2N2',
+    )
+
+
+@pytest.mark.django_db
+class TestTeacherPay:
+    """MAP-314: Teacher pay counts every approved batch, not only generated
+    payroll invoices; gross margin = billed − teacher pay − expenses."""
+
+    RATES = dict(teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'))
+
+    def test_teacher_pay_counts_approved_batches_without_invoice(
+        self, school, teacher_user, student_user
+    ):
+        batch = _batch(school, teacher_user)
+        items = [_item(batch, student_user, d, **self.RATES) for d in (1, 8)]
+        expected_pay = sum((i.calculate_teacher_payment() for i in items), Decimal(0))
+        billed = Decimal('120.00')
+        _student_invoice(batch, student_user, billed)
+        SchoolExpenseItem.objects.create(
+            school=school, period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+            amount=Decimal('10.00'), title='rent',
+        )
+
+        row = compute_month_rows(school, months=1, today=JUNE)[0]
+        assert Decimal(row['teacher_pay']) == expected_pay
+        assert Decimal(row['teacher_pay_pending']) == expected_pay
+        assert Decimal(row['teacher_pay_generated']) == 0
+        assert Decimal(row['gross_margin']) == billed - expected_pay - Decimal('10.00')
+
+    def test_teacher_pay_prefers_invoice_total_when_generated(
+        self, school, teacher_user, student_user
+    ):
+        batch = _batch(school, teacher_user)
+        item = _item(batch, student_user, 1, **self.RATES)
+        adjusted = item.calculate_teacher_payment() + Decimal('7.00')
+        _payroll_invoice(school, teacher_user, batch, adjusted)
+
+        row = compute_month_rows(school, months=1, today=JUNE)[0]
+        assert Decimal(row['teacher_pay']) == adjusted
+        assert Decimal(row['teacher_pay_generated']) == adjusted
+        assert Decimal(row['teacher_pay_pending']) == 0
+
+    def test_teacher_pay_mixes_generated_and_pending(
+        self, school, teacher_user, student_user, management_user
+    ):
+        other_teacher = management_user  # any second user works as a batch teacher
+        generated_batch = _batch(school, teacher_user)
+        _item(generated_batch, student_user, 1, **self.RATES)
+        _payroll_invoice(school, teacher_user, generated_batch, Decimal('45.00'))
+        pending_batch = _batch(school, other_teacher)
+        pending_item = _item(pending_batch, student_user, 8, **self.RATES)
+
+        row = compute_month_rows(school, months=1, today=JUNE)[0]
+        assert Decimal(row['teacher_pay_generated']) == Decimal('45.00')
+        assert Decimal(row['teacher_pay_pending']) == pending_item.calculate_teacher_payment()
+        assert Decimal(row['teacher_pay']) == (
+            Decimal(row['teacher_pay_generated']) + Decimal(row['teacher_pay_pending'])
+        )
+
+    @pytest.mark.parametrize('batch_status', ['draft', 'submitted', 'rejected'])
+    def test_teacher_pay_ignores_unapproved_batches(
+        self, school, teacher_user, student_user, batch_status
+    ):
+        batch = _batch(school, teacher_user, status=batch_status)
+        _item(batch, student_user, 1, **self.RATES)
+
+        row = compute_month_rows(school, months=1, today=JUNE)[0]
+        assert Decimal(row['teacher_pay']) == 0
+
+    def test_teacher_pay_zero_for_unpaid_statuses(self, school, teacher_user, student_user):
+        batch = _batch(school, teacher_user)
+        for day, item_status in ((1, 'waived'), (8, 'cancelled'), (15, 'teacher_cancelled')):
+            _item(batch, student_user, day, item_status, **self.RATES)
+
+        row = compute_month_rows(school, months=1, today=JUNE)[0]
+        assert Decimal(row['teacher_pay']) == 0
+
+    def test_teacher_pay_respects_test_data_filter(
+        self, school, teacher_user, student_user, settings
+    ):
+        settings.ANALYTICS_EXCLUDE_TEST_DATA = True
+        settings.TEST_ACCOUNT_EMAIL_DOMAINS = ['maplekeytest.com']
+        teacher_user.email = 'teach@maplekeytest.com'
+        teacher_user.save(update_fields=['email'])
+        batch = _batch(school, teacher_user)
+        _item(batch, student_user, 1, **self.RATES)
+
+        row = compute_month_rows(school, months=1, today=JUNE)[0]
+        assert Decimal(row['teacher_pay']) == 0
 
 
 @pytest.mark.django_db

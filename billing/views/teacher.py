@@ -12,6 +12,7 @@ from ..serializers import (
 )
 from ..services.invoice_totals import recalculate
 from ..services.rates import resolve_rates
+from ..services.bulk_lesson_items import bulk_update_lesson_items
 from custom_auth.decorators import (
     teacher_required, management_required, teacher_or_management_required
 )
@@ -630,7 +631,10 @@ def batch_add_lesson(request, batch_id):
 @teacher_required
 def batch_lesson_item(request, batch_id, item_id):
     """
-    PUT: Update a lesson item's status/notes (teacher marks completed/cancelled)
+    PUT: Update a lesson item while the batch is a draft. Every item accepts
+    status, cancellation_reason, teacher_notes and duration (MAP-313: the
+    actual length of a schedule-generated lesson is the teacher's to state);
+    a one-off also accepts its date, time and type. Other keys are dropped.
     DELETE: Remove a one-off lesson item only
     """
     try:
@@ -650,9 +654,9 @@ def batch_lesson_item(request, batch_id, item_id):
         )
 
     if request.method == 'PUT':
-        allowed_fields = ['status', 'cancellation_reason', 'teacher_notes']
+        allowed_fields = ['status', 'cancellation_reason', 'teacher_notes', 'duration']
         if item.is_one_off:
-            allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
+            allowed_fields += ['scheduled_date', 'start_time', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         # MAP-101: past the waive limit a teacher's "waived" becomes forfeited
@@ -679,6 +683,49 @@ def batch_lesson_item(request, batch_id, item_id):
             )
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _teacher_waive_limit(school):
+    """Per-row MAP-101 waive limit for the bulk route, same as batch_lesson_item."""
+    def prepare(update_data, item):
+        update_data, waive_usage, waive_converted = apply_waive_limit(
+            update_data, item.student, school, item=item
+        )
+        if waive_converted:
+            return update_data, {'waive_converted_to_forfeited': True, 'waive_usage': waive_usage}
+        return update_data, {}
+    return prepare
+
+
+@api_view(['PUT'])
+@teacher_required
+def batch_lesson_items_bulk(request, batch_id):
+    """
+    PUT: one status + one note on many items of a draft batch (MAP-176).
+    All-or-nothing; body and responses in billing/services/bulk_lesson_items.py.
+    """
+    try:
+        batch = MonthlyInvoiceBatch.objects.get(
+            id=batch_id,
+            teacher=request.user,
+            school=request.user.school
+        )
+    except MonthlyInvoiceBatch.DoesNotExist:
+        return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.status != 'draft':
+        return Response(
+            {'error': 'Cannot modify non-draft batch'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    code, body = bulk_update_lesson_items(
+        batch,
+        request.data,
+        fields=['status', 'cancellation_reason', 'teacher_notes'],
+        prepare=_teacher_waive_limit(request.user.school),
+    )
+    return Response(body, status=code)
 
 
 # Phase 22: Month-End Adjustments — teacher marks exceptions on approved batches
@@ -739,7 +786,12 @@ def teacher_batch_adjustment_item(request, batch_id, item_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    allowed_statuses = ['confirmed', 'completed', 'cancelled', 'trial', 'waived', 'forfeited']
+    # MAP-271: teacher_cancelled is allowed on future dates (teacher cancels ahead).
+    # promo is not offered here: it is set on draft or submitted batches only (MAP-272).
+    allowed_statuses = [
+        'confirmed', 'completed', 'cancelled', 'trial', 'waived', 'forfeited',
+        'teacher_cancelled',
+    ]
     if new_status and new_status not in allowed_statuses:
         return Response(
             {'error': f'Invalid status. Allowed: {allowed_statuses}'},

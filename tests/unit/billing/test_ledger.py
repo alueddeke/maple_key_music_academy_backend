@@ -32,7 +32,7 @@ from billing.models import (
 from billing.services import ledger
 
 ZERO = Decimal('0.00')
-MOVES_UP = ('pre_billing_payment', 'waived_rollover')
+MOVES_UP = ('pre_billing_payment', 'waived_rollover', 'teacher_cancel_refund')
 MOVES_DOWN = ('lesson_charge',)
 NEUTRAL = ('forfeited', 'shortfall')
 

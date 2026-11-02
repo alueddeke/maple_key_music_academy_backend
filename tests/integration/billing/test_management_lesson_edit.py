@@ -187,6 +187,22 @@ class TestManagementLessonEditFields:
         item.refresh_from_db()
         assert item.status == "trial"
 
+    @pytest.mark.parametrize("new_status", ["teacher_cancelled", "promo"])
+    def test_can_edit_status_teacher_cancelled_and_promo(
+        self, management_client, submitted_batch, new_status
+    ):
+        """MAP-271 / MAP-272: management Edit Lesson accepts both new statuses."""
+        item = lesson_item(submitted_batch)
+        response = management_client.patch(
+            edit_url(submitted_batch, item),
+            {"status": new_status},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["status"] == new_status
+        item.refresh_from_db()
+        assert item.status == new_status
+
     def test_can_edit_teacher_notes(self, management_client, submitted_batch):
         item = lesson_item(submitted_batch)
         response = management_client.patch(

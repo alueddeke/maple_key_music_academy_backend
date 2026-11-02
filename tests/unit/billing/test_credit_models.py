@@ -188,7 +188,7 @@ class TestCreditTransactionConstraints:
         batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-CT1')
         item = _make_batch_lesson_item(batch, student_user)
         for tx_type in ('pre_billing_payment', 'forfeited', 'waived_rollover',
-                        'lesson_charge', 'shortfall'):
+                        'lesson_charge', 'shortfall', 'teacher_cancel_refund'):
             tx = CreditTransaction.objects.create(
                 account=account,
                 school=school,
@@ -359,6 +359,32 @@ class TestCalculationMethodSemantics:
             student_rate=Decimal('60.00'), duration=Decimal('1.0'),
         )
         assert item.calculate_student_charge() == Decimal('60.00')
+
+    def test_teacher_cancelled_charges_student_zero_and_pays_teacher_zero(
+        self, school, teacher_user, student_user
+    ):
+        """MAP-271: teacher cancels → student not charged, teacher not paid."""
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-TCX')
+        _make_batch_lesson_item(batch, student_user)  # history, so no auto-trial
+        item = _make_batch_lesson_item(batch, student_user, status='teacher_cancelled')
+        item.refresh_from_db()
+        assert item.status == 'teacher_cancelled'
+        assert item.student_rate * item.duration > Decimal('0.00')
+        assert item.calculate_student_charge() == Decimal('0.00')
+        assert item.calculate_teacher_payment() == Decimal('0.00')
+
+    def test_promo_charges_student_zero_and_pays_teacher_rate(
+        self, school, teacher_user, student_user
+    ):
+        """MAP-272: promo lesson → trial semantics, student $0, teacher paid normal rate."""
+        batch = _make_batch(teacher_user, school, batch_number='BATCH-2026-01-PRX')
+        _make_batch_lesson_item(batch, student_user)  # history, so no auto-trial
+        item = _make_batch_lesson_item(batch, student_user, status='promo')
+        item.refresh_from_db()
+        assert item.status == 'promo'
+        assert item.calculate_student_charge() == Decimal('0.00')
+        assert item.calculate_teacher_payment() == item.teacher_rate * item.duration
+        assert item.calculate_teacher_payment() > Decimal('0.00')
 
     def test_calculate_student_charge_trial_is_zero(self, school, teacher_user, student_user):
         """Regression D-05 backward compat: trial lesson → student charge = 0."""
