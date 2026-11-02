@@ -245,6 +245,20 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
         decimal_places=2,
         read_only=True
     )
+    # MAP-313: the schedule's planned length, so management can see where a
+    # teacher stated a different actual duration. None for one-offs and for
+    # items whose schedule has since been deleted (FK is SET_NULL).
+    # A method field, not a dotted-source DecimalField: DRF drops a read field's
+    # default on partial saves, which the teacher PUT uses, and the key must be
+    # present on every response (strict Zod on the frontend).
+    schedule_duration = serializers.SerializerMethodField()
+
+    def get_schedule_duration(self, obj):
+        schedule = obj.recurring_schedule
+        if schedule is None:
+            return None
+        return f"{schedule.duration:.2f}"
+
     def validate_duration(self, value):
         if value <= 0:
             raise serializers.ValidationError("Duration must be greater than 0.")
@@ -254,14 +268,14 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
         model = BatchLessonItem
         fields = [
             'id', 'student', 'student_name',
-            'scheduled_date', 'start_time', 'duration',
+            'scheduled_date', 'start_time', 'duration', 'schedule_duration',
             'lesson_type', 'teacher_rate', 'student_rate',
             'status', 'cancellation_reason',
             'teacher_notes', 'admin_notes', 'is_one_off',
             'teacher_payment', 'student_charge',
             'created_at'
         ]
-        read_only_fields = ['teacher_payment', 'student_charge', 'created_at']
+        read_only_fields = ['schedule_duration', 'teacher_payment', 'student_charge', 'created_at']
         # MAP-179: rates are never negative (management paths keep the field list).
         extra_kwargs = {
             'teacher_rate': {'validators': [MinValueValidator(Decimal('0'))]},
