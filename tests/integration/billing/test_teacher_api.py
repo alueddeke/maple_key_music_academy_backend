@@ -833,3 +833,128 @@ class TestTeacherBulkLessonStatus:
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert _item_state(ids) == before
+
+
+# ---------------------------------------------------------------------------
+# MAP-313: a teacher states the actual length of any lesson in a draft batch,
+# schedule-generated ones included. Only duration opens up; the recurring
+# item's date, time and type stay server-owned.
+# ---------------------------------------------------------------------------
+
+from billing.models import RecurringLessonsSchedule
+
+
+def _schedule(teacher, student, school, school_settings):
+    return RecurringLessonsSchedule.objects.create(
+        teacher=teacher, student=student, school=school,
+        day_of_week=0, start_time=_time(15, 0), duration=Decimal('1.00'),
+        lesson_type='online',
+        teacher_rate=school_settings.online_teacher_rate,
+        student_rate=school_settings.online_student_rate,
+        start_date=_date(2026, 1, 5),
+    )
+
+
+def _recurring_item(batch, schedule, day):
+    return BatchLessonItem.objects.create(
+        batch=batch, student=schedule.student,
+        scheduled_date=_date(batch.year, batch.month, day), start_time=schedule.start_time,
+        duration=schedule.duration, lesson_type=schedule.lesson_type,
+        teacher_rate=schedule.teacher_rate, student_rate=schedule.student_rate,
+        status='completed', recurring_schedule=schedule, is_one_off=False,
+    )
+
+
+@pytest.mark.django_db
+class TestTeacherRecurringLessonDuration:
+
+    def _put(self, client, batch, item, body):
+        return client.put(
+            reverse('batch_lesson_item', kwargs={'batch_id': batch.id, 'item_id': item.id}),
+            body, format='json',
+        )
+
+    @pytest.fixture
+    def schedule(self, teacher_user, assigned_student, school, school_settings):
+        return _schedule(teacher_user, assigned_student, school, school_settings)
+
+    @pytest.fixture
+    def recurring(self, draft_batch, schedule):
+        return _recurring_item(draft_batch, schedule, 7)
+
+    def test_recurring_item_duration_is_editable_in_a_draft_batch(
+        self, authenticated_teacher_client, draft_batch, recurring, schedule
+    ):
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'duration': '0.75'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('0.75')
+        assert recurring.status == 'completed'
+        assert Decimal(response.data['duration']) == Decimal('0.75')
+        assert Decimal(response.data['teacher_payment']) == recurring.teacher_rate * Decimal('0.75')
+        assert Decimal(response.data['student_charge']) == recurring.student_rate * Decimal('0.75')
+        # The schedule's planned length is still reported for management review.
+        assert Decimal(response.data['schedule_duration']) == schedule.duration
+
+    def test_recurring_item_duration_is_locked_once_submitted(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        draft_batch.status = 'submitted'
+        draft_batch.save(update_fields=['status'])
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'duration': '0.75'})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {'error': 'Cannot modify non-draft batch'}
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('1.00')
+
+    def test_recurring_item_keeps_its_date_time_and_type(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        before = (recurring.scheduled_date, recurring.start_time, recurring.lesson_type)
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'duration': '0.50', 'scheduled_date': '2026-09-28',
+            'start_time': '09:00:00', 'lesson_type': 'in_person',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('0.50')
+        assert (recurring.scheduled_date, recurring.start_time, recurring.lesson_type) == before
+
+    @pytest.mark.parametrize('bad', ['0', '0.00', '-1'])
+    def test_non_positive_duration_is_rejected(
+        self, authenticated_teacher_client, draft_batch, recurring, bad
+    ):
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'duration': bad})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'duration' in response.data
+        recurring.refresh_from_db()
+        assert recurring.duration == Decimal('1.00')
+
+    def test_schedule_duration_is_null_for_a_one_off(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        one_off = _bulk_item(draft_batch, assigned_student, school_settings, 8, is_one_off=True)
+
+        response = self._put(authenticated_teacher_client, draft_batch, one_off, {'duration': '1.50'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert response.data['schedule_duration'] is None
+        assert Decimal(response.data['duration']) == Decimal('1.50')
+
+    def test_schedule_duration_is_null_when_the_schedule_was_deleted(
+        self, authenticated_teacher_client, draft_batch, recurring, schedule
+    ):
+        schedule.delete()
+        recurring.refresh_from_db()
+        assert recurring.recurring_schedule_id is None
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'teacher_notes': 'ok'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert response.data['schedule_duration'] is None
