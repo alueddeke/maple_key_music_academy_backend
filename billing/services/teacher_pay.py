@@ -14,7 +14,7 @@ Rule: every APPROVED batch in (school, year, month) counts.
 Draft / submitted / rejected batches contribute nothing.
 """
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from billing.models import MonthlyInvoiceBatch
 
@@ -42,4 +42,8 @@ def approved_teacher_pay(school, year, month, *, exclude=None):
                 (item.calculate_teacher_payment() for item in batch.lesson_items.all()),
                 Decimal('0.00'),
             )
+    # Money on the wire is 2dp. A per-lesson pay is rate (2dp) × duration
+    # (2dp) = 4dp, and str() of that ("4010.0000") fails the frontend's strict
+    # money schema and blanks the dashboard (e2e red on develop, 2026-11-02).
+    pending = pending.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     return {'total': generated + pending, 'generated': generated, 'pending': pending}
