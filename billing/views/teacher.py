@@ -631,7 +631,10 @@ def batch_add_lesson(request, batch_id):
 @teacher_required
 def batch_lesson_item(request, batch_id, item_id):
     """
-    PUT: Update a lesson item's status/notes (teacher marks completed/cancelled)
+    PUT: Update a lesson item while the batch is a draft. Every item accepts
+    status, cancellation_reason, teacher_notes and duration (MAP-313: the
+    actual length of a schedule-generated lesson is the teacher's to state);
+    a one-off also accepts its date, time and type. Other keys are dropped.
     DELETE: Remove a one-off lesson item only
     """
     try:
@@ -651,9 +654,9 @@ def batch_lesson_item(request, batch_id, item_id):
         )
 
     if request.method == 'PUT':
-        allowed_fields = ['status', 'cancellation_reason', 'teacher_notes']
+        allowed_fields = ['status', 'cancellation_reason', 'teacher_notes', 'duration']
         if item.is_one_off:
-            allowed_fields += ['scheduled_date', 'start_time', 'duration', 'lesson_type']
+            allowed_fields += ['scheduled_date', 'start_time', 'lesson_type']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
 
         # MAP-101: past the waive limit a teacher's "waived" becomes forfeited
