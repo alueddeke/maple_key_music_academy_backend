@@ -958,3 +958,118 @@ class TestTeacherRecurringLessonDuration:
 
         assert response.status_code == status.HTTP_200_OK, response.data
         assert response.data['schedule_duration'] is None
+
+
+# ---------------------------------------------------------------------------
+# MAP-312: batch_submit refuses a draft that still has past Confirmed lessons.
+# "Today" is the school's date in America/Toronto (owner ruling 2026-11-02),
+# the same rule the UI applies with the browser's local date.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime as _datetime, timedelta as _timedelta
+from unittest import mock
+from zoneinfo import ZoneInfo
+
+from django.utils import timezone
+
+SCHOOL_TZ = ZoneInfo('America/Toronto')
+
+
+def _school_today():
+    return timezone.localdate(timezone=SCHOOL_TZ)
+
+
+def _dated_item(batch, student, school_settings, scheduled_date, status):
+    return BatchLessonItem.objects.create(
+        batch=batch, student=student,
+        scheduled_date=scheduled_date, start_time=_time(15, 0),
+        duration=Decimal('1.0'), lesson_type='online',
+        teacher_rate=school_settings.online_teacher_rate,
+        student_rate=school_settings.online_student_rate,
+        status=status,
+    )
+
+
+@pytest.mark.django_db
+class TestBatchSubmitUnresolvedPast:
+
+    @pytest.fixture
+    def add_item(self, draft_batch, assigned_student, school_settings):
+        # A student's first item is auto-promoted to 'trial' (BatchLessonItem.save);
+        # create one up front so every item a test adds keeps its status.
+        _dated_item(draft_batch, assigned_student, school_settings, _school_today(), 'completed')
+
+        def add(scheduled_date, status):
+            return _dated_item(draft_batch, assigned_student, school_settings, scheduled_date, status)
+        return add
+
+    def _submit(self, client, batch):
+        return client.post(reverse('batch_submit', kwargs={'batch_id': batch.id}), format='json')
+
+    def test_past_confirmed_item_blocks_submit_and_batch_stays_draft(
+        self, authenticated_teacher_client, draft_batch, add_item
+    ):
+        today = _school_today()
+        past = add_item(today - _timedelta(days=1), 'confirmed')
+        add_item(today - _timedelta(days=2), 'completed')
+
+        response = self._submit(authenticated_teacher_client, draft_batch)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json() == {
+            'error': 'Mark past lessons Completed or Cancelled before submitting',
+            'unresolved_item_ids': [past.id],
+        }
+        draft_batch.refresh_from_db()
+        assert draft_batch.status == 'draft'
+        assert draft_batch.submitted_at is None
+
+    def test_unresolved_item_ids_are_ascending(
+        self, authenticated_teacher_client, draft_batch, add_item
+    ):
+        today = _school_today()
+        later_dated = add_item(today - _timedelta(days=1), 'confirmed')
+        earlier_dated = add_item(today - _timedelta(days=5), 'confirmed')
+
+        response = self._submit(authenticated_teacher_client, draft_batch)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()['unresolved_item_ids'] == sorted([later_dated.id, earlier_dated.id])
+
+    def test_confirmed_items_today_or_later_submit(
+        self, authenticated_teacher_client, draft_batch, add_item
+    ):
+        today = _school_today()
+        add_item(today, 'confirmed')
+        add_item(today + _timedelta(days=1), 'confirmed')
+
+        response = self._submit(authenticated_teacher_client, draft_batch)
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        draft_batch.refresh_from_db()
+        assert draft_batch.status == 'submitted'
+
+    def test_lesson_dated_today_submits_in_the_toronto_evening(
+        self, authenticated_teacher_client, draft_batch, add_item
+    ):
+        # 23:30 in Toronto is already the next day in UTC; the lesson is still "today".
+        evening = _datetime(2026, 11, 2, 23, 30, tzinfo=SCHOOL_TZ)
+        assert evening.astimezone(ZoneInfo('UTC')).date() > evening.date()
+        add_item(evening.date(), 'confirmed')
+
+        with mock.patch('django.utils.timezone.now', return_value=evening):
+            response = self._submit(authenticated_teacher_client, draft_batch)
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        draft_batch.refresh_from_db()
+        assert draft_batch.status == 'submitted'
+
+    @pytest.mark.parametrize('resolved_status', ['completed', 'cancelled'])
+    def test_resolved_past_items_do_not_block(
+        self, authenticated_teacher_client, draft_batch, add_item, resolved_status
+    ):
+        add_item(_school_today() - _timedelta(days=1), resolved_status)
+
+        response = self._submit(authenticated_teacher_client, draft_batch)
+
+        assert response.status_code == status.HTTP_200_OK, response.data
