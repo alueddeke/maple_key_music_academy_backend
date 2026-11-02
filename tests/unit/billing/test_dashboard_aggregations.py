@@ -321,3 +321,31 @@ def test_summary_counts_approved_batch_without_payroll_invoice(school, teacher_u
     assert Decimal(result['teacher_pay_pending']) == pending_pay
     assert Decimal(result['teacher_pay_total']) == Decimal("150.00") + pending_pay
     assert Decimal(result['income_after_payroll']) == Decimal("600.00") - Decimal("150.00") - pending_pay
+
+
+@pytest.mark.django_db
+def test_summary_pending_pay_is_two_decimal_places_on_the_wire(school, teacher_user, db):
+    """MAP-314 follow-up: a per-lesson pay is rate × duration (4dp). The summary
+    must still render every money value as a 2dp string, or the frontend's
+    strict money schema rejects the whole dashboard payload."""
+    import re
+    student = User.objects.create_user(
+        email="dp_student@test.com", password="testpass123",
+        user_type="student", first_name="D", last_name="Test",
+        school=school, is_approved=True,
+    )
+    pending = _make_batch(teacher_user, school)
+    _make_student_invoice(pending, student, school, amount=Decimal("100.00"))
+    BatchLessonItem.objects.create(
+        batch=pending, student=student, scheduled_date=date(2026, 6, 8),
+        start_time="15:00", duration=Decimal("0.75"), lesson_type="online",
+        teacher_rate=Decimal("45.00"), student_rate=Decimal("60.00"), status="confirmed",
+    )
+
+    result = compute_dashboard_summary(pending, school)
+
+    money = re.compile(r"^-?(?:0|[1-9]\d{0,7})\.\d{2}$")
+    for key, value in result.items():
+        assert money.match(value), f"{key} = {value!r} is not a 2dp money string"
+    assert result['teacher_pay_pending'] == '33.75'
+    assert result['income_after_payroll'] == '66.25'
