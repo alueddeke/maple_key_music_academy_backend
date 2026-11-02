@@ -16,6 +16,7 @@ from ..serializers import (
     TrialLessonCreateSerializer
 )
 from ..services.bulk_lesson_items import bulk_update_lesson_items
+from ..services.teacher_pay import approved_teacher_pay
 from custom_auth.authentication import release_email, revoke_user_tokens
 from teacher_profiles.instruments import instrument_names
 from custom_auth.decorators import (
@@ -2271,6 +2272,9 @@ def compute_dashboard_summary(batch, school):
       expenses_amount      – sum(SchoolExpenseItem.amount) for the period (0.00 if none)
       income_after_expenses – income_pre_expenses - expenses_amount
       income_after_payroll  – income_after_expenses - total_teacher_pay
+      teacher_pay_total     – pay for every approved batch (invoice total when
+                              generated, else Σ calculate_teacher_payment()) (MAP-314)
+      teacher_pay_pending   – the part of teacher_pay_total with no payroll invoice yet
     """
     period_start = date(batch.year, batch.month, 1)
     period_end = date(batch.year, batch.month, calendar.monthrange(batch.year, batch.month)[1])
@@ -2302,11 +2306,11 @@ def compute_dashboard_summary(batch, school):
         (item.amount for item in expense_items), Decimal('0.00')
     )
 
-    # Teacher payroll: sum of Invoice.total_amount for batches with a linked invoice
-    total_teacher_pay = sum(
-        (pb.invoice.total_amount or Decimal('0.00') for pb in period_batches if pb.invoice),
-        Decimal('0.00'),
-    )
+    # Teacher payroll (MAP-314): every approved batch — payroll invoice total
+    # when generated, else the per-lesson rule — so the card no longer
+    # overstates income until the last "Generate Teacher Invoice" click.
+    pay = approved_teacher_pay(school, batch.year, batch.month)
+    total_teacher_pay = pay['total']
 
     income_after_expenses = income_pre_expenses - expenses_amount
     income_after_payroll = income_after_expenses - total_teacher_pay
@@ -2316,6 +2320,8 @@ def compute_dashboard_summary(batch, school):
         'expenses_amount': str(expenses_amount),
         'income_after_expenses': str(income_after_expenses),
         'income_after_payroll': str(income_after_payroll),
+        'teacher_pay_total': str(total_teacher_pay),
+        'teacher_pay_pending': str(pay['pending']),
     }
 
 
