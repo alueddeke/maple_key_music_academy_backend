@@ -526,13 +526,31 @@ class TestTeacherBatchAddLesson:
         assert item.teacher_rate == school_settings.online_teacher_rate
         assert item.student_rate == school_settings.online_student_rate
 
-    def test_cancelled_status_is_stored(
+    # MAP-310: the add body accepts completed and confirmed only.
+    def test_add_lesson_completed_status_is_created(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, status='completed'))
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'completed'
+
+    def test_add_lesson_confirmed_status_is_created(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, status='confirmed'))
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'confirmed'
+
+    def test_add_lesson_bare_cancelled_status_is_rejected(
         self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
     ):
         response = self._post(authenticated_teacher_client, draft_batch, _live_payload(assigned_student, status='cancelled'))
 
-        assert response.status_code == status.HTTP_201_CREATED, response.data
-        assert BatchLessonItem.objects.get(pk=response.data['id']).status == 'cancelled'
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert set(response.data) == {'status'}
+        assert not BatchLessonItem.objects.exists()
 
     def test_first_lesson_for_new_student_becomes_trial(
         self, authenticated_teacher_client, draft_batch, teacher_user, school, school_settings
