@@ -20,10 +20,15 @@ from notifications.services import notify_exception_marked
 import logging
 import uuid
 from datetime import date
+from zoneinfo import ZoneInfo
 from django.db import transaction
 from django.core.exceptions import FieldDoesNotExist
 
 logger = logging.getLogger(__name__)
+
+# The school's calendar date for teacher-facing date rules (MAP-312 owner ruling).
+SCHOOL_TZ = ZoneInfo('America/Toronto')
+
 User = get_user_model()
 
 
@@ -909,6 +914,23 @@ def batch_submit(request, batch_id):
     if batch.lesson_items.count() == 0:
         return Response(
             {'error': 'Cannot submit empty batch'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Past lessons still Confirmed must be marked Completed or Cancelled first,
+    # the same rule the UI applies (MAP-312). "Today" is the school's date in
+    # America/Toronto (TIME_ZONE is UTC), so a lesson dated today never blocks.
+    today = timezone.localdate(timezone=SCHOOL_TZ)
+    unresolved_item_ids = sorted(
+        batch.lesson_items.filter(status='confirmed', scheduled_date__lt=today)
+        .values_list('id', flat=True)
+    )
+    if unresolved_item_ids:
+        return Response(
+            {
+                'error': 'Mark past lessons Completed or Cancelled before submitting',
+                'unresolved_item_ids': unresolved_item_ids,
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
 
