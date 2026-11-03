@@ -307,7 +307,9 @@ class TeacherBatchLessonItemSerializer(StrictFieldsMixin, serializers.ModelSeria
     fields; rates, is_one_off, admin_notes and the trial override are set by
     the view, never from the body. Management paths keep BatchLessonItemSerializer.
     """
-    status = serializers.ChoiceField(choices=['completed', 'confirmed', 'cancelled'])
+    # MAP-310: bare 'cancelled' is not an add choice; exception statuses go
+    # through the cancellation flow on an existing row. The model keeps it for legacy rows.
+    status = serializers.ChoiceField(choices=['completed', 'confirmed'])
 
     class Meta:
         model = BatchLessonItem
