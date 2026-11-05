@@ -36,6 +36,12 @@ Money-safety rules enforced here:
     onward a bank payment follows exactly the card rules (superseded number,
     coverage, cap, paid flip), so a card and a bank payment on one invoice
     are never both credited in full, in either order.
+  - Bank returns (MAP-232): a bank payment Helcim later reports as returned
+    (NSF, closed account) takes back what it credited, as far as the balance
+    allows — a 'reversal' row for min(credit, balance), the rest as an
+    informational 'shortfall' — re-opens the invoice, flags the account and
+    lands the event in 'returned' (alerting). Same lock order, one atomic
+    block; one_reversal_per_webhook_event is the database backstop.
 """
 
 import logging
@@ -46,8 +52,10 @@ from django.db.models import F, Sum
 from django.utils import timezone
 
 from billing.metrics import webhook_events_total
+from notifications.services import notify_bank_payment_returned
 
 from ..models import (
+    CreditTransaction,
     HelcimWebhookEvent,
     PreBillingInvoice,
     StudentCreditAccount,
@@ -63,7 +71,7 @@ RETRYABLE_STATES = {'pending', 'enrichment_failed', 'no_invoice', 'no_account'}
 
 # A received payment that did not credit and needs a human — what the
 # webhook-failures alert counts (scheduler gauge, MAP-231).
-ALERT_STATES = {'enrichment_failed', 'no_invoice', 'no_account', 'needs_attention'}
+ALERT_STATES = {'enrichment_failed', 'no_invoice', 'no_account', 'needs_attention', 'returned'}
 
 CREDITABLE_TYPES = {'purchase', 'capture'}
 
@@ -331,3 +339,109 @@ def _finalize(event, processing_status, detail):
         logger.info('Webhook event %s recorded without credit (%s): %s',
                     event.helcim_transaction_id, processing_status, detail)
     return event
+
+
+def apply_bank_return(event):
+    """
+    Apply a bank return reported by Helcim to an ACH event (MAP-232).
+
+    Credited event: reverse what it credited (amount − fee_amount) — a
+    'reversal' row for as much as the balance holds, the remainder as an
+    informational 'shortfall' row on the invoice — flag the account, set the
+    invoice back to adjusted (revision > 0) or sent and clear paid_via.
+    Never-credited event: no ledger row. Either way the event lands in
+    'returned' and management gets a bell notification after commit.
+
+    Idempotent: an event already 'returned' is left alone. Returns the event
+    as stored.
+    """
+    with transaction.atomic():
+        # Lock order: event → invoice → account (MAP-180).
+        locked = HelcimWebhookEvent.objects.select_for_update().get(pk=event.pk)
+        if locked.processing_status == 'returned':
+            return locked
+        invoice = (
+            PreBillingInvoice.objects
+            .select_for_update()
+            .filter(helcim_invoice_number=locked.invoice_id)
+            .order_by('-id')
+            .first()
+        ) if locked.invoice_id else None
+        # "Credited" is read from the ledger, not the status: the credit row
+        # is what has to be taken back, whatever state the event is in now.
+        credited = CreditTransaction.objects.filter(
+            source_event=locked, type='pre_billing_payment',
+        ).exists()
+        if not credited:
+            detail = 'bank payment returned — it was never credited, no ledger row'
+            reversed_amount = shortfall_amount = Decimal('0.00')
+        elif invoice is None:
+            if locked.processing_status == 'needs_attention':
+                return locked  # already flagged; re-stamping would keep the alert firing
+            return _finalize(
+                locked, 'needs_attention',
+                f'bank payment returned but no PreBillingInvoice for invoiceNumber='
+                f'{locked.invoice_id or "(missing)"} — wallet not reversed, review in admin',
+            )
+        else:
+            account = StudentCreditAccount.objects.select_for_update().get(
+                student=invoice.student, school=invoice.school,
+            )
+            reversal = locked.amount - locked.fee_amount
+            reversed_amount = min(reversal, account.balance)
+            shortfall_amount = reversal - reversed_amount
+            if reversed_amount > Decimal('0.00'):
+                ledger.post(account, type='reversal', amount=reversed_amount, source_event=locked)
+            if shortfall_amount > Decimal('0.00'):
+                ledger.post(account, type='shortfall', amount=shortfall_amount, source_invoice=invoice)
+            StudentCreditAccount.objects.filter(pk=account.pk).update(needs_attention=True)
+            invoice.status = 'adjusted' if invoice.revision > 0 else 'sent'
+            invoice.paid_via = ''
+            invoice.save(update_fields=['status', 'paid_via', 'updated_at'])
+            detail = (
+                f'bank payment returned — reversed {reversed_amount} of {reversal} credited'
+                + (f', {shortfall_amount} not covered by the balance' if shortfall_amount else '')
+                + f'; invoice {invoice.id} back to {invoice.status}'
+            )
+
+        webhook_events_total.labels(outcome='returned').inc()
+        locked.processing_status = 'returned'
+        locked.last_error = detail
+        locked.processed_at = timezone.now()
+        locked.save(update_fields=['processing_status', 'last_error', 'processed_at'])
+        logger.warning('Webhook event %s: %s', locked.helcim_transaction_id, detail)
+
+        student = invoice.student if invoice is not None else None
+        transaction.on_commit(
+            lambda: _notify_return(locked, student, reversed_amount, shortfall_amount)
+        )
+    return locked
+
+
+def flag_unknown_bank_clearing(event, raw_clearing):
+    """
+    A bank return list row carried a statusClearing value the app does not
+    know (MAP-232): move no money, land the event in needs_attention so a
+    person looks. Events already returned or needs_attention are left alone
+    (re-stamping them would keep the 15-minute alert firing every tick).
+    """
+    with transaction.atomic():
+        locked = HelcimWebhookEvent.objects.select_for_update().get(pk=event.pk)
+        if locked.processing_status in ('returned', 'needs_attention'):
+            return locked
+        return _finalize(
+            locked, 'needs_attention',
+            f'unknown bank clearing status={raw_clearing} — no money moved, review in admin',
+        )
+
+
+def _notify_return(event, student, reversed_amount, shortfall_amount):
+    # Never let a notification failure surface: the return is already
+    # committed (mirrors notifications/signals.py idiom).
+    try:
+        notify_bank_payment_returned(event, student, reversed_amount, shortfall_amount)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            'Failed to create bank-return notification for webhook event %s',
+            event.helcim_transaction_id,
+        )

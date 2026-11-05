@@ -177,7 +177,8 @@ def test_bank_sync_runs_once_per_retry_window(school, ach_list):
     """
     MAP-217: the bank poll shares the 15-minute window with the retry — due at
     the first tick, not again inside the window, due again when it has passed.
-    One provider list call per school per due tick.
+    Two provider list calls per school per due tick: payments, then returns
+    (MAP-232).
     """
     from billing.management.commands.run_scheduler import Command, RETRY_INTERVAL
 
@@ -203,7 +204,7 @@ def test_bank_sync_runs_once_per_retry_window(school, ach_list):
         cmd.handle(once=False)
 
     schools = School.objects.count()
-    assert calls_after_each_tick == [schools, schools, 2 * schools]
+    assert calls_after_each_tick == [2 * schools, 2 * schools, 4 * schools]
 
 
 # --- command output as structured log lines (MAP-291) ------------------------

@@ -113,6 +113,11 @@ def _invoice_and_account(school, student_user, number, **invoice_fields):
     return invoice, account
 
 
+def _payment_calls(listed):
+    """The payments-pass list calls (MAP-232 adds a returns pass that filters on statusClearing)."""
+    return [call for call in listed.call_args_list if 'status_clearing' not in call.kwargs]
+
+
 def _sync(rows, *args):
     """Run the command with Helcim answering `rows`; returns (client mock, output)."""
     out = StringIO()
@@ -433,7 +438,7 @@ def test_checkpoint_is_held_at_the_oldest_row_still_waiting_on_the_bank(school):
 
     listed, _ = _sync(rows[1:])
 
-    assert listed.call_args.kwargs['date_from'] == _utc(DAY_TWO).date()
+    assert _payment_calls(listed)[-1].kwargs['date_from'] == _utc(DAY_TWO).date()
     assert _checkpoint(school) == _utc(DAY_TWO)
 
 
@@ -444,7 +449,7 @@ def test_first_run_looks_back_the_configured_number_of_days(school):
     listed, _ = _sync([])
 
     latest = (timezone.now() - timedelta(days=FIRST_RUN_LOOKBACK_DAYS)).date()
-    assert listed.call_args.kwargs['date_from'] in {earliest, latest}
+    assert _payment_calls(listed)[-1].kwargs['date_from'] in {earliest, latest}
     assert _checkpoint(school) is None
 
 
@@ -480,10 +485,11 @@ def test_a_full_page_makes_the_command_ask_for_the_next_one(school):
     second_page = [ach_row(9000, 'MK-page', '60.00', status='DECLINED')]
 
     out = StringIO()
-    with mock.patch(ACH_LIST, side_effect=[first_page, second_page]) as listed:
+    # Third answer: the returns pass (MAP-232) finds nothing.
+    with mock.patch(ACH_LIST, side_effect=[first_page, second_page, []]) as listed:
         call_command('sync_helcim_ach', stdout=out, stderr=out)
 
-    assert [call.kwargs['page'] for call in listed.call_args_list] == [1, 2]
+    assert [call.kwargs['page'] for call in _payment_calls(listed)] == [1, 2]
     assert HelcimWebhookEvent.objects.filter(rail='ach').count() == ACH_PAGE_LIMIT + 1
 
 

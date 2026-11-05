@@ -168,6 +168,16 @@ class SchoolSettings(models.Model):
         default=True,
         help_text="Fixed period repeats every year (month/day match)",
     )
+    # MAP-327: second fixed window (semester 2). A date is judged against the
+    # first pair that contains it; a date in neither pair has no limit.
+    waive_period_2_start = models.DateField(
+        null=True, blank=True,
+        help_text="Second fixed period start (fixed type)",
+    )
+    waive_period_2_end = models.DateField(
+        null=True, blank=True,
+        help_text="Second fixed period end (fixed type)",
+    )
 
     # tracking
     updated_at = models.DateTimeField(auto_now=True)
@@ -1242,7 +1252,8 @@ class StudentCreditAccount(models.Model):
         default=False,
         help_text=(
             "Set when a batch approval could not be fully covered by the balance "
-            "(a 'shortfall' ledger row was posted). Cleared manually."
+            "(a 'shortfall' ledger row was posted), or when a bank payment was "
+            "returned and its credit reversed (MAP-232). Cleared manually."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1275,10 +1286,12 @@ class CreditTransaction(models.Model):
       waived_rollover     → balance += amount
       teacher_cancel_refund → balance += amount (MAP-271)
       lesson_charge       → balance -= amount
+      reversal            → balance -= amount (MAP-232: a returned bank payment
+                            takes back what it credited, as far as the balance allows)
       forfeited           → informational, balance unchanged
       shortfall           → informational, balance unchanged
     Invariant: balance == Σ(pre_billing_payment + waived_rollover + teacher_cancel_refund)
-               − Σ(lesson_charge).
+               − Σ(lesson_charge + reversal).
     Never use signed amounts (D-09: guards against sign-flip bugs).
 
     `legacy=True` marks rows that existed before the source constraint was
@@ -1291,6 +1304,7 @@ class CreditTransaction(models.Model):
         ('lesson_charge', 'Lesson Charge'),
         ('shortfall', 'Shortfall'),
         ('teacher_cancel_refund', 'Teacher Cancel Refund'),
+        ('reversal', 'Reversal'),
     ]
 
     account = models.ForeignKey(
@@ -1312,15 +1326,16 @@ class CreditTransaction(models.Model):
         help_text="Always positive. Direction determined by type field.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    # MAP-180: the webhook event that posted this credit. Unique per event so the
-    # database, not the caller, guarantees one credit per helcim_transaction_id.
+    # MAP-180: the webhook event that posted this credit. One credit and at most
+    # one reversal per event (MAP-232), so the database, not the caller,
+    # guarantees a payment is credited once and taken back once.
     source_event = models.ForeignKey(
         'HelcimWebhookEvent',
         null=True,
         blank=True,
         on_delete=models.PROTECT,
         related_name='credit_transactions',
-        help_text="Webhook event that posted this credit; at most one credit per event.",
+        help_text="Webhook event that posted this row; at most one credit and one reversal per event.",
     )
     source_invoice = models.ForeignKey(
         'PreBillingInvoice',
@@ -1364,8 +1379,13 @@ class CreditTransaction(models.Model):
             ),
             models.UniqueConstraint(
                 fields=['source_event'],
-                condition=Q(source_event__isnull=False),
+                condition=Q(source_event__isnull=False, type='pre_billing_payment'),
                 name='one_credit_per_webhook_event',
+            ),
+            models.UniqueConstraint(
+                fields=['source_event'],
+                condition=Q(source_event__isnull=False, type='reversal'),
+                name='one_reversal_per_webhook_event',
             ),
             models.CheckConstraint(
                 check=(
@@ -1464,6 +1484,9 @@ class HelcimWebhookEvent(models.Model):
         # Bank payment not authorized yet (MAP-217). Re-read by sync_helcim_ach
         # every tick; neither retried by retry_webhook_events nor alerted on.
         ('awaiting_bank', 'Awaiting bank'),
+        # Bank payment Helcim reports as returned (NSF, closed account —
+        # MAP-232). Any credit it posted was reversed. Terminal; alerts.
+        ('returned', 'Returned'),
     ]
     processing_status = models.CharField(
         max_length=30,

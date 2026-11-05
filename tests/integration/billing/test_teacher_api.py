@@ -1045,14 +1045,17 @@ class TestBatchSubmitUnresolvedPast:
     def test_unresolved_item_ids_are_ascending(
         self, authenticated_teacher_client, draft_batch, add_item
     ):
+        # Date order is the reverse of id order, so a date-ordered list would
+        # fail here; ascending ids is the contract (W2-L2 fold).
         today = _school_today()
         later_dated = add_item(today - _timedelta(days=1), 'confirmed')
         earlier_dated = add_item(today - _timedelta(days=5), 'confirmed')
+        assert later_dated.id < earlier_dated.id
 
         response = self._submit(authenticated_teacher_client, draft_batch)
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert response.json()['unresolved_item_ids'] == sorted([later_dated.id, earlier_dated.id])
+        assert response.json()['unresolved_item_ids'] == [later_dated.id, earlier_dated.id]
 
     def test_confirmed_items_today_or_later_submit(
         self, authenticated_teacher_client, draft_batch, add_item
@@ -1082,7 +1085,10 @@ class TestBatchSubmitUnresolvedPast:
         draft_batch.refresh_from_db()
         assert draft_batch.status == 'submitted'
 
-    @pytest.mark.parametrize('resolved_status', ['completed', 'cancelled'])
+    # Every non-confirmed status: only 'confirmed' blocks (W2-L2 fold).
+    @pytest.mark.parametrize('resolved_status', [
+        'completed', 'cancelled', 'forfeited', 'waived', 'teacher_cancelled', 'promo', 'trial',
+    ])
     def test_resolved_past_items_do_not_block(
         self, authenticated_teacher_client, draft_batch, add_item, resolved_status
     ):

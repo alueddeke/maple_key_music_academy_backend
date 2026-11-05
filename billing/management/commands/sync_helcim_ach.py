@@ -17,6 +17,18 @@ Outcomes by bank authorization status:
   DECLINED / CANCELLED   → not_approved
   anything else          → needs_attention (alerts; a person looks)
 
+Returns pass (MAP-232), every run, after the payments pass: per School it
+lists bank transactions with statusClearing=RETURNED from the last
+RETURN_LOOKBACK_DAYS (no checkpoint: a return can arrive up to 60 calendar
+days after the payment, Helcim 2026-10-05). Outcomes by clearing status:
+  RETURNED           → apply_bank_return: credit reversed as far as the
+                       balance allows, invoice re-opened, event 'returned'
+                       (alerts), management notified; never-credited → no
+                       ledger row. Idempotent: a returned event is left alone.
+  OPENED / CLEARED   → not a return (only seen if Helcim ignores the filter)
+  anything else      → needs_attention, no money moved
+A returned row the app never recorded is stored as a 'returned' event.
+
 The checkpoint never moves past the oldest transaction still awaiting the
 bank, so every run lists that transaction again without a second endpoint.
 `startDate` is day-granular: rows on the checkpoint day are fetched again and
@@ -49,6 +61,8 @@ from billing.services.webhook_processing import (
     ACH_DEBIT_TYPE,
     ACH_REFUSED_STATUSES,
     ACH_WAITING_STATUSES,
+    apply_bank_return,
+    flag_unknown_bank_clearing,
     process_webhook_event,
 )
 
@@ -88,6 +102,17 @@ STATUS_AUTH_NAMES = {
 # payment). The documented example payment carries 1; the rest of the
 # vocabulary is unknown, so any other value lands in needs_attention.
 DEBIT_TRANSACTION_TYPES = {1}
+
+# statusClearing is an integer in responses; the list filter takes the names.
+# Helcim 2026-10-13 (MAP-232): only 0, 1 and 4 are returned at this time —
+# REJECTED and CONTESTED do not occur. Any other value lands in needs_attention.
+ROW_STATUS_CLEARING_KEY = 'statusClearing'
+STATUS_CLEARING_NAMES = {
+    0: 'OPENED',
+    1: 'CLEARED',
+    4: 'RETURNED',
+}
+RETURNED_CLEARING = 'RETURNED'
 # ---------------------------------------------------------------------------
 
 KNOWN_STATUS_NAMES = {ACH_APPROVED_STATUS} | ACH_WAITING_STATUSES | ACH_REFUSED_STATUSES
@@ -97,6 +122,9 @@ UNKNOWN_PREFIX = 'UNKNOWN:'
 # an API error (checkpoint unchanged), never as "the list ended".
 MAX_PAGES = 40
 AWAITING_WARN_AFTER = timedelta(days=7)
+# A personal pre-authorized debit can be returned up to 90 days after it was
+# taken (Payments Canada Rule H1); Helcim sees returns up to 60 calendar days.
+RETURN_LOOKBACK_DAYS = 90
 
 BankPayment = namedtuple('BankPayment', 'tx_id invoice_number amount created status kind')
 
@@ -108,6 +136,14 @@ def canonical_status(raw):
     try:
         # bool is an int in Python; True must not read as status 1.
         return STATUS_AUTH_NAMES[int(raw)] if not isinstance(raw, bool) else f'{UNKNOWN_PREFIX}{raw}'
+    except (TypeError, ValueError, KeyError):
+        return f'{UNKNOWN_PREFIX}{raw}'
+
+
+def canonical_clearing(raw):
+    """Helcim statusClearing (integer or numeric string) → canonical name, or UNKNOWN:<raw>."""
+    try:
+        return STATUS_CLEARING_NAMES[int(raw)] if not isinstance(raw, bool) else f'{UNKNOWN_PREFIX}{raw}'
     except (TypeError, ValueError, KeyError):
         return f'{UNKNOWN_PREFIX}{raw}'
 
@@ -160,15 +196,17 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         for school in School.objects.order_by('id'):
             self._sync_school(school, options['dry_run'])
+            self._sync_returns(school, options['dry_run'])
         if options['dry_run']:
             self.stdout.write('Dry run — nothing created.')
 
-    def _fetch(self, client, date_from):
+    def _fetch(self, client, date_from, status_clearing=None):
         rows = []
         for page in range(1, MAX_PAGES + 1):
-            batch = client.list_ach_transactions(
-                limit=ACH_PAGE_LIMIT, date_from=date_from, page=page,
-            )
+            kwargs = {'limit': ACH_PAGE_LIMIT, 'date_from': date_from, 'page': page}
+            if status_clearing is not None:
+                kwargs['status_clearing'] = status_clearing
+            batch = client.list_ach_transactions(**kwargs)
             rows.extend(batch)
             if len(batch) < ACH_PAGE_LIMIT:
                 return rows
@@ -275,6 +313,63 @@ class Command(BaseCommand):
         self.stdout.write(f'{line} → {style(outcome)}'
                           + (f' ({event.last_error})' if event.last_error else ''))
         return event
+
+    def _sync_returns(self, school, dry_run):
+        date_from = (timezone.now() - timedelta(days=RETURN_LOOKBACK_DAYS)).date()
+        client = HelcimClient(school=school)
+        try:
+            rows = self._fetch(client, date_from, status_clearing=RETURNED_CLEARING)
+        except HelcimAPIError as e:
+            self.stderr.write(self.style.ERROR(
+                f'[{school.name}] Helcim API error on the returns pass: {e} — nothing changed'
+            ))
+            return
+
+        returns = 0
+        for row in rows:
+            payment = read_row(row)
+            raw_clearing = row.get(ROW_STATUS_CLEARING_KEY)
+            clearing = canonical_clearing(raw_clearing)
+            if clearing in ('OPENED', 'CLEARED'):
+                continue  # not a return: the filter was not honoured
+            if not payment.tx_id or payment.amount is None:
+                self.stderr.write(self.style.ERROR(
+                    f'[{school.name}] unreadable returned bank transaction '
+                    f'(id={payment.tx_id or "missing"}, amount readable={payment.amount is not None})'
+                ))
+                continue
+            returns += 1
+            line = (
+                f'  return ach={payment.tx_id} invoice={payment.invoice_number or "-"} '
+                f'amount={payment.amount} clearing={clearing}'
+            )
+            if dry_run:
+                self.stdout.write(line)
+                continue
+            event, created = HelcimWebhookEvent.objects.get_or_create(
+                rail='ach',
+                helcim_transaction_id=payment.tx_id,
+                defaults={
+                    # Origin marker only — no bank data is stored (PCI/privacy).
+                    'raw_payload': {'id': payment.tx_id, 'rail': 'ach', 'source': 'sync'},
+                    'invoice_id': payment.invoice_number,
+                    'amount': payment.amount,
+                    'transaction_status': payment.status,
+                    'transaction_type': payment.kind,
+                    'school': school,
+                },
+            )
+            if clearing == RETURNED_CLEARING:
+                event = apply_bank_return(event)
+            else:
+                event = flag_unknown_bank_clearing(event, raw_clearing)
+            self.stdout.write(
+                f'{line} → {self.style.WARNING(event.processing_status)}'
+                + (' (first seen on the returns pass)' if created else '')
+            )
+        self.stdout.write(
+            f'[{school.name}] returns from {date_from}: {returns} returned bank transaction(s).'
+        )
 
     def _warn_stale(self, school):
         stale = HelcimWebhookEvent.objects.filter(
