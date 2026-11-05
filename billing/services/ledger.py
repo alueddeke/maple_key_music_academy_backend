@@ -10,16 +10,17 @@ Balance effect by type:
     waived_rollover      +amount
     teacher_cancel_refund +amount (MAP-271: charged lesson the teacher cancelled)
     lesson_charge        -amount
+    reversal             -amount (MAP-232: a returned bank payment takes back its credit)
     forfeited            0 (informational: the no-show record)
     shortfall            0 (informational: uncovered remainder at approval)
 
 Invariant (for accounts created after migration 0074):
     balance == Σ(pre_billing_payment + waived_rollover + teacher_cancel_refund)
-               − Σ(lesson_charge)
+               − Σ(lesson_charge + reversal)
 
 `post` runs inside the caller's transaction.atomic() block. It never opens an
 outer transaction of its own: select_for_update outside atomic raises, and a
-lesson_charge that would take the balance below zero fails on the
+lesson_charge or reversal that would take the balance below zero fails on the
 credit_account_balance_non_negative constraint instead of being clamped.
 """
 from decimal import Decimal
@@ -31,6 +32,7 @@ BALANCE_EFFECT = {
     'waived_rollover': Decimal('1'),
     'teacher_cancel_refund': Decimal('1'),
     'lesson_charge': Decimal('-1'),
+    'reversal': Decimal('-1'),
     'forfeited': Decimal('0'),
     'shortfall': Decimal('0'),
 }
