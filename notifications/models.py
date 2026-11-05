@@ -19,6 +19,7 @@ class Notification(models.Model):
         ('invoice_reminder', 'Invoice Submission Reminder'),
         ('batch_submitted', 'Invoice Submitted'),
         ('exception_marked', 'Exception Marked'),
+        ('bank_payment_returned', 'Bank Payment Returned'),
         ('general', 'General'),
     ]
 

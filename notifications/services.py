@@ -178,6 +178,40 @@ def notify_exception_marked(batch, description=''):
     return created
 
 
+def notify_bank_payment_returned(event, student, reversed_amount, shortfall_amount):
+    """Notify every active management user that a bank payment was returned (MAP-232).
+
+    Called after the return is committed. `student` is None when the app
+    never matched the payment to an invoice; the notification then links
+    nowhere. Amounts are Decimals: what was taken back from the wallet and
+    what the balance could not cover.
+    """
+    who = student.get_full_name() if student is not None else 'an unknown payer'
+    message = (
+        f"Bank payment returned: {who}, invoice {event.invoice_id or '-'}, "
+        f"${event.amount}."
+    )
+    if reversed_amount or shortfall_amount:
+        message += f" Wallet reversed ${reversed_amount}"
+        if shortfall_amount:
+            message += f"; ${shortfall_amount} not covered by the balance"
+        message += ". Invoice re-opened — contact the family."
+    else:
+        message += " It was never credited, so no money was moved — contact the family."
+    link_url = f"/management/students/{student.id}" if student is not None else ''
+    created = []
+    for manager in _management_users(event.school):
+        created.append(
+            notify(
+                manager,
+                message[:500],
+                notification_type='bank_payment_returned',
+                link_url=link_url,
+            )
+        )
+    return created
+
+
 def send_invoice_reminders(today=None):
     """Remind teachers who have not submitted this month's invoice batch.
 
