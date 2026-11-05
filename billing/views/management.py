@@ -968,15 +968,19 @@ def _trial_item_payload(item):
 @management_required
 def management_student_trial_lesson(request, student_id):
     """
-    One trial lesson per student, entered by management independently of any
-    recurring schedule (MAP-284, decisions D1-D6).
+    Trial lessons entered by management independently of any recurring
+    schedule (MAP-284, decisions D1-D6). One trial per (student, teacher)
+    (MAP-299, overrides D4): a student may trial with several teachers.
 
-    GET    -> the student's trial item (plus batch_id/batch_status) or 404.
+    GET    -> list of the student's trial items (plus batch_id/batch_status),
+              oldest first; [] when there is none.
     POST   -> create BatchLessonItem(status='trial', recurring_schedule=None) in the
               teacher's draft batch for the date's month (batch created when
-              missing); demote any auto-detected trial item still in an open
-              batch to 'confirmed' (D6). 201 with the item.
-    DELETE -> remove the trial item while its batch is still draft; 409 after.
+              missing); demote any auto-detected trial item with that teacher
+              still in an open batch to 'confirmed' (D6). 201 with the item.
+    DELETE -> remove one trial item while its batch is still draft; 409 after.
+              ?item=<id> names the row; omitted, the student's only trial item
+              is used, and 400 when there are several.
 
     School-scoped student lookup: cross-school id -> 404.
     """
@@ -993,25 +997,27 @@ def management_student_trial_lesson(request, student_id):
     except User.DoesNotExist:
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    def current_trial_item():
-        # The explicit trial wins over an auto-detected one when both exist
-        # (only possible transiently); otherwise the earliest trial item.
-        items = (
-            BatchLessonItem.objects.select_related('batch', 'batch__teacher')
-            .filter(student=student, status='trial', batch__school=request.user.school)
-            .order_by('created_at', 'id')
-        )
-        explicit = items.filter(recurring_schedule__isnull=True, is_one_off=False).first()
-        return explicit or items.first()
+    trial_items = (
+        BatchLessonItem.objects.select_related('batch', 'batch__teacher')
+        .filter(student=student, status='trial', batch__school=request.user.school)
+        .order_by('created_at', 'id')
+    )
 
     if request.method == 'GET':
-        item = current_trial_item()
-        if item is None:
-            return Response({'error': 'Trial lesson not found'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_trial_item_payload(item))
+        return Response([_trial_item_payload(item) for item in trial_items])
 
     if request.method == 'DELETE':
-        item = current_trial_item()
+        item_id = request.query_params.get('item')
+        if item_id is not None:
+            if not item_id.isdigit():
+                return Response({'error': 'item must be an id'}, status=status.HTTP_400_BAD_REQUEST)
+            item = trial_items.filter(pk=int(item_id)).first()
+        else:
+            # Pre-MAP-299 clients send no id: unambiguous only with one row.
+            rows = list(trial_items[:2])
+            if len(rows) > 1:
+                return Response({'error': 'item is required'}, status=status.HTTP_400_BAD_REQUEST)
+            item = rows[0] if rows else None
         if item is None:
             return Response({'error': 'Trial lesson not found'}, status=status.HTTP_404_NOT_FOUND)
         # Only the explicit trial (schedule-less, not a teacher one-off) in a
@@ -1034,7 +1040,8 @@ def management_student_trial_lesson(request, student_id):
         # (SELECT ... FOR UPDATE on custom_auth_user). Locking the student's
         # existing trial items would lock nothing on a first POST, so two
         # concurrent first POSTs would both create. The second request blocks
-        # here until the first commits, then fails the D4 check in validate().
+        # here until the first commits, then fails the per-teacher check in
+        # validate() (MAP-299).
         student = User.objects.select_for_update().get(pk=student.pk)
         serializer = TrialLessonCreateSerializer(
             data=request.data, context={'request': request, 'student': student}
@@ -1064,13 +1071,16 @@ def management_student_trial_lesson(request, student_id):
             request.user.school, teacher, data['lesson_type']
         )
 
-        # D6: the explicit trial is the only trial. Auto-detected trial items still
-        # in open batches become ordinary confirmed lessons.
+        # D6, per teacher (MAP-299): the explicit trial is this teacher's only
+        # trial. Auto-detected trial items (schedule-sourced or teacher one-off)
+        # with this teacher still in open batches become ordinary confirmed
+        # lessons. Explicit trials and other teachers' items are untouched.
         BatchLessonItem.objects.filter(
             student=student,
             status='trial',
+            batch__teacher=teacher,
             batch__status__in=['draft', 'submitted'],
-        ).update(status='confirmed')
+        ).exclude(recurring_schedule__isnull=True, is_one_off=False).update(status='confirmed')
 
         # BatchLessonItem.save() auto-trial rule (zero history -> 'trial') agrees with
         # the explicit status here; with history it leaves status alone.

@@ -1,6 +1,8 @@
 """
-MAP-284: management records one trial lesson per student, independent of any
-recurring schedule.
+MAP-284: management records trial lessons per student, independent of any
+recurring schedule. MAP-299: one trial per (student, teacher) — a second trial
+with another teacher is allowed; GET lists every trial; DELETE names a row
+with ?item=<id>.
 
 Route: /api/billing/management/students/<student_id>/trial-lesson/ (GET, POST, DELETE)
 
@@ -12,7 +14,12 @@ Covers every Acceptance bullet of the ticket that is backend-testable:
     exactly one trial item.
   - Schedule synced first, then POST -> the auto-trial item is demoted to
     confirmed, exactly one trial item.
-  - 400 bodies: teacher not assigned, month already approved, second trial.
+  - 400 bodies: teacher not assigned, month already approved, second trial
+    with the same teacher. Second trial with another teacher -> 201 and the
+    first stays 'trial' (MAP-299).
+  - A second teacher's one-off after an explicit trial is NOT auto-trialled
+    (BatchLessonItem.save() zero-history rule untouched).
+  - Two approved trials count the student once in analytics trial conversion.
   - 404 for a cross-school student.
   - DELETE on draft -> 204; after approval -> 409.
   - Approving the batch creates Lesson(is_trial=True, status='trial',
@@ -351,7 +358,7 @@ class TestTrialAndScheduleInteraction:
         assert resp.status_code == status.HTTP_200_OK, resp.content
 
         assert not BatchLessonItem.objects.filter(batch=batch, student=new_student).exists()
-        assert management_client.get(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND
+        assert management_client.get(url_for(new_student)).json() == []
         created = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 2))
         assert created.status_code == status.HTTP_201_CREATED, created.content
 
@@ -452,12 +459,102 @@ class TestCreateValidation:
         assert resp.json() == {"error": "that month is already approved for this teacher"}
 
     def test_second_trial_rejected(self, management_client, new_student, teacher_user):
+        """Same teacher twice: the MAP-284 message, unchanged (MAP-299)."""
         year, month = _future_month()
         assert post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5)).status_code == 201
         resp = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 12))
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
         assert resp.json() == {"error": "student already has a trial lesson"}
         assert BatchLessonItem.objects.filter(student=new_student).count() == 1
+
+    def test_second_trial_with_other_teacher_201(
+        self, management_client, new_student, teacher_user, other_teacher, school
+    ):
+        """MAP-299: a trial with a different teacher is a new trial."""
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        first = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
+        assert first.status_code == status.HTTP_201_CREATED, first.content
+
+        resp = post_trial(management_client, new_student, other_teacher, _date_in(year, month, 12))
+
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
+        assert resp.data["teacher"] == other_teacher.id
+        assert resp.data["status"] == "trial"
+        items = BatchLessonItem.objects.filter(student=new_student, status="trial")
+        assert items.count() == 2
+        assert set(items.values_list("batch__teacher_id", flat=True)) == {teacher_user.id, other_teacher.id}
+        assert set(items.values_list("batch__status", flat=True)) == {"draft"}
+
+    def test_second_trial_does_not_demote_first(
+        self, management_client, new_student, teacher_user, other_teacher
+    ):
+        """The D6 demotion is per teacher and skips explicit trials."""
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        first = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
+        assert post_trial(management_client, new_student, other_teacher, _date_in(year, month, 12)).status_code == 201
+        first_item = BatchLessonItem.objects.get(pk=first.data["id"])
+        assert first_item.status == "trial"
+
+    def test_second_trial_demotes_only_that_teachers_auto_trial(
+        self, management_client, teacher_client, new_student, teacher_user, other_teacher, school
+    ):
+        """Explicit trial with A; B's schedule synced (its first item is NOT
+        auto-trialled, history exists); then explicit trial with B. A's trial
+        and B's schedule items are untouched."""
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        a_trial = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 2))
+        assert a_trial.status_code == 201
+        start = _date_in(year, month, 10)
+        RecurringLessonsSchedule.objects.create(
+            teacher=other_teacher, student=new_student, school=school,
+            day_of_week=start.weekday(), start_time=time(15, 0),
+            duration=Decimal("1.00"), lesson_type="in_person",
+            start_date=start, is_active=True,
+        )
+        other_client = APIClient()
+        other_client.force_authenticate(user=other_teacher)
+        b_batch = sync_batch(other_client, year, month)
+        b_items = BatchLessonItem.objects.filter(batch=b_batch, student=new_student)
+        assert b_items.exists()
+        assert set(b_items.values_list("status", flat=True)) == {"confirmed"}
+
+        resp = post_trial(management_client, new_student, other_teacher, _date_in(year, month, 3))
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
+
+        assert BatchLessonItem.objects.get(pk=a_trial.data["id"]).status == "trial"
+        assert set(b_items.exclude(pk=resp.data["id"]).values_list("status", flat=True)) == {"confirmed"}
+        assert BatchLessonItem.objects.filter(student=new_student, status="trial").count() == 2
+
+    def test_second_teacher_one_off_stays_confirmed_after_explicit_trial(
+        self, management_client, new_student, teacher_user, other_teacher, school
+    ):
+        """WATCH c: the auto-trial fallback is zero-history only. With one trial
+        recorded, a one-off added by another teacher keeps its status."""
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        assert post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5)).status_code == 201
+        other_client = APIClient()
+        other_client.force_authenticate(user=other_teacher)
+        batch = sync_batch(other_client, year, month)
+        resp = other_client.post(
+            reverse("batch_add_lesson", kwargs={"batch_id": batch.pk}),
+            {
+                "student": new_student.pk,
+                "scheduled_date": _date_in(year, month, 12).isoformat(),
+                "start_time": "16:00:00",
+                "duration": "1.00",
+                "lesson_type": "in_person",
+                "status": "confirmed",
+                "teacher_notes": "",
+            },
+            format="json",
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
+        item = BatchLessonItem.objects.get(pk=resp.data["id"])
+        assert item.is_one_off and item.status == "confirmed"
 
     def test_student_with_trial_lesson_row_rejected(
         self, management_client, new_student, teacher_user, school
@@ -472,6 +569,21 @@ class TestCreateValidation:
         resp = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
         assert resp.json() == {"error": "student already has a trial lesson"}
+
+    def test_trial_lesson_row_with_other_teacher_allows_201(
+        self, management_client, new_student, teacher_user, other_teacher, school
+    ):
+        """An approved trial Lesson with teacher A does not block a trial with B."""
+        new_student.assigned_teachers.add(other_teacher)
+        Lesson.objects.create(
+            teacher=teacher_user, student=new_student, school=school,
+            lesson_type="in_person", is_trial=True,
+            scheduled_date=date.today() - timedelta(days=30),
+            duration=Decimal("1.00"), status="completed",
+        )
+        year, month = _future_month()
+        resp = post_trial(management_client, new_student, other_teacher, _date_in(year, month, 5))
+        assert resp.status_code == status.HTTP_201_CREATED, resp.content
 
     def test_wrong_school_student_404(
         self, management_client, teacher_user, second_school, second_school_settings
@@ -514,16 +626,30 @@ class TestCreateValidation:
 @pytest.mark.django_db
 class TestGetAndDelete:
 
-    def test_get_404_when_no_trial(self, management_client, new_student):
-        assert management_client.get(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND
+    def test_get_empty_list_when_no_trial(self, management_client, new_student):
+        resp = management_client.get(url_for(new_student))
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == []
 
     def test_get_returns_trial_with_batch_fields(self, management_client, new_student, teacher_user):
         year, month = _future_month()
         created = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
         resp = management_client.get(url_for(new_student))
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.json() == created.json()
-        assert resp.data["batch_status"] == "draft"
+        assert resp.json() == [created.json()]
+        assert resp.data[0]["batch_status"] == "draft"
+
+    def test_get_lists_every_trial_oldest_first(
+        self, management_client, new_student, teacher_user, other_teacher
+    ):
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        first = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 12))
+        second = post_trial(management_client, new_student, other_teacher, _date_in(year, month, 5))
+        resp = management_client.get(url_for(new_student))
+        assert resp.status_code == status.HTTP_200_OK
+        assert [row["id"] for row in resp.json()] == [first.data["id"], second.data["id"]]
+        assert [row["teacher"] for row in resp.json()] == [teacher_user.id, other_teacher.id]
 
     def test_delete_on_draft_204(self, management_client, new_student, teacher_user):
         year, month = _future_month()
@@ -531,7 +657,57 @@ class TestGetAndDelete:
         resp = management_client.delete(url_for(new_student))
         assert resp.status_code == status.HTTP_204_NO_CONTENT
         assert not BatchLessonItem.objects.filter(student=new_student).exists()
-        assert management_client.get(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND
+        assert management_client.get(url_for(new_student)).json() == []
+
+    def test_delete_removes_only_the_named_trial(
+        self, management_client, new_student, teacher_user, other_teacher
+    ):
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        first = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
+        second = post_trial(management_client, new_student, other_teacher, _date_in(year, month, 12))
+
+        resp = management_client.delete(f"{url_for(new_student)}?item={second.data['id']}")
+
+        assert resp.status_code == status.HTTP_204_NO_CONTENT
+        assert list(BatchLessonItem.objects.filter(student=new_student).values_list("pk", flat=True)) == [first.data["id"]]
+
+    def test_delete_without_item_is_400_when_several_trials(
+        self, management_client, new_student, teacher_user, other_teacher
+    ):
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
+        post_trial(management_client, new_student, other_teacher, _date_in(year, month, 12))
+        resp = management_client.delete(url_for(new_student))
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json() == {"error": "item is required"}
+        assert BatchLessonItem.objects.filter(student=new_student).count() == 2
+
+    def test_delete_unknown_or_malformed_item(self, management_client, new_student, teacher_user):
+        year, month = _future_month()
+        post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
+        assert management_client.delete(f"{url_for(new_student)}?item=999999").status_code == status.HTTP_404_NOT_FOUND
+        assert management_client.delete(f"{url_for(new_student)}?item=abc").status_code == status.HTTP_400_BAD_REQUEST
+        assert BatchLessonItem.objects.filter(student=new_student).count() == 1
+
+    def test_delete_named_trial_after_submit_409(
+        self, management_client, new_student, teacher_user, other_teacher
+    ):
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        first = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 5))
+        second = post_trial(management_client, new_student, other_teacher, _date_in(year, month, 12))
+        batch = MonthlyInvoiceBatch.objects.get(id=second.data["batch_id"])
+        batch.status = "submitted"
+        batch.save(update_fields=["status"])
+
+        locked = management_client.delete(f"{url_for(new_student)}?item={second.data['id']}")
+        assert locked.status_code == status.HTTP_409_CONFLICT
+        assert locked.json() == {"error": "trial lesson can no longer be removed"}
+        free = management_client.delete(f"{url_for(new_student)}?item={first.data['id']}")
+        assert free.status_code == status.HTTP_204_NO_CONTENT
+        assert [row["id"] for row in management_client.get(url_for(new_student)).json()] == [second.data["id"]]
 
     def test_get_reports_auto_detected_schedule_trial(
         self, management_client, teacher_client, new_student, teacher_user, school
@@ -550,14 +726,14 @@ class TestGetAndDelete:
 
         resp = management_client.get(url_for(new_student))
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.data["auto_detected"] is True
-        assert resp.data["scheduled_date"] == start.isoformat()
+        assert [(row["auto_detected"], row["scheduled_date"]) for row in resp.json()] == [(True, start.isoformat())]
 
         created = post_trial(management_client, new_student, teacher_user, _date_in(year, month, 2))
         assert created.status_code == status.HTTP_201_CREATED, created.content
         resp = management_client.get(url_for(new_student))
-        assert resp.data["auto_detected"] is False
-        assert resp.data["scheduled_date"] == _date_in(year, month, 2).isoformat()
+        assert [(row["auto_detected"], row["scheduled_date"]) for row in resp.json()] == [
+            (False, _date_in(year, month, 2).isoformat())
+        ]
 
     def test_delete_404_when_no_trial(self, management_client, new_student):
         assert management_client.delete(url_for(new_student)).status_code == status.HTTP_404_NOT_FOUND
@@ -663,3 +839,37 @@ class TestApproval:
         assert StudentInvoice.objects.filter(student=new_student).count() == 0
         batch.refresh_from_db()
         assert batch.status == "approved"
+
+    def test_two_approved_trials_count_once_in_trial_conversion(
+        self, management_client, new_student, teacher_user, other_teacher, school
+    ):
+        """MAP-299: analytics counts a student with two trials once as
+        trialled, converted once any trial leads to a real lesson."""
+        from analytics.services import compute_current_metrics
+
+        new_student.assigned_teachers.add(other_teacher)
+        year, month = _future_month()
+        for teacher, day in ((teacher_user, 5), (other_teacher, 12)):
+            resp = post_trial(management_client, new_student, teacher, _date_in(year, month, day))
+            assert resp.status_code == status.HTTP_201_CREATED, resp.content
+            batch = MonthlyInvoiceBatch.objects.get(id=resp.data["batch_id"])
+            batch.status = "submitted"
+            batch.save(update_fields=["status"])
+            approve = management_client.post(
+                reverse("management_approve_batch", kwargs={"batch_id": batch.pk}), format="json"
+            )
+            assert approve.status_code == status.HTTP_200_OK, approve.content
+        assert Lesson.objects.filter(student=new_student, is_trial=True).count() == 2
+
+        assert compute_current_metrics(school, today=date.today())["trial_conversion_rate"] == 0.0
+
+        # Lesson.save() auto-trials a student with no completed lesson unless the
+        # caller marks is_trial explicit, as batch approval does.
+        real = Lesson(
+            teacher=other_teacher, student=new_student, school=school,
+            lesson_type="in_person", is_trial=False,
+            scheduled_date=date.today(), duration=Decimal("1.00"), status="completed",
+        )
+        real._is_trial_explicitly_set = True
+        real.save()
+        assert compute_current_metrics(school, today=date.today())["trial_conversion_rate"] == 100.0

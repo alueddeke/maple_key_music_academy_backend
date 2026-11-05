@@ -339,8 +339,10 @@ class TrialLessonCreateSerializer(StrictFieldsMixin, serializers.Serializer):
     """
     Management trial-lesson entry (MAP-284). Body: teacher, date, start_time,
     duration (hours), optional lesson_type. Rates, status='trial' and the
-    batch are set by the view. Business rules live in validate() and surface
-    as the exact wire bodies the ticket fixes:
+    batch are set by the view. One trial per (student, teacher) (MAP-299,
+    overrides MAP-284 D4): a second trial with another teacher is allowed.
+    Business rules live in validate() and surface as the exact wire bodies the
+    ticket fixes:
       {"error": "teacher is not assigned to this student"}
       {"error": "that month is already approved for this teacher"}
       {"error": "student already has a trial lesson"}
@@ -391,17 +393,19 @@ class TrialLessonCreateSerializer(StrictFieldsMixin, serializers.Serializer):
                 {'error': 'that month is already approved for this teacher'}
             )
 
-        # D4 one trial per student. An auto-detected trial item that is still in
-        # an open (draft/submitted) batch is not a second trial: the view demotes
-        # it to 'confirmed' (D6). Anything else counts: a trial Lesson row, a
-        # trial item in a closed batch, or an explicit (schedule-less, not
-        # one-off) trial item.
+        # One trial per (student, teacher) (MAP-299; was D4 one per student). An
+        # auto-detected trial item with this teacher that is still in an open
+        # (draft/submitted) batch is not a second trial: the view demotes it to
+        # 'confirmed' (D6). Anything else with this teacher counts: a trial
+        # Lesson row, a trial item in a closed batch, or an explicit
+        # (schedule-less, not one-off) trial item. Other teachers' trials do not.
         has_trial = (
-            Lesson.objects.filter(student=student, is_trial=True).exists()
-            or BatchLessonItem.objects.filter(student=student, status='trial')
-            .exclude(batch__status__in=['draft', 'submitted']).exists()
+            Lesson.objects.filter(student=student, teacher=teacher, is_trial=True).exists()
             or BatchLessonItem.objects.filter(
-                student=student, status='trial',
+                student=student, status='trial', batch__teacher=teacher,
+            ).exclude(batch__status__in=['draft', 'submitted']).exists()
+            or BatchLessonItem.objects.filter(
+                student=student, status='trial', batch__teacher=teacher,
                 recurring_schedule__isnull=True, is_one_off=False,
             ).exists()
         )

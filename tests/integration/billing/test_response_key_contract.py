@@ -10,6 +10,7 @@ does not reach the wire without a deliberate contract change.
 
 MAP-284: the trial-lesson route emits the batch-item keys plus batch_id and
 batch_status; the frontend parity fixture is captured from this shape.
+MAP-299: GET is a list of such rows.
 """
 from decimal import Decimal
 
@@ -201,9 +202,11 @@ def test_trial_lesson_emits_batch_item_keys_plus_batch_fields(
     assert created.status_code == status.HTTP_201_CREATED, created.content
     assert fetched.status_code == status.HTTP_200_OK
     assert set(created.data.keys()) == TRIAL_LESSON_KEYS
-    assert set(fetched.data.keys()) == TRIAL_LESSON_KEYS
-    assert fetched.data['batch_status'] == 'draft'
-    assert isinstance(fetched.data['batch_id'], int)
-    assert fetched.data['teacher'] == teacher_user.id
-    assert fetched.data['teacher_name'] == teacher_user.get_full_name()
-    assert fetched.data['auto_detected'] is False
+    assert isinstance(fetched.data, list) and len(fetched.data) == 1
+    row = fetched.data[0]
+    assert set(row.keys()) == TRIAL_LESSON_KEYS
+    assert row['batch_status'] == 'draft'
+    assert isinstance(row['batch_id'], int)
+    assert row['teacher'] == teacher_user.id
+    assert row['teacher_name'] == teacher_user.get_full_name()
+    assert row['auto_detected'] is False
