@@ -168,6 +168,16 @@ class SchoolSettings(models.Model):
         default=True,
         help_text="Fixed period repeats every year (month/day match)",
     )
+    # MAP-327: second fixed window (semester 2). A date is judged against the
+    # first pair that contains it; a date in neither pair has no limit.
+    waive_period_2_start = models.DateField(
+        null=True, blank=True,
+        help_text="Second fixed period start (fixed type)",
+    )
+    waive_period_2_end = models.DateField(
+        null=True, blank=True,
+        help_text="Second fixed period end (fixed type)",
+    )
 
     # tracking
     updated_at = models.DateTimeField(auto_now=True)
