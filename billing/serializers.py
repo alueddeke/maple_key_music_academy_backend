@@ -749,12 +749,8 @@ class TeacherListSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
     def get_total_students(self, obj):
-        """Count distinct ACTIVE students this teacher has taught"""
-        return Lesson.objects.filter(
-            teacher=obj,
-            status='completed',
-            student__is_active=True
-        ).values('student').distinct().count()
+        """Active assigned students: the set the teacher's students page lists."""
+        return obj.assigned_students.filter(is_active=True).count()
 
     def get_total_lessons(self, obj):
         """Count completed lessons for this teacher"""
@@ -814,7 +810,8 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
     def get_total_students(self, obj):
-        return Lesson.objects.filter(teacher=obj, status='completed').values('student').distinct().count()
+        """Active assigned students: the set the teacher's students page lists."""
+        return obj.assigned_students.filter(is_active=True).count()
 
     def get_total_lessons(self, obj):
         return Lesson.objects.filter(teacher=obj, status='completed').count()
