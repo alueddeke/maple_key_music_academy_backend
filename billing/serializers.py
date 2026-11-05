@@ -493,43 +493,49 @@ class BatchRejectionSnapshotSerializer(serializers.ModelSerializer):
 
 
 class WaivePolicySerializer(serializers.ModelSerializer):
-    """Waived-cancellation policy fields on SchoolSettings (MAP-101)."""
+    """Waived-cancellation policy fields on SchoolSettings (MAP-101).
+
+    Two fixed windows (MAP-327): `waive_period_*` is semester 1 and
+    `waive_period_2_*` is semester 2. Both pairs follow the same rules.
+    """
 
     class Meta:
         model = SchoolSettings
         fields = [
             'waive_limit_enabled', 'waive_limit', 'waive_period_type',
             'waive_period_months', 'waive_period_start', 'waive_period_end',
+            'waive_period_2_start', 'waive_period_2_end',
             'waive_period_recurring', 'updated_at',
         ]
         read_only_fields = ['updated_at']
 
-    def validate(self, attrs):
-        period_type = attrs.get(
-            'waive_period_type',
-            getattr(self.instance, 'waive_period_type', 'rolling'),
-        )
-        if period_type == 'fixed':
-            start = attrs.get('waive_period_start', getattr(self.instance, 'waive_period_start', None))
-            end = attrs.get('waive_period_end', getattr(self.instance, 'waive_period_end', None))
-            enabled = attrs.get('waive_limit_enabled', getattr(self.instance, 'waive_limit_enabled', False))
-            if enabled and (not start or not end):
-                raise serializers.ValidationError(
-                    {'waive_period_start': 'Fixed period requires both start and end dates.'}
-                )
-            if start and end and end < start:
-                raise serializers.ValidationError(
-                    {'waive_period_end': 'End date must be on or after the start date.'}
-                )
-            recurring = attrs.get(
-                'waive_period_recurring',
-                getattr(self.instance, 'waive_period_recurring', True),
+    def _value(self, attrs, name, default=None):
+        return attrs.get(name, getattr(self.instance, name, default))
+
+    def _validate_pair(self, attrs, start_field, end_field, enabled, recurring):
+        start = self._value(attrs, start_field)
+        end = self._value(attrs, end_field)
+        if enabled and (not start or not end):
+            raise serializers.ValidationError(
+                {start_field: 'Fixed period requires both start and end dates.'}
             )
-            if recurring and start and end and (end - start).days > 366:
-                raise serializers.ValidationError(
-                    {'waive_period_end': 'A yearly-repeating period cannot be longer than one year.'}
-                )
-        months = attrs.get('waive_period_months', getattr(self.instance, 'waive_period_months', 4))
+        if start and end and end < start:
+            raise serializers.ValidationError(
+                {end_field: 'End date must be on or after the start date.'}
+            )
+        if recurring and start and end and (end - start).days > 366:
+            raise serializers.ValidationError(
+                {end_field: 'A yearly-repeating period cannot be longer than one year.'}
+            )
+
+    def validate(self, attrs):
+        period_type = self._value(attrs, 'waive_period_type', 'rolling')
+        if period_type == 'fixed':
+            enabled = self._value(attrs, 'waive_limit_enabled', False)
+            recurring = self._value(attrs, 'waive_period_recurring', True)
+            self._validate_pair(attrs, 'waive_period_start', 'waive_period_end', enabled, recurring)
+            self._validate_pair(attrs, 'waive_period_2_start', 'waive_period_2_end', enabled, recurring)
+        months = self._value(attrs, 'waive_period_months', 4)
         if period_type == 'rolling' and (not months or months < 1):
             raise serializers.ValidationError(
                 {'waive_period_months': 'Rolling window must be at least 1 month.'}
