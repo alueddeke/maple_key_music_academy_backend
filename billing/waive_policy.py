@@ -42,12 +42,27 @@ def _replace_year(d, year):
 
 
 def _fixed_window_for(settings, on_date):
-    """Resolve the fixed-dates window containing on_date, or None."""
-    start, end = settings.waive_period_start, settings.waive_period_end
-    if not start or not end:
-        return None
+    """Resolve the fixed-dates window containing on_date, or None.
 
-    if not settings.waive_period_recurring:
+    Two windows per school (MAP-327: semester 1 and semester 2); the first
+    pair containing on_date wins. A pair with a missing side is skipped.
+    """
+    pairs = (
+        (settings.waive_period_start, settings.waive_period_end),
+        (settings.waive_period_2_start, settings.waive_period_2_end),
+    )
+    for start, end in pairs:
+        if not start or not end:
+            continue
+        window = _window_containing(start, end, settings.waive_period_recurring, on_date)
+        if window is not None:
+            return window
+    return None
+
+
+def _window_containing(start, end, recurring, on_date):
+    """The (start, end) projection of one pair that contains on_date, or None."""
+    if not recurring:
         return (start, end) if start <= on_date <= end else None
 
     # Recurring: match by month/day, projected onto years around on_date.
