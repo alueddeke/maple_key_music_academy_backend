@@ -739,6 +739,157 @@ class TestManagementPutsCannotEscalate:
 
 
 # ---------------------------------------------------------------------------
+# MAP-265 — contact and schedule PUTs never move a row to another student or school
+# ---------------------------------------------------------------------------
+
+from billing.models import BillableContact as _Contact, RecurringLessonsSchedule as _Schedule
+
+
+def _contact_body(**extra):
+    return {
+        'contact_type': 'parent',
+        'first_name': 'Pat', 'last_name': 'Parent',
+        'email': 'pat@parent.com', 'phone': '416-555-0100',
+        'street_address': '1 Main St', 'city': 'Toronto',
+        'province': 'ON', 'postal_code': 'M5H 2N2',
+        'is_primary': True,
+    } | extra
+
+
+def _student(school, email):
+    return User.objects.create_user(
+        email=email, password='testpass123', user_type='student',
+        first_name='Other', last_name='Student', school=school, is_approved=True,
+    )
+
+
+@pytest.fixture
+def contact(student_user, school):
+    return _Contact.objects.create(student=student_user, school=school, **_contact_body())
+
+
+@pytest.fixture
+def schedule(student_user, teacher_user, school):
+    student_user.assigned_teachers.add(teacher_user)
+    return _Schedule.objects.create(
+        teacher=teacher_user, student=student_user, school=school,
+        day_of_week=2, start_time=time(15, 0), duration=Decimal('1.0'),
+        lesson_type='in_person', is_active=True, start_date=date(2026, 1, 7),
+        created_by=teacher_user,
+    )
+
+
+@pytest.mark.django_db
+class TestContactAndSchedulePutsKeepParent:
+    """MAP-265 acceptance: `student`/`school` on a management PUT are ignored
+    (200, row unchanged); the create routes still bind the URL student."""
+
+    def test_contact_put_ignores_student_and_school(
+        self, authenticated_management_client, contact, student_user, school, second_school
+    ):
+        other = _student(school, 'other_same_school@test.com')
+
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'student': other.id, 'school': second_school.id, 'first_name': 'Renamed', 'is_primary': True},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        contact.refresh_from_db()
+        assert contact.student_id == student_user.id
+        assert contact.school_id == school.id
+        assert contact.first_name == 'Renamed'
+        assert response.data['student'] == student_user.id
+        assert response.data['school'] == school.id
+
+    def test_contact_put_cross_school_school_never_written(
+        self, authenticated_management_client, contact, school, second_school
+    ):
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'school': second_school.id, 'is_primary': True},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        contact.refresh_from_db()
+        assert contact.school_id == school.id
+        assert not _Contact.objects.filter(school=second_school).exists()
+
+    @pytest.mark.parametrize('other_in_second_school', [False, True], ids=['same_school', 'cross_school'])
+    def test_schedule_put_ignores_student(
+        self, authenticated_management_client, schedule, student_user, school, second_school,
+        other_in_second_school,
+    ):
+        other = _student(second_school if other_in_second_school else school, 'other_sched@test.com')
+
+        response = authenticated_management_client.put(
+            reverse('recurring_schedule_detail', args=[student_user.id, schedule.id]),
+            {'student': other.id, 'start_time': '16:00'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        schedule.refresh_from_db()
+        assert schedule.student_id == student_user.id
+        assert schedule.start_time == time(16, 0)
+        assert response.data['student'] == student_user.id
+        assert not _Schedule.objects.filter(student=other).exists()
+
+    def test_schedule_put_cross_school_school_never_written(
+        self, authenticated_management_client, schedule, student_user, school, second_school
+    ):
+        response = authenticated_management_client.put(
+            reverse('recurring_schedule_detail', args=[student_user.id, schedule.id]),
+            {'school': second_school.id, 'start_time': '16:00'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        schedule.refresh_from_db()
+        assert schedule.school_id == school.id
+        assert not _Schedule.objects.filter(school=second_school).exists()
+
+    def test_contact_create_binds_url_student_and_school(
+        self, authenticated_management_client, student_user, school, second_school
+    ):
+        other = _student(school, 'other_create@test.com')
+
+        response = authenticated_management_client.post(
+            reverse('add_billable_contact', kwargs={'student_id': student_user.id}),
+            _contact_body(student=other.id, school=second_school.id),
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        created = _Contact.objects.get(pk=response.data['id'])
+        assert created.student_id == student_user.id
+        assert created.school_id == school.id
+
+    def test_schedule_create_binds_url_student(
+        self, authenticated_management_client, student_user, teacher_user, school
+    ):
+        student_user.assigned_teachers.add(teacher_user)
+        other = _student(school, 'other_sched_create@test.com')
+
+        response = authenticated_management_client.post(
+            reverse('student_recurring_schedules', args=[student_user.id]),
+            {
+                'teacher': teacher_user.id, 'student': other.id,
+                'day_of_week': 2, 'start_time': '15:00', 'duration': '1.0',
+                'lesson_type': 'in_person', 'start_date': '2026-01-07',
+            },
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        created = _Schedule.objects.get(pk=response.data['id'])
+        assert created.student_id == student_user.id
+        assert created.school_id == school.id
+
+
+# ---------------------------------------------------------------------------
 # MAP-186 — approval and payroll generate post to the ledger
 # ---------------------------------------------------------------------------
 
