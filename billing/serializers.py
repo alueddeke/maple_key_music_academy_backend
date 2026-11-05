@@ -27,8 +27,24 @@ def normalize_postal_code(value):
     return f"{cleaned[:3]} {cleaned[3:]}"
 
 
-class BillableContactSerializer(serializers.ModelSerializer):
+class ParentFixedOnUpdateMixin:
+    """MAP-265: the parent keys in ``fixed_on_update`` are writable on create
+    (the view binds them from the URL) and read-only once the row exists, so an
+    update never moves the row to another student or school."""
+
+    fixed_on_update = ()
+
+    def get_extra_kwargs(self):
+        extra = super().get_extra_kwargs()
+        if self.instance is not None:
+            for name in self.fixed_on_update:
+                extra[name] = {**extra.get(name, {}), 'read_only': True}
+        return extra
+
+
+class BillableContactSerializer(ParentFixedOnUpdateMixin, serializers.ModelSerializer):
     """Serializer for billable contact information"""
+    fixed_on_update = ('student', 'school')
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
     full_name = serializers.CharField(source='get_full_name', read_only=True)
     school_name = serializers.CharField(source='school.name', read_only=True)
@@ -211,7 +227,8 @@ class InvoiceSerializer(serializers.ModelSerializer):
         # serializer fed from a request body.
         read_only_fields = ['status', 'date_paid', 'reference_number', 'teacher', 'total_amount', 'payment_balance']
 
-class RecurringScheduleSerializer(serializers.ModelSerializer):
+class RecurringScheduleSerializer(ParentFixedOnUpdateMixin, serializers.ModelSerializer):
+    fixed_on_update = ('student',)
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
