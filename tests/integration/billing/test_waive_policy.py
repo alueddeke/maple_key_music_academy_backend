@@ -483,3 +483,244 @@ class TestWaiveEndpoints:
             format='json',
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+# --- MAP-327: two semester windows -----------------------------------------
+
+@pytest.fixture
+def semester_defaults(school, db):
+    """Policy on, fixed + recurring, both semester pairs set (MAP-303 Q16).
+
+    Returns the settings row; tests read the window dates from it rather
+    than repeating them.
+    """
+    settings = SchoolSettings.get_settings_for_school(school)
+    settings.waive_limit_enabled = True
+    settings.waive_limit = 3
+    settings.waive_period_type = 'fixed'
+    settings.waive_period_recurring = True
+    settings.waive_period_start = date(2026, 9, 1)
+    settings.waive_period_end = date(2027, 1, 31)
+    settings.waive_period_2_start = date(2027, 2, 1)
+    settings.waive_period_2_end = date(2027, 6, 30)
+    settings.save()
+    return settings
+
+
+def _window(usage):
+    return usage['period_start'], usage['period_end']
+
+
+@pytest.mark.django_db
+class TestTwoSemesterWindows:
+    def test_usage_in_second_semester_window(self, semester_defaults, student_user, school):
+        s = semester_defaults
+        usage = get_waive_usage(student_user, school, on_date=date(2027, 3, 15))
+        assert usage['enabled'] is True
+        assert usage['limit'] == s.waive_limit
+        assert _window(usage) == (
+            s.waive_period_2_start.isoformat(), s.waive_period_2_end.isoformat()
+        )
+
+    def test_usage_in_first_semester_before_year_wrap(self, semester_defaults, student_user, school):
+        s = semester_defaults
+        usage = get_waive_usage(student_user, school, on_date=date(2026, 12, 10))
+        assert usage['enabled'] is True
+        assert _window(usage) == (
+            s.waive_period_start.isoformat(), s.waive_period_end.isoformat()
+        )
+
+    def test_usage_in_first_semester_after_year_wrap(self, semester_defaults, student_user, school):
+        # January belongs to the semester that started the previous September.
+        s = semester_defaults
+        usage = get_waive_usage(student_user, school, on_date=date(2027, 1, 15))
+        assert usage['enabled'] is True
+        assert _window(usage) == (
+            s.waive_period_start.isoformat(), s.waive_period_end.isoformat()
+        )
+
+    def test_usage_in_summer_gap_is_unlimited(self, semester_defaults, student_user, school):
+        usage = get_waive_usage(student_user, school, on_date=date(2027, 7, 10))
+        assert usage['enabled'] is False
+        assert usage['remaining'] is None
+        assert _window(usage) == (None, None)
+
+    def test_recurring_windows_match_any_year(self, semester_defaults, student_user, school):
+        s = semester_defaults
+        usage = get_waive_usage(student_user, school, on_date=date(2029, 4, 2))
+        assert usage['enabled'] is True
+        assert _window(usage) == (
+            s.waive_period_2_start.replace(year=2029).isoformat(),
+            s.waive_period_2_end.replace(year=2029).isoformat(),
+        )
+
+    def test_non_recurring_second_window_matches_exact_year_only(
+        self, semester_defaults, student_user, school
+    ):
+        s = semester_defaults
+        s.waive_period_recurring = False
+        s.save()
+        in_year = get_waive_usage(student_user, school, on_date=s.waive_period_2_start + timedelta(days=40))
+        assert in_year['enabled'] is True
+        assert _window(in_year) == (
+            s.waive_period_2_start.isoformat(), s.waive_period_2_end.isoformat()
+        )
+        next_year = get_waive_usage(
+            student_user, school, on_date=s.waive_period_2_start.replace(year=2028) + timedelta(days=40)
+        )
+        assert next_year['enabled'] is False
+
+    def test_half_set_second_pair_is_skipped(self, semester_defaults, student_user, school):
+        s = semester_defaults
+        s.waive_period_2_end = None
+        s.save()
+        usage = get_waive_usage(student_user, school, on_date=date(2027, 3, 15))
+        assert usage['enabled'] is False
+
+    def test_overlapping_windows_first_pair_wins(self, semester_defaults, student_user, school):
+        s = semester_defaults
+        s.waive_period_2_start = date(2027, 1, 1)  # overlaps January of pair 1
+        s.save()
+        usage = get_waive_usage(student_user, school, on_date=date(2027, 1, 15))
+        assert _window(usage) == (
+            s.waive_period_start.isoformat(), s.waive_period_end.isoformat()
+        )
+
+    def test_teacher_waive_at_limit_in_second_semester_converts_to_forfeited(
+        self, semester_defaults, school, teacher_user, student_user, teacher_client
+    ):
+        # The at-limit conversion follows the lesson's window (semester 2),
+        # not the first pair and not today's window (MAP-327 WATCH d).
+        s = semester_defaults
+        s.waive_limit = 1
+        s.save()
+        lesson_day = s.waive_period_2_start.replace(year=2026) + timedelta(days=42)
+        # The one allowed waive, already spent inside the same semester
+        Lesson.objects.create(
+            school=school,
+            teacher=teacher_user,
+            student=student_user,
+            scheduled_date=timezone.make_aware(
+                timezone.datetime.combine(lesson_day - timedelta(days=7), time(15, 0))
+            ),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='waived',
+        )
+        batch = MonthlyInvoiceBatch.objects.create(
+            teacher=teacher_user,
+            school=school,
+            month=lesson_day.month,
+            year=lesson_day.year,
+            status='approved',
+        )
+        item = BatchLessonItem.objects.create(
+            batch=batch,
+            student=student_user,
+            scheduled_date=lesson_day,
+            start_time=time(15, 0),
+            duration=Decimal('1.00'),
+            lesson_type='in_person',
+            teacher_rate=Decimal('40.00'),
+            student_rate=Decimal('60.00'),
+            status='confirmed',
+        )
+        url = reverse(
+            'teacher_batch_adjustment_item',
+            kwargs={'batch_id': batch.id, 'item_id': item.id},
+        )
+        response = teacher_client.patch(url, {'status': 'waived'}, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        item.refresh_from_db()
+        assert item.status == 'forfeited'
+        assert response.data['waive_usage']['period_start'] == (
+            s.waive_period_2_start.replace(year=2026).isoformat()
+        )
+
+    def test_policy_put_round_trips_both_semester_pairs(self, management_client, school):
+        url = reverse('waive_policy_settings')
+        body = {
+            'waive_limit_enabled': True,
+            'waive_period_type': 'fixed',
+            'waive_period_recurring': True,
+            'waive_period_start': '2026-09-01',
+            'waive_period_end': '2027-01-31',
+            'waive_period_2_start': '2027-02-01',
+            'waive_period_2_end': '2027-06-30',
+        }
+        response = management_client.put(url, body, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        for key, value in body.items():
+            assert response.data[key] == value
+
+        response = management_client.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        for key, value in body.items():
+            assert response.data[key] == value
+        settings = SchoolSettings.get_settings_for_school(school)
+        assert (settings.waive_period_2_start, settings.waive_period_2_end) == (
+            date(2027, 2, 1), date(2027, 6, 30)
+        )
+
+    def test_policy_put_rejects_second_pair_end_before_start(self, management_client):
+        url = reverse('waive_policy_settings')
+        response = management_client.put(
+            url,
+            {
+                'waive_limit_enabled': True,
+                'waive_period_type': 'fixed',
+                'waive_period_start': '2026-09-01',
+                'waive_period_end': '2027-01-31',
+                'waive_period_2_start': '2027-06-30',
+                'waive_period_2_end': '2027-02-01',
+            },
+            format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'waive_period_2_end' in response.data
+
+    def test_policy_put_fixed_enabled_requires_second_pair(self, management_client):
+        url = reverse('waive_policy_settings')
+        response = management_client.put(
+            url,
+            {
+                'waive_limit_enabled': True,
+                'waive_period_type': 'fixed',
+                'waive_period_start': '2026-09-01',
+                'waive_period_end': '2027-01-31',
+                'waive_period_2_start': '2027-02-01',
+                'waive_period_2_end': None,
+            },
+            format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'waive_period_2_start' in response.data
+
+    def test_policy_put_rejects_second_pair_longer_than_year_when_recurring(self, management_client):
+        url = reverse('waive_policy_settings')
+        response = management_client.put(
+            url,
+            {
+                'waive_limit_enabled': True,
+                'waive_period_type': 'fixed',
+                'waive_period_recurring': True,
+                'waive_period_start': '2026-09-01',
+                'waive_period_end': '2027-01-31',
+                'waive_period_2_start': '2027-02-01',
+                'waive_period_2_end': '2028-06-30',
+            },
+            format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'waive_period_2_end' in response.data
+
+    def test_rolling_policy_ignores_semester_pairs(self, semester_defaults, student_user, school):
+        s = semester_defaults
+        s.waive_period_type = 'rolling'
+        s.waive_period_months = 4
+        s.save()
+        usage = get_waive_usage(student_user, school, on_date=date(2027, 7, 10))
+        assert usage['enabled'] is True
+        assert usage['period_end'] is None
