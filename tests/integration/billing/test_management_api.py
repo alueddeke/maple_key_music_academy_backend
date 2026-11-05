@@ -211,6 +211,87 @@ class TestTeacherManagementAPI:
         assert 'total_students' in response.data
         assert 'recent_lessons' in response.data
 
+    # MAP-293 B: the tally is the active assigned-student set, the same set
+    # the teacher's students page lists.
+
+    def _assign_students(self, teacher, count, is_active=True):
+        students = []
+        for i in range(count):
+            student = User.objects.create_user(
+                email=f"assigned{'' if is_active else '-inactive'}{i}@test.com",
+                user_type='student',
+                first_name='Assigned',
+                last_name=f'Student{i}',
+                school=teacher.school,
+                is_approved=True,
+                is_active=is_active,
+            )
+            student.assigned_teachers.add(teacher)
+            students.append(student)
+        return students
+
+    def _list_row(self, client, teacher):
+        response = client.get(reverse('management_teacher_list'))
+        assert response.status_code == status.HTTP_200_OK
+        return next(row for row in response.data if row['id'] == teacher.id)
+
+    def test_list_total_students_counts_active_assigned_without_lessons(
+        self, authenticated_management_client, teacher_user
+    ):
+        """Assigned students with no lessons yet are counted."""
+        self._assign_students(teacher_user, 2)
+
+        row = self._list_row(authenticated_management_client, teacher_user)
+
+        assert row['total_students'] == 2
+
+    def test_total_students_excludes_inactive_and_unassigned(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        """An inactive assigned student and a taught-but-unassigned student are not counted."""
+        # student_user has a completed lesson with teacher_user but is not assigned.
+        assert not student_user.assigned_teachers.filter(pk=teacher_user.pk).exists()
+        self._assign_students(teacher_user, 1)
+        self._assign_students(teacher_user, 1, is_active=False)
+
+        row = self._list_row(authenticated_management_client, teacher_user)
+        detail = authenticated_management_client.get(
+            reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        )
+
+        assert row['total_students'] == 1
+        assert detail.data['total_students'] == 1
+
+    def test_detail_total_students_counts_active_assigned(
+        self, authenticated_management_client, teacher_user
+    ):
+        """The detail serializer uses the same active assigned set."""
+        self._assign_students(teacher_user, 3)
+
+        response = authenticated_management_client.get(
+            reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['total_students'] == 3
+
+    def test_total_students_equals_teacher_students_endpoint(
+        self, authenticated_management_client, teacher_user, student_user
+    ):
+        """The Teachers-table tally equals what the teacher's students page lists."""
+        assigned = self._assign_students(teacher_user, 2)
+        self._assign_students(teacher_user, 1, is_active=False)
+
+        row = self._list_row(authenticated_management_client, teacher_user)
+        page = authenticated_management_client.get(
+            reverse('teacher_students', kwargs={'teacher_id': teacher_user.id})
+        )
+
+        assert page.status_code == status.HTTP_200_OK
+        listed_ids = {s['id'] for s in page.data['students']}
+        assert listed_ids == {s.id for s in assigned}
+        assert row['total_students'] == len(listed_ids) == page.data['total_students']
+
     def test_update_teacher_rate_as_management(self, authenticated_management_client, teacher_user):
         """Management can update teacher hourly rate."""
         url = reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
