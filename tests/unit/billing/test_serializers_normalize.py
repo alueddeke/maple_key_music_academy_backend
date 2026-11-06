@@ -138,7 +138,8 @@ def test_contact_partial_update_reads_the_stored_province(student_user, school):
     from billing.models import BillableContact
 
     contact = BillableContact.objects.create(student=student_user, school=school, **_contact(), is_primary=True)
-    data = _valid(BillableContactSerializer(contact, data={'city': 'Toronto, Ontario'}, partial=True))
+    # is_primary sent: a partial update without it is refused today (MAP-328).
+    data = _valid(BillableContactSerializer(contact, data={'city': 'Toronto, Ontario', 'is_primary': True}, partial=True))
 
     assert data['city'] == 'Toronto'
 

@@ -699,7 +699,7 @@ class TestManagementPutsCannotEscalate:
             if field.name == 'hourly_rate':
                 return str(fake.pydecimal(left_digits=3, right_digits=2, positive=True))
             if field.name == 'phone_number':
-                return fake.numerify('###########')
+                return fake.numerify('##########')  # MAP-293: stored phones are 10 digits
             if field.name == 'province':
                 return fake.random_element([code for code, _ in User.PROVINCES])
             if field.name == 'postal_code':
@@ -1940,7 +1940,8 @@ class TestContactFieldNormalization:
     ):
         response = authenticated_management_client.put(
             reverse('manage_billable_contact', kwargs={'pk': contact.id}),
-            {'city': 'Toronto, ON', 'phone': '(647) 555-0199'}, format='json',
+            # is_primary sent: a partial PUT without it is refused today (MAP-328).
+            {'city': 'Toronto, ON', 'phone': '(647) 555-0199', 'is_primary': True}, format='json',
         )
 
         assert response.status_code == status.HTTP_200_OK, response.data
@@ -1952,7 +1953,7 @@ class TestContactFieldNormalization:
     ):
         response = authenticated_management_client.put(
             reverse('manage_billable_contact', kwargs={'pk': contact.id}),
-            {'city': 'London, Ontario', 'province': 'BC'}, format='json',
+            {'city': 'London, Ontario', 'province': 'BC', 'is_primary': True}, format='json',
         )
 
         assert response.status_code == status.HTTP_200_OK, response.data
