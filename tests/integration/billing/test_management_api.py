@@ -1873,3 +1873,135 @@ class TestManagementBulkLessonStatus:
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert _bulk_state(ids) == before
+
+
+# ---------------------------------------------------------------------------
+# MAP-293 Section D — contact fields are stored canonical on save
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestContactFieldNormalization:
+    """Phones are stored as 10 digits, names Title Case, a city without the
+    province it repeats, postal codes A1A 1A1 and emails lowercase."""
+
+    def _create_body(self, **student):
+        return {
+            'email': 'Thomas.Feinberg@Example.com ',
+            'first_name': ' thomas ', 'last_name': 'feinberg',
+            'phone_number': '416 822 8104',
+            'billing_contact': {
+                'contact_type': 'parent', 'first_name': 'mary-jane', 'last_name': "o'neil",
+                'email': 'MJ@Example.com', 'phone': '+1 (416) 822-8105',
+                'street_address': ' 12 King St ', 'city': 'London, Ontario', 'province': 'ON',
+                'postal_code': 'n6a1b2',
+            },
+        } | student
+
+    def test_create_student_stores_canonical_fields(self, authenticated_management_client):
+        response = authenticated_management_client.post(
+            '/api/billing/management/students/', self._create_body(), format='json',
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.data
+        student = User.objects.get(pk=response.data['id'])
+        assert (student.first_name, student.last_name) == ('Thomas', 'Feinberg')
+        assert student.phone_number == '4168228104'
+        assert student.email == 'thomas.feinberg@example.com'
+        contact = _Contact.objects.get(student=student)
+        assert (contact.first_name, contact.last_name) == ('Mary-Jane', "O'Neil")
+        assert contact.phone == '4168228105'
+        assert contact.email == 'mj@example.com'
+        assert (contact.street_address, contact.city, contact.province) == ('12 King St', 'London', 'ON')
+        assert contact.postal_code == 'N6A 1B2'
+
+    def test_create_student_rejects_a_phone_that_is_not_ten_digits(self, authenticated_management_client):
+        response = authenticated_management_client.post(
+            '/api/billing/management/students/', self._create_body(phone_number='822 8104'), format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data['phone_number'] == ['Enter a 10-digit phone number']
+        assert not User.objects.filter(email='thomas.feinberg@example.com').exists()
+
+    def test_create_student_lowercases_before_the_uniqueness_check(
+        self, authenticated_management_client, student_user
+    ):
+        response = authenticated_management_client.post(
+            '/api/billing/management/students/',
+            self._create_body(email=student_user.email.upper()), format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'email' in response.data
+        assert User.objects.filter(email__iexact=student_user.email).count() == 1
+
+    def test_contact_update_strips_city_against_the_stored_province(
+        self, authenticated_management_client, contact
+    ):
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'city': 'Toronto, ON', 'phone': '(647) 555-0199'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        contact.refresh_from_db()
+        assert (contact.city, contact.phone) == ('Toronto', '6475550199')
+
+    def test_contact_city_keeps_a_suffix_that_is_not_the_set_province(
+        self, authenticated_management_client, contact
+    ):
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'city': 'London, Ontario', 'province': 'BC'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        contact.refresh_from_db()
+        assert contact.city == 'London, Ontario'
+
+    def test_teacher_update_normalizes_and_allows_a_blank_phone(
+        self, authenticated_management_client, teacher_user
+    ):
+        url = reverse('management_update_teacher', kwargs={'pk': teacher_user.id})
+        response = authenticated_management_client.put(url, {
+            'first_name': 'lila', 'last_name': 'McDonald', 'phone_number': '1-416-822-8104',
+            'city': 'ottawa, ontario', 'province': 'ON', 'postal_code': 'k1a 0b1',
+        }, format='json')
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        teacher_user.refresh_from_db()
+        assert (teacher_user.first_name, teacher_user.last_name) == ('Lila', 'McDonald')
+        assert teacher_user.phone_number == '4168228104'
+        assert (teacher_user.city, teacher_user.postal_code) == ('ottawa', 'K1A 0B1')
+
+        blank = authenticated_management_client.put(url, {'phone_number': ''}, format='json')
+        assert blank.status_code == status.HTTP_200_OK, blank.data
+        teacher_user.refresh_from_db()
+        assert teacher_user.phone_number == ''
+
+    def test_school_update_normalizes_phone_postal_city_and_email(
+        self, authenticated_management_client, school
+    ):
+        response = authenticated_management_client.patch(
+            '/api/billing/management/school/update/',
+            {'phone_number': '416.822.8104', 'postal_code': 'm5h2n2', 'city': 'Toronto, Ontario',
+             'province': 'ON', 'email': 'Office@School.CA'},
+            format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        school.refresh_from_db()
+        assert (school.phone_number, school.postal_code, school.city, school.email) == (
+            '4168228104', 'M5H 2N2', 'Toronto', 'office@school.ca'
+        )
+
+    def test_school_update_rejects_a_bad_phone(self, authenticated_management_client, school):
+        before = school.phone_number
+        response = authenticated_management_client.patch(
+            '/api/billing/management/school/update/', {'phone_number': '555-0100'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data['phone_number'] == ['Enter a 10-digit phone number']
+        school.refresh_from_db()
+        assert school.phone_number == before
