@@ -27,8 +27,24 @@ def normalize_postal_code(value):
     return f"{cleaned[:3]} {cleaned[3:]}"
 
 
-class BillableContactSerializer(serializers.ModelSerializer):
+class ParentFixedOnUpdateMixin:
+    """MAP-265: the parent keys in ``fixed_on_update`` are writable on create
+    (the view binds them from the URL) and read-only once the row exists, so an
+    update never moves the row to another student or school."""
+
+    fixed_on_update = ()
+
+    def get_extra_kwargs(self):
+        extra = super().get_extra_kwargs()
+        if self.instance is not None:
+            for name in self.fixed_on_update:
+                extra[name] = {**extra.get(name, {}), 'read_only': True}
+        return extra
+
+
+class BillableContactSerializer(ParentFixedOnUpdateMixin, serializers.ModelSerializer):
     """Serializer for billable contact information"""
+    fixed_on_update = ('student', 'school')
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
     full_name = serializers.CharField(source='get_full_name', read_only=True)
     school_name = serializers.CharField(source='school.name', read_only=True)
@@ -211,7 +227,8 @@ class InvoiceSerializer(serializers.ModelSerializer):
         # serializer fed from a request body.
         read_only_fields = ['status', 'date_paid', 'reference_number', 'teacher', 'total_amount', 'payment_balance']
 
-class RecurringScheduleSerializer(serializers.ModelSerializer):
+class RecurringScheduleSerializer(ParentFixedOnUpdateMixin, serializers.ModelSerializer):
+    fixed_on_update = ('student',)
     teacher_name = serializers.CharField(source='teacher.get_full_name', read_only=True)
     student_name = serializers.CharField(source='student.get_full_name', read_only=True)
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
@@ -749,12 +766,8 @@ class TeacherListSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
     def get_total_students(self, obj):
-        """Count distinct ACTIVE students this teacher has taught"""
-        return Lesson.objects.filter(
-            teacher=obj,
-            status='completed',
-            student__is_active=True
-        ).values('student').distinct().count()
+        """Active assigned students: the set the teacher's students page lists."""
+        return obj.assigned_students.filter(is_active=True).count()
 
     def get_total_lessons(self, obj):
         """Count completed lessons for this teacher"""
@@ -814,7 +827,8 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
     def get_total_students(self, obj):
-        return Lesson.objects.filter(teacher=obj, status='completed').values('student').distinct().count()
+        """Active assigned students: the set the teacher's students page lists."""
+        return obj.assigned_students.filter(is_active=True).count()
 
     def get_total_lessons(self, obj):
         return Lesson.objects.filter(teacher=obj, status='completed').count()
