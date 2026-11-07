@@ -32,6 +32,15 @@ class UserManager(BaseUserManager):
         
         return self.create_user(email, password, **extra_fields)
 
+    def billable_students(self, school):
+        """Students who are billed and counted (MAP-302): not removed
+        (``is_active``) and enrolment ``status`` active. Every billing-purpose
+        query uses this; identity lookups and the Students list do not. Works
+        on related managers too (``teacher.assigned_students``)."""
+        return self.filter(
+            user_type='student', is_active=True, status='active', school=school,
+        )
+
 
 class School(models.Model): 
     # 1. Basic Info
@@ -241,6 +250,23 @@ class User(AbstractUser):
 
     # Remove the username field since we're using email
     username = None
+
+    # Enrolment status (MAP-302). Students only; other user types keep the
+    # default and never read or write it.
+    STUDENT_STATUSES = [
+        ('active', 'Active'),
+        ('inactive', 'Inactive'),
+        ('waitlist', 'Waitlist'),
+        ('summer_break', 'Summer break'),
+    ]
+    status = models.CharField(
+        max_length=20, choices=STUDENT_STATUSES, default='active',
+        help_text=(
+            "Enrolment status (students only). Only 'active' students are billed "
+            "and counted. Changing it does not touch schedules or batches already "
+            "generated. Soft delete stays is_active."
+        ),
+    )
     
     # Status fields
     is_approved = models.BooleanField(default=False, help_text="Management approval for teachers/students")
@@ -925,7 +951,7 @@ class MonthlyInvoiceBatch(models.Model):
         schedules = self.teacher.teaching_schedules.filter(
             is_active=True,
             school=self.school,
-            student__is_active=True  # Only include schedules for active students
+            student__in=User.objects.billable_students(self.school),
         )
 
         from datetime import date as _date
