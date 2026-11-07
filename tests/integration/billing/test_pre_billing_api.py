@@ -1413,3 +1413,40 @@ def test_list_period_filter_stays_school_scoped(management_client, school, stude
     response = _list(management_client, month=6, year=2026)
 
     assert [row['id'] for row in response.data] == [mine.id]
+
+
+# ---------------------------------------------------------------------------
+# MAP-302: draft generation bills only status='active' students
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_generate_drafts_skips_non_active_status(management_client, school, teacher_user):
+    """One active student and one of each other status, all billable otherwise:
+    exactly one draft, for the active student."""
+    today = date.today()
+    statuses = [value for value, _ in User.STUDENT_STATUSES]
+    students = {}
+    for value in statuses:
+        student = User.objects.create_user(
+            email=f"status_{value}@prebilling.test", password="pass", user_type="student",
+            first_name="Status", last_name=value, school=school, is_approved=True,
+        )
+        student.status = value
+        student.save(update_fields=['status'])
+        BillableContact.objects.create(
+            student=student, school=school, is_primary=True, first_name="P",
+            last_name=value, email=f"contact_{value}@prebilling.test", phone="4165550200",
+            street_address="1 Test St", city="Toronto", province="ON", postal_code="M5H 2N2",
+        )
+        _make_confirmed_lesson(student, teacher_user, school, lesson_date=date(today.year, today.month, 10))
+        students[value] = student
+
+    response = management_client.post(
+        reverse('management_pre_billing_generate'),
+        {'month': today.month, 'year': today.year}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    assert response.data['generated'] == 1
+    billed = set(PreBillingInvoice.objects.filter(school=school).values_list('student_id', flat=True))
+    assert billed == {students['active'].id}
