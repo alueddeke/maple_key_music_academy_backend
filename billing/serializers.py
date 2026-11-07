@@ -27,6 +27,82 @@ def normalize_postal_code(value):
     return f"{cleaned[:3]} {cleaned[3:]}"
 
 
+# MAP-293 Section D: contact fields are stored canonical. The frontend's
+# src/schemas/normalize.ts mirrors these rules; this file is the authority.
+PHONE_ERROR = 'Enter a 10-digit phone number'
+_NAME_WORD_START = re.compile(r"(^|[\s'-])([^\W\d_])")
+
+
+def phone_digits(value):
+    """The 10 digits of a North American number (a leading 1 on 11 digits
+    dropped), or None when the input does not hold exactly that."""
+    digits = re.sub(r'[^0-9]', '', value)
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else None
+
+
+def title_case_name(value):
+    """Trim, collapse inner spaces, then capitalise the letter that starts
+    the name and each part after a space, `-` or `'`. An uppercase letter
+    after the first character means the capitals were typed on purpose
+    (McDonald, van der Berg), so the value is kept as typed."""
+    collapsed = ' '.join(value.split())
+    if any(ch.isupper() for ch in collapsed[1:]):
+        return collapsed
+    return _NAME_WORD_START.sub(lambda m: m.group(1) + m.group(2).upper(), collapsed)
+
+
+def strip_city_province(city, province):
+    """Drop a trailing ", <code or name>" from the city when it repeats the
+    province that is set (London, Ontario + ON -> London); otherwise keep it."""
+    code = (province or '').strip().upper()
+    name = dict(User.PROVINCES).get(code)
+    head, comma, tail = city.rpartition(',')
+    if name and comma and head.strip() and tail.strip().lower() in (code.lower(), name.lower()):
+        return head.strip()
+    return city
+
+
+class PhoneField(serializers.CharField):
+    """Stores the 10 digits. Normalizing here, before the length validators
+    run, lets `+1 (416) 822-8104` through a 15-character column. Blank
+    follows allow_blank (an optional phone may be left empty)."""
+
+    def to_internal_value(self, data):
+        digits = phone_digits(super().to_internal_value(data))
+        if digits is None:
+            raise serializers.ValidationError(PHONE_ERROR)
+        return digits
+
+
+class ContactNormalizationMixin:
+    """Names, email, postal code and city of any input serializer that has
+    them. A serializer that defines its own validate / validate_email calls
+    super() first, so the normalized value is what it checks."""
+
+    def validate_first_name(self, value):
+        return title_case_name(value)
+
+    def validate_last_name(self, value):
+        return title_case_name(value)
+
+    def validate_email(self, value):
+        return value.lower()
+
+    def validate_postal_code(self, value):
+        # Blank = not entered (required fields never reach here blank).
+        return normalize_postal_code(value) if value else value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if attrs.get('city'):
+            # A partial update without a province checks the stored one.
+            province = attrs.get('province', getattr(self.instance, 'province', ''))
+            attrs['city'] = strip_city_province(attrs['city'], province)
+        return attrs
+
+
 class ParentFixedOnUpdateMixin:
     """MAP-265: the parent keys in ``fixed_on_update`` are writable on create
     (the view binds them from the URL) and read-only once the row exists, so an
@@ -42,9 +118,10 @@ class ParentFixedOnUpdateMixin:
         return extra
 
 
-class BillableContactSerializer(ParentFixedOnUpdateMixin, serializers.ModelSerializer):
+class BillableContactSerializer(ContactNormalizationMixin, ParentFixedOnUpdateMixin, serializers.ModelSerializer):
     """Serializer for billable contact information"""
     fixed_on_update = ('student', 'school')
+    phone = PhoneField(max_length=15)
     contact_type_display = serializers.CharField(source='get_contact_type_display', read_only=True)
     full_name = serializers.CharField(source='get_full_name', read_only=True)
     school_name = serializers.CharField(source='school.name', read_only=True)
@@ -62,6 +139,7 @@ class BillableContactSerializer(ParentFixedOnUpdateMixin, serializers.ModelSeria
 
     def validate(self, data):
         """Ensure at least one primary contact per student"""
+        data = super().validate(data)
         student = data.get('student')
         is_primary = data.get('is_primary', False)
 
@@ -78,7 +156,8 @@ class BillableContactSerializer(ParentFixedOnUpdateMixin, serializers.ModelSeria
                 })
 
         return data
-class UserSerializer(serializers.ModelSerializer):
+class UserSerializer(ContactNormalizationMixin, serializers.ModelSerializer):
+    phone_number = PhoneField(max_length=15, required=False, allow_blank=True)
     user_type_display = serializers.CharField(source='get_user_type_display', read_only=True)
     school_name = serializers.CharField(source='school.name', read_only=True)
     billable_contacts = BillableContactSerializer(many=True, read_only=True)
@@ -109,6 +188,7 @@ class UserSerializer(serializers.ModelSerializer):
         extra_kwargs = {'email': {'validators': []}}
 
     def validate_email(self, value):
+        value = super().validate_email(value)
         exclude_pk = self.instance.pk if self.instance is not None else None
         holders = User.objects.filter(email__iexact=value)
         if exclude_pk is not None:
@@ -161,10 +241,6 @@ class TeacherUpdateSerializer(UserSerializer):
         fields = UserSerializer.Meta.fields + [
             'street_address', 'city', 'province', 'postal_code',
         ]
-
-    def validate_postal_code(self, value):
-        # Blank = not entered; anything else must be a valid postal code.
-        return normalize_postal_code(value) if value else value
 
 
 class LessonSerializer(serializers.ModelSerializer):
@@ -654,8 +730,9 @@ class GlobalRateSettingsSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'updated_at', 'updated_by', 'updated_by_name']
 
 
-class SchoolSerializer(serializers.ModelSerializer):
+class SchoolSerializer(ContactNormalizationMixin, serializers.ModelSerializer):
     """Basic school serializer for school information"""
+    phone_number = PhoneField(max_length=20, required=False, allow_blank=True)
 
     class Meta:
         model = School
@@ -668,6 +745,16 @@ class SchoolSerializer(serializers.ModelSerializer):
             'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_email(self, value):
+        # The model's unique check saw the typed case; re-check the stored one.
+        value = super().validate_email(value)
+        others = School.objects.filter(email__iexact=value)
+        if self.instance is not None:
+            others = others.exclude(pk=self.instance.pk)
+        if others.exists():
+            raise serializers.ValidationError('school with this email already exists.')
+        return value
 
 
 class SchoolDetailSerializer(serializers.ModelSerializer):
@@ -868,7 +955,7 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
             invoice_type='teacher_payment'
         ).order_by('-created_at')[:5]
         return InvoiceSerializer(invoices, many=True).data
-class BillingContactInputSerializer(serializers.Serializer):
+class BillingContactInputSerializer(ContactNormalizationMixin, serializers.Serializer):
     """Serializer for billing contact input (without student field) - Canadian format"""
     contact_type = serializers.ChoiceField(choices=['parent', 'guardian', 'self', 'other'], default='parent')
     first_name = serializers.CharField(max_length=150, min_length=1, error_messages={
@@ -883,7 +970,7 @@ class BillingContactInputSerializer(serializers.Serializer):
         'required': 'Email is required',
         'invalid': 'Please enter a valid email address'
     })
-    phone = serializers.CharField(max_length=15, min_length=1, error_messages={
+    phone = PhoneField(max_length=15, min_length=1, error_messages={
         'required': 'Phone number is required',
         'min_length': 'Phone number cannot be empty'
     })
@@ -911,17 +998,14 @@ class BillingContactInputSerializer(serializers.Serializer):
             raise serializers.ValidationError("Province must be exactly 2 characters (e.g., ON, BC, QC)")
         return value.upper()
 
-    def validate_postal_code(self, value):
-        return normalize_postal_code(value)
 
-
-class StudentCreateSerializer(serializers.Serializer):
+class StudentCreateSerializer(ContactNormalizationMixin, serializers.Serializer):
     """Serializer for creating a student with billing contact in one operation"""
     # Student fields
     email = serializers.EmailField()
     first_name = serializers.CharField(max_length=150)
     last_name = serializers.CharField(max_length=150)
-    phone_number = serializers.CharField(max_length=15, required=False, allow_blank=True)
+    phone_number = PhoneField(max_length=15, required=False, allow_blank=True)
     assigned_teachers = serializers.ListField(
         child=serializers.IntegerField(),
         required=False,
@@ -934,6 +1018,7 @@ class StudentCreateSerializer(serializers.Serializer):
 
     def validate_email(self, value):
         """Check if email already exists; name a removed holder (MAP-220)."""
+        value = super().validate_email(value)
         if User.objects.filter(email=value).exists():
             raise serializers.ValidationError(
                 removed_account_message(value) or "A user with this email already exists"
