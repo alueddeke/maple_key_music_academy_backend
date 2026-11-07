@@ -708,6 +708,8 @@ class TestManagementPutsCannotEscalate:
                 return fake.numerify('##########')  # MAP-293: stored phones are 10 digits
             if field.name == 'province':
                 return fake.random_element([code for code, _ in User.PROVINCES])
+            if field.name == 'status':  # MAP-302: a choice field, like province
+                return fake.random_element([value for value, _ in User.STUDENT_STATUSES])
             if field.name == 'postal_code':
                 return fake.bothify('?#? #?#', letters='ABCEGHJKLMNPRSTVXY')
             if field.name == 'school':
