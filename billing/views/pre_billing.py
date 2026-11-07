@@ -229,11 +229,7 @@ def management_pre_billing_generate(request):
         )
     }
 
-    active_students = User.objects.filter(
-        user_type='student',
-        is_active=True,
-        school=school,
-    )
+    active_students = User.objects.billable_students(school)
 
     for student in active_students:
         existing = existing_by_student.get(student.id)

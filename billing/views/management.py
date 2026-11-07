@@ -1173,7 +1173,8 @@ def teacher_students(request, teacher_id):
     except User.DoesNotExist:
         return Response({'error': 'Teacher not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # Get active students assigned to this teacher
+    # Every non-removed assigned student is listed; the tally counts only the
+    # billable ones (MAP-302, owner ruling Q1 b).
     students = teacher.assigned_students.filter(is_active=True)
     serializer = UserSerializer(students, many=True)
 
@@ -1187,7 +1188,7 @@ def teacher_students(request, teacher_id):
             'bio': teacher.bio
         },
         'students': serializer.data,
-        'total_students': students.count()
+        'total_students': teacher.assigned_students.billable_students(teacher.school).count()
     })
 
 

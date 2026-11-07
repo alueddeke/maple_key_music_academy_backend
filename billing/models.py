@@ -951,7 +951,7 @@ class MonthlyInvoiceBatch(models.Model):
         schedules = self.teacher.teaching_schedules.filter(
             is_active=True,
             school=self.school,
-            student__is_active=True  # Only include schedules for active students
+            student__in=User.objects.billable_students(self.school),
         )
 
         from datetime import date as _date

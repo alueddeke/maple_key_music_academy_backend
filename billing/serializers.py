@@ -792,10 +792,10 @@ class SchoolDetailSerializer(serializers.ModelSerializer):
         return User.objects.filter(school=obj, user_type='teacher').count()
 
     def get_student_count(self, obj):
-        """Total ACTIVE students in this school"""
+        """Billable students in this school (MAP-302): not removed, status active."""
         from django.contrib.auth import get_user_model
         User = get_user_model()
-        return User.objects.filter(school=obj, user_type='student', is_active=True).count()
+        return User.objects.billable_students(obj).count()
 
     def get_lesson_count(self, obj):
         """Total lessons for this school"""
@@ -853,8 +853,10 @@ class TeacherListSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
     def get_total_students(self, obj):
-        """Active assigned students: the set the teacher's students page lists."""
-        return obj.assigned_students.filter(is_active=True).count()
+        """Billable assigned students (MAP-302): the active subset of the
+        teacher's students page, which also lists waitlist / summer break /
+        inactive students."""
+        return obj.assigned_students.billable_students(obj.school).count()
 
     def get_total_lessons(self, obj):
         """Count completed lessons for this teacher"""
@@ -914,8 +916,10 @@ class TeacherDetailSerializer(serializers.ModelSerializer):
         return instrument_names(obj)
 
     def get_total_students(self, obj):
-        """Active assigned students: the set the teacher's students page lists."""
-        return obj.assigned_students.filter(is_active=True).count()
+        """Billable assigned students (MAP-302): the active subset of the
+        teacher's students page, which also lists waitlist / summer break /
+        inactive students."""
+        return obj.assigned_students.billable_students(obj.school).count()
 
     def get_total_lessons(self, obj):
         return Lesson.objects.filter(teacher=obj, status='completed').count()
