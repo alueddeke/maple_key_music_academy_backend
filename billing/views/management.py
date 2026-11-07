@@ -538,7 +538,7 @@ def management_students(request):
         else:
             students = User.objects.filter(user_type='student', is_active=True, school=request.user.school)
 
-        serializer = UserSerializer(students, many=True)
+        serializer = UserSerializer(UserSerializer.list_queryset(students), many=True)
         return Response(serializer.data)
 
     elif request.method == 'POST':

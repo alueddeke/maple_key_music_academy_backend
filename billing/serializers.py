@@ -4,7 +4,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator
-from django.db.models import Count, Sum, Q
+from django.db.models import Count, Prefetch, Sum, Q
 from custom_auth.authentication import removed_account_message
 from teacher_profiles.instruments import instrument_names
 from .models import (
@@ -164,17 +164,21 @@ class UserSerializer(ContactNormalizationMixin, serializers.ModelSerializer):
     assigned_teachers_data = serializers.SerializerMethodField()
     assigned_students_data = serializers.SerializerMethodField()
     instruments = serializers.SerializerMethodField()
+    # MAP-302: emitted for every user type; [] / None for non-students.
+    schedules = serializers.SerializerMethodField()
+    primary_contact_address = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'user_type', 'user_type_display',
             'school', 'school_name',
-            'phone_number', 'address', 'is_approved', 'is_active',
+            'phone_number', 'address', 'is_approved', 'is_active', 'status',
             'bio', 'instruments', 'hourly_rate',
             'assigned_teachers', 'assigned_teachers_data',
             'assigned_students_data',
             'billable_contacts',
+            'schedules', 'primary_contact_address',
             'date_joined', 'last_login'
         ]
         # MAP-177: role, tenancy and status columns are never writable through
@@ -200,9 +204,37 @@ class UserSerializer(ContactNormalizationMixin, serializers.ModelSerializer):
             )
         return value
 
+    @staticmethod
+    def list_queryset(queryset):
+        """Prefetches for a student list so each row adds no queries (MAP-302).
+        The method fields below read these when present and query otherwise."""
+        return queryset.select_related('school').prefetch_related(
+            Prefetch(
+                'assigned_teachers',
+                queryset=User.objects.filter(is_active=True).select_related(
+                    'teacher_profile'
+                ).prefetch_related('teacher_profile__instruments'),
+                to_attr='prefetched_active_teachers',
+            ),
+            'assigned_teachers',
+            Prefetch(
+                'student_schedules',
+                queryset=RecurringLessonsSchedule.objects.filter(is_active=True)
+                .select_related('teacher').order_by('day_of_week', 'start_time', 'id'),
+                to_attr='prefetched_active_schedules',
+            ),
+            Prefetch(
+                'billable_contacts',
+                queryset=BillableContact.objects.select_related('school'),
+            ),
+        )
+
     def get_assigned_teachers_data(self, obj):
         """Return full teacher info for students"""
         if obj.user_type == 'student':
+            teachers = getattr(obj, 'prefetched_active_teachers', None)
+            if teachers is None:
+                teachers = obj.assigned_teachers.filter(is_active=True)
             return [
                 {
                     'id': teacher.id,
@@ -210,9 +242,44 @@ class UserSerializer(ContactNormalizationMixin, serializers.ModelSerializer):
                     'email': teacher.email,
                     'instruments': instrument_names(teacher)
                 }
-                for teacher in obj.assigned_teachers.filter(is_active=True)
+                for teacher in teachers
             ]
         return []
+
+    def get_schedules(self, obj):
+        """A student's active recurring schedules, day then start time."""
+        if obj.user_type != 'student':
+            return []
+        schedules = getattr(obj, 'prefetched_active_schedules', None)
+        if schedules is None:
+            schedules = obj.student_schedules.filter(is_active=True).select_related(
+                'teacher'
+            ).order_by('day_of_week', 'start_time', 'id')
+        return [
+            {
+                'id': s.id,
+                'teacher': s.teacher_id,
+                'teacher_name': s.teacher.get_full_name(),
+                'day_of_week': s.day_of_week,
+                'start_time': s.start_time.isoformat(),
+                'duration': f'{s.duration:.2f}',
+            }
+            for s in schedules
+        ]
+
+    def get_primary_contact_address(self, obj):
+        """The primary billing contact's address; None without one."""
+        if obj.user_type != 'student':
+            return None
+        primary = next((c for c in obj.billable_contacts.all() if c.is_primary), None)
+        if primary is None:
+            return None
+        return {
+            'street_address': primary.street_address,
+            'city': primary.city,
+            'province': primary.province,
+            'postal_code': primary.postal_code,
+        }
 
     def get_instruments(self, obj):
         return instrument_names(obj)
@@ -241,6 +308,8 @@ class TeacherUpdateSerializer(UserSerializer):
         fields = UserSerializer.Meta.fields + [
             'street_address', 'city', 'province', 'postal_code',
         ]
+        # Enrolment status is a student field (MAP-302).
+        read_only_fields = UserSerializer.Meta.read_only_fields + ['status']
 
 
 class LessonSerializer(serializers.ModelSerializer):
