@@ -1176,7 +1176,7 @@ def teacher_students(request, teacher_id):
     # Every non-removed assigned student is listed; the tally counts only the
     # billable ones (MAP-302, owner ruling Q1 b).
     students = teacher.assigned_students.filter(is_active=True)
-    serializer = UserSerializer(students, many=True)
+    serializer = UserSerializer(UserSerializer.list_queryset(students), many=True)
 
     return Response({
         'teacher': {
