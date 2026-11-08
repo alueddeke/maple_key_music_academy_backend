@@ -16,7 +16,14 @@ from django.contrib.auth import get_user_model
 from django.urls import NoReverseMatch
 from decimal import Decimal
 
-from billing.models import Invoice, Lesson, BatchLessonItem, MonthlyInvoiceBatch
+from datetime import date, time
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+
+from billing.models import (
+    BatchLessonItem, BillableContact, Invoice, Lesson, MonthlyInvoiceBatch,
+    RecurringLessonsSchedule,
+)
 from faker import Faker
 
 User = get_user_model()
@@ -218,6 +225,47 @@ class TestTeacherAssignedStudentsAPI:
         assert student_data['last_name'] == 'Student'
         assert student_data['user_type'] == 'student'
         assert 'id' in student_data
+
+    def test_assigned_students_query_count_constant(
+        self, authenticated_teacher_client, teacher_user, school
+    ):
+        """The list costs the same number of queries for 1 student as for 5 (MAP-364)."""
+        url = reverse('teacher_assigned_students')
+
+        def count_queries():
+            with CaptureQueriesContext(connection) as ctx:
+                response = authenticated_teacher_client.get(url)
+            assert response.status_code == status.HTTP_200_OK
+            return len(ctx.captured_queries), len(response.data)
+
+        def add(n, offset):
+            for i in range(n):
+                student = User.objects.create(
+                    email=f'q{offset + i}@test.com', first_name='Query',
+                    last_name=f'Student{offset + i}', user_type='student',
+                    is_approved=True, is_active=True, school=school,
+                )
+                teacher_user.assigned_students.add(student)
+                BillableContact.objects.create(
+                    student=student, school=school, is_primary=True, first_name='Pat',
+                    last_name='Parent', email=f'parent.q{offset + i}@test.com',
+                    phone='4165550100', street_address='1 Main St', city='Toronto',
+                    province='ON', postal_code='M5H 2N2',
+                )
+                RecurringLessonsSchedule.objects.create(
+                    teacher=teacher_user, student=student, school=school,
+                    day_of_week=i % 7, start_time=time(15, 0), duration=Decimal('1.00'),
+                    teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'),
+                    start_date=date(2026, 9, 7),
+                )
+
+        add(1, 0)
+        one_queries, one_rows = count_queries()
+        add(4, 1)
+        five_queries, five_rows = count_queries()
+
+        assert (one_rows, five_rows) == (1, 5)
+        assert five_queries == one_queries
 
 
 
