@@ -275,11 +275,15 @@ class TestTeacherManagementAPI:
         assert response.status_code == status.HTTP_200_OK
         assert response.data['total_students'] == 3
 
-    def test_total_students_equals_teacher_students_endpoint(
+    def test_total_students_is_active_subset_of_teacher_students_endpoint(
         self, authenticated_management_client, teacher_user, student_user
     ):
-        """The Teachers-table tally equals what the teacher's students page lists."""
+        """The teacher's students page lists every non-removed assigned student;
+        the tally counts only the active (billable) ones (MAP-302, owner Q1 b)."""
         assigned = self._assign_students(teacher_user, 2)
+        waitlisted = assigned[1]
+        waitlisted.status = 'waitlist'
+        waitlisted.save(update_fields=['status'])
         self._assign_students(teacher_user, 1, is_active=False)
 
         row = self._list_row(authenticated_management_client, teacher_user)
@@ -290,7 +294,9 @@ class TestTeacherManagementAPI:
         assert page.status_code == status.HTTP_200_OK
         listed_ids = {s['id'] for s in page.data['students']}
         assert listed_ids == {s.id for s in assigned}
-        assert row['total_students'] == len(listed_ids) == page.data['total_students']
+        active_listed = {s['id'] for s in page.data['students'] if s['status'] == 'active'}
+        assert active_listed == {assigned[0].id}
+        assert row['total_students'] == len(active_listed) == page.data['total_students']
 
     def test_update_teacher_rate_as_management(self, authenticated_management_client, teacher_user):
         """Management can update teacher hourly rate."""
@@ -702,6 +708,8 @@ class TestManagementPutsCannotEscalate:
                 return fake.numerify('##########')  # MAP-293: stored phones are 10 digits
             if field.name == 'province':
                 return fake.random_element([code for code, _ in User.PROVINCES])
+            if field.name == 'status':  # MAP-302: a choice field, like province
+                return fake.random_element([value for value, _ in User.STUDENT_STATUSES])
             if field.name == 'postal_code':
                 return fake.bothify('?#? #?#', letters='ABCEGHJKLMNPRSTVXY')
             if field.name == 'school':
@@ -2006,3 +2014,185 @@ class TestContactFieldNormalization:
         assert response.data['phone_number'] == ['Enter a 10-digit phone number']
         school.refresh_from_db()
         assert school.phone_number == before
+
+
+# ---------------------------------------------------------------------------
+# MAP-302: student enrolment status. `status` is a new field next to the
+# soft-delete flag `is_active`; only active students are billed and counted.
+# ---------------------------------------------------------------------------
+
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+
+NON_ACTIVE_STATUSES = [value for value, _ in User.STUDENT_STATUSES if value != 'active']
+
+
+def _student(school, email, teacher=None, status_value='active', contact=True):
+    student = User.objects.create_user(
+        email=email, password='x', user_type='student', first_name='Status',
+        last_name=email.split('@')[0], school=school, is_approved=True,
+    )
+    if status_value != 'active':
+        student.status = status_value
+        student.save(update_fields=['status'])
+    if teacher is not None:
+        student.assigned_teachers.add(teacher)
+    if contact:
+        _Contact.objects.create(
+            student=student, school=school, is_primary=True, first_name='Pat',
+            last_name='Parent', email=f'parent.{email}', phone='4165550100',
+            street_address='1 Main St', city='Toronto', province='ON', postal_code='M5H 2N2',
+        )
+    return student
+
+
+@pytest.mark.django_db
+class TestStudentStatus:
+
+    def _detail(self, student):
+        return reverse('management_student_detail', kwargs={'pk': student.id})
+
+    def test_new_student_defaults_to_active(self, school):
+        assert _student(school, 'fresh@test.com').status == 'active'
+
+    @pytest.mark.parametrize('new_status', NON_ACTIVE_STATUSES)
+    def test_put_status_persists(self, authenticated_management_client, school, new_status):
+        student = _student(school, 'put@test.com')
+
+        response = authenticated_management_client.put(
+            self._detail(student), {'status': new_status}, format='json'
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        assert response.data['status'] == new_status
+        student.refresh_from_db()
+        assert student.status == new_status
+        assert student.is_active is True  # soft delete untouched
+
+    def test_put_invalid_status_400(self, authenticated_management_client, school):
+        student = _student(school, 'bad@test.com')
+
+        response = authenticated_management_client.put(
+            self._detail(student), {'status': 'enrolled'}, format='json'
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'status' in response.data
+        student.refresh_from_db()
+        assert student.status == 'active'
+
+    def test_teacher_cannot_set_status(self, authenticated_teacher_client, school, teacher_user):
+        student = _student(school, 'teach@test.com', teacher=teacher_user)
+
+        response = authenticated_teacher_client.put(
+            self._detail(student), {'status': 'waitlist'}, format='json'
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        student.refresh_from_db()
+        assert student.status == 'active'
+
+    def test_teacher_update_ignores_status(self, authenticated_management_client, teacher_user):
+        response = authenticated_management_client.put(
+            reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
+            {'status': 'waitlist'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        teacher_user.refresh_from_db()
+        assert teacher_user.status == 'active'
+
+    def test_list_emits_status_schedules_primary_address(
+        self, authenticated_management_client, school, teacher_user
+    ):
+        student = _student(school, 'payload@test.com', teacher=teacher_user, status_value='waitlist')
+        active = _Schedule.objects.create(
+            teacher=teacher_user, student=student, school=school, day_of_week=0,
+            start_time=time(17, 0), duration=Decimal('1.00'), teacher_rate=Decimal('45.00'),
+            student_rate=Decimal('60.00'), start_date=date(2026, 9, 7),
+        )
+        _Schedule.objects.create(
+            teacher=teacher_user, student=student, school=school, day_of_week=2,
+            start_time=time(16, 0), duration=Decimal('0.50'), teacher_rate=Decimal('45.00'),
+            student_rate=Decimal('60.00'), start_date=date(2026, 9, 7), is_active=False,
+        )
+        bare = _student(school, 'bare@test.com', contact=False)
+
+        response = authenticated_management_client.get(reverse('management_students'))
+
+        assert response.status_code == status.HTTP_200_OK
+        rows = {row['id']: row for row in response.data}
+        # The list endpoint does not filter by status.
+        assert rows[student.id]['status'] == 'waitlist'
+        assert rows[student.id]['schedules'] == [{
+            'id': active.id, 'teacher': teacher_user.id,
+            'teacher_name': teacher_user.get_full_name(), 'day_of_week': 0,
+            'start_time': '17:00:00', 'duration': '1.00',
+        }]
+        assert rows[student.id]['primary_contact_address'] == {
+            'street_address': '1 Main St', 'city': 'Toronto', 'province': 'ON',
+            'postal_code': 'M5H 2N2',
+        }
+        assert rows[bare.id]['schedules'] == []
+        assert rows[bare.id]['primary_contact_address'] is None
+
+    def test_non_students_emit_constant_shape(self, teacher_user):
+        from billing.serializers import UserSerializer
+        data = UserSerializer(teacher_user).data
+        assert (data['status'], data['schedules'], data['primary_contact_address']) == ('active', [], None)
+
+    def test_list_query_count_constant(self, authenticated_management_client, school, teacher_user):
+        def count_queries():
+            with CaptureQueriesContext(connection) as ctx:
+                response = authenticated_management_client.get(reverse('management_students'))
+            assert response.status_code == status.HTTP_200_OK
+            return len(ctx.captured_queries), len(response.data)
+
+        def add(n, offset):
+            for i in range(n):
+                s = _student(school, f'n{offset + i}@test.com', teacher=teacher_user)
+                _Schedule.objects.create(
+                    teacher=teacher_user, student=s, school=school, day_of_week=i % 7,
+                    start_time=time(15, 0), duration=Decimal('1.00'),
+                    teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'),
+                    start_date=date(2026, 9, 7),
+                )
+
+        add(1, 0)
+        one_queries, one_rows = count_queries()
+        add(4, 1)
+        five_queries, five_rows = count_queries()
+
+        assert (one_rows, five_rows) == (1, 5)
+        assert five_queries == one_queries
+
+    def test_total_students_counts_active_only(
+        self, authenticated_management_client, school, teacher_user
+    ):
+        active = _student(school, 'tally-active@test.com', teacher=teacher_user)
+        for value in NON_ACTIVE_STATUSES:
+            _student(school, f'tally-{value}@test.com', teacher=teacher_user, status_value=value)
+
+        rows = authenticated_management_client.get(reverse('management_teacher_list')).data
+        row = next(r for r in rows if r['id'] == teacher_user.id)
+        detail = authenticated_management_client.get(
+            reverse('management_teacher_detail', kwargs={'pk': teacher_user.id})
+        ).data
+        page = authenticated_management_client.get(
+            reverse('teacher_students', kwargs={'teacher_id': teacher_user.id})
+        ).data
+
+        assert row['total_students'] == detail['total_students'] == page['total_students'] == 1
+        # The teacher's students page still lists every non-removed student (Q1 b).
+        assert {s['id'] for s in page['students']} >= {active.id}
+        assert len(page['students']) == 1 + len(NON_ACTIVE_STATUSES)
+
+    def test_school_student_count_active_only(self, authenticated_management_client, school):
+        before = authenticated_management_client.get(reverse('get_current_school')).data['student_count']
+        _student(school, 'count-active@test.com')
+        for value in NON_ACTIVE_STATUSES:
+            _student(school, f'count-{value}@test.com', status_value=value)
+
+        after = authenticated_management_client.get(reverse('get_current_school')).data['student_count']
+
+        assert after == before + 1
