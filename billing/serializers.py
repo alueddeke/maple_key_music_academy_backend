@@ -140,13 +140,14 @@ class BillableContactSerializer(ContactNormalizationMixin, ParentFixedOnUpdateMi
     def validate(self, data):
         """Ensure at least one primary contact per student"""
         data = super().validate(data)
-        student = data.get('student')
-        is_primary = data.get('is_primary', False)
+        if self.instance is None or not self.instance.is_primary:
+            return data
 
-        # If unsetting primary, ensure another primary exists
-        if not is_primary and self.instance and self.instance.is_primary:
+        # On update the student comes from the saved row (the body key is
+        # read-only), and a missing is_primary leaves the flag unchanged.
+        if not data.get('is_primary', self.instance.is_primary):
             other_primaries = BillableContact.objects.filter(
-                student=student,
+                student=self.instance.student,
                 is_primary=True
             ).exclude(pk=self.instance.pk).exists()
 
