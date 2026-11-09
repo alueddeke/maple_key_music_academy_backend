@@ -764,13 +764,6 @@ def _contact_body(**extra):
     } | extra
 
 
-def _student(school, email):
-    return User.objects.create_user(
-        email=email, password='testpass123', user_type='student',
-        first_name='Other', last_name='Student', school=school, is_approved=True,
-    )
-
-
 @pytest.fixture
 def contact(student_user, school):
     return _Contact.objects.create(student=student_user, school=school, **_contact_body())
