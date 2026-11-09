@@ -2443,6 +2443,7 @@ def management_dashboard_data(request, batch_id):
     student_billing = []
     for si in student_invoices:
         pre_billing_status = None
+        pre_billing_invoice_id = None
         try:
             pre_inv = PreBillingInvoice.objects.get(
                 student=si.student,
@@ -2451,10 +2452,12 @@ def management_dashboard_data(request, batch_id):
                 period_end=period_end,
             )
             pre_billing_status = pre_inv.status
+            pre_billing_invoice_id = pre_inv.id
         except PreBillingInvoice.DoesNotExist:
             pass
         student_billing.append({
             'invoice_id': si.id,
+            'pre_billing_invoice_id': pre_billing_invoice_id,
             'student_name': si.student.get_full_name(),
             'period_start': period_start.isoformat(),
             'period_end': period_end.isoformat(),
