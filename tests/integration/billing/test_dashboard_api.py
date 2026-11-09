@@ -318,6 +318,30 @@ def test_student_billing_data(management_client, school, teacher_user, student_a
 
 
 @pytest.mark.django_db
+def test_student_billing_row_carries_pre_billing_invoice_id(
+    management_client, school, teacher_user, student_a, student_a2
+):
+    """MAP-363: a per-period row carries its Student Billing (PreBillingInvoice)
+    id when one exists for the period, null when not; invoice_id stays the
+    StudentInvoice id."""
+    batch = _make_batch(teacher_user, school, status='approved', month=6, year=2026)
+    si_with = _make_student_invoice(batch, student_a, school)
+    si_without = _make_student_invoice(batch, student_a2, school)
+    pre_inv = PreBillingInvoice.objects.create(
+        student=student_a, school=school, status='sent', amount=si_with.amount,
+        period_start=date(2026, 6, 1), period_end=date(2026, 6, 30),
+    )
+
+    response = management_client.get(f'/api/billing/management/dashboard/{batch.id}/')
+
+    assert response.status_code == 200, response.data
+    rows = {row['invoice_id']: row for row in response.json()['student_billing']}
+    assert set(rows) == {si_with.id, si_without.id}
+    assert rows[si_with.id]['pre_billing_invoice_id'] == pre_inv.id
+    assert rows[si_without.id]['pre_billing_invoice_id'] is None
+
+
+@pytest.mark.django_db
 def test_teacher_payroll_data(management_client, school, teacher_user):
     """
     Dashboard data endpoint returns teacher_payroll rows for approved batches with invoices.
