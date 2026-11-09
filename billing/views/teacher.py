@@ -412,7 +412,7 @@ def teacher_assigned_students(request):
     """Get all students assigned to the current teacher (teacher-only endpoint)"""
     # Get active students assigned to this teacher
     students = request.user.assigned_students.filter(is_active=True)
-    serializer = UserSerializer(students, many=True)
+    serializer = UserSerializer(UserSerializer.list_queryset(students), many=True)
 
     return Response(serializer.data)
 

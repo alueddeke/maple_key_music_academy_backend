@@ -2092,7 +2092,7 @@ class TestStudentStatus:
         student.refresh_from_db()
         assert student.status == 'active'
 
-    def test_teacher_update_ignores_status(self, authenticated_management_client, teacher_user):
+    def test_management_put_on_teacher_ignores_status(self, authenticated_management_client, teacher_user):
         response = authenticated_management_client.put(
             reverse('management_update_teacher', kwargs={'pk': teacher_user.id}),
             {'status': 'waitlist'}, format='json',
@@ -2151,6 +2151,35 @@ class TestStudentStatus:
         def add(n, offset):
             for i in range(n):
                 s = _student(school, f'n{offset + i}@test.com', teacher=teacher_user)
+                _Schedule.objects.create(
+                    teacher=teacher_user, student=s, school=school, day_of_week=i % 7,
+                    start_time=time(15, 0), duration=Decimal('1.00'),
+                    teacher_rate=Decimal('45.00'), student_rate=Decimal('60.00'),
+                    start_date=date(2026, 9, 7),
+                )
+
+        add(1, 0)
+        one_queries, one_rows = count_queries()
+        add(4, 1)
+        five_queries, five_rows = count_queries()
+
+        assert (one_rows, five_rows) == (1, 5)
+        assert five_queries == one_queries
+
+    def test_teacher_students_query_count_constant(
+        self, authenticated_management_client, school, teacher_user
+    ):
+        url = reverse('teacher_students', kwargs={'teacher_id': teacher_user.id})
+
+        def count_queries():
+            with CaptureQueriesContext(connection) as ctx:
+                response = authenticated_management_client.get(url)
+            assert response.status_code == status.HTTP_200_OK
+            return len(ctx.captured_queries), len(response.data['students'])
+
+        def add(n, offset):
+            for i in range(n):
+                s = _student(school, f't{offset + i}@test.com', teacher=teacher_user)
                 _Schedule.objects.create(
                     teacher=teacher_user, student=s, school=school, day_of_week=i % 7,
                     start_time=time(15, 0), duration=Decimal('1.00'),
