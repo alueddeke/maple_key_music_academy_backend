@@ -536,10 +536,10 @@ class TestReconcileKeepsMovedItems:
 
 @pytest.mark.django_db
 class TestReconcileKeepsItemsMovedFromAPastSlot:
-    """MAP-263 option B (owner ruling 2026-11-09): a lesson moved from a slot
-    that is already past to a later date in the month is kept by an unrelated
-    pause; the live projection only holds future dates, so the original slot
-    is looked up in the whole month. The clock is pinned to the second
+    """MAP-263 (owner rulings 2026-11-09 and 2026-11-10): a lesson moved from
+    a slot that is already past to a later date in the month stands for that
+    past lesson, so no pause, schedule edit or schedule delete removes it,
+    and its past slot is never re-added. The clock is pinned to the second
     Wednesday of a fixed month so the first Wednesday is past."""
 
     YEAR, MONTH = 2027, 3
@@ -584,7 +584,7 @@ class TestReconcileKeepsItemsMovedFromAPastSlot:
         assert moved_to in self._slots(batch, student)
         assert (self.FIRST_WED, time(15, 0)) not in self._slots(batch, student)
 
-    def test_pause_covering_the_past_original_slot_deletes_the_moved_lesson(
+    def test_pause_covering_the_past_original_slot_keeps_the_moved_lesson(
         self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
     ):
         student, sched = student_one_wed_schedule
@@ -596,4 +596,37 @@ class TestReconcileKeepsItemsMovedFromAPastSlot:
             format='json')
 
         assert resp.status_code == status.HTTP_200_OK
-        assert moved_to not in self._slots(batch, student)
+        assert moved_to in self._slots(batch, student)
+        assert (self.FIRST_WED, time(15, 0)) not in self._slots(batch, student)
+
+    def test_schedule_time_edit_keeps_a_lesson_moved_from_a_past_slot(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch, moved_to = self._batch_with_past_slot_moved_forward(teacher_user, school, student, sched)
+
+        resp = authenticated_management_client.put(
+            reverse('recurring_schedule_detail', args=[student.id, sched.id]),
+            {'start_time': '16:30'}, format='json')
+
+        assert resp.status_code == status.HTTP_200_OK, resp.data
+        slots = self._slots(batch, student)
+        assert moved_to in slots
+        assert (self.FIRST_WED, time(15, 0)) not in slots
+        assert (self.FIRST_WED, time(16, 30)) not in slots
+
+    def test_schedule_delete_keeps_a_lesson_moved_from_a_past_slot(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch, moved_to = self._batch_with_past_slot_moved_forward(teacher_user, school, student, sched)
+        later = (self.SECOND_WED + timedelta(days=7), time(15, 0))
+        assert later in self._slots(batch, student)
+
+        resp = authenticated_management_client.delete(
+            reverse('recurring_schedule_detail', args=[student.id, sched.id]))
+
+        assert resp.status_code == status.HTTP_200_OK, resp.data
+        slots = self._slots(batch, student)
+        assert moved_to in slots
+        assert later not in slots
