@@ -891,6 +891,63 @@ class TestContactAndSchedulePutsKeepParent:
 
 
 # ---------------------------------------------------------------------------
+# MAP-328 — unchecking primary checks the saved student; a missing key is unchanged
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestUncheckPrimaryContact:
+
+    def test_uncheck_primary_with_another_primary_returns_200(
+        self, authenticated_management_client, contact, student_user, school
+    ):
+        other = _Contact.objects.create(
+            student=student_user, school=school,
+            **_contact_body(first_name='Sam', email='sam@parent.com', is_primary=False),
+        )
+        # save() keeps one primary per student; a second one exists only through
+        # legacy data or two concurrent saves, so set it without save().
+        _Contact.objects.filter(pk=other.pk).update(is_primary=True)
+
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'is_primary': False}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        contact.refresh_from_db()
+        other.refresh_from_db()
+        assert contact.is_primary is False
+        assert other.is_primary is True
+
+    def test_uncheck_only_primary_returns_400(
+        self, authenticated_management_client, contact
+    ):
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'is_primary': False}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'is_primary' in response.data
+        contact.refresh_from_db()
+        assert contact.is_primary is True
+
+    def test_put_without_is_primary_keeps_contact_primary(
+        self, authenticated_management_client, contact
+    ):
+        response = authenticated_management_client.put(
+            reverse('manage_billable_contact', kwargs={'pk': contact.id}),
+            {'first_name': 'Renamed'}, format='json',
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        contact.refresh_from_db()
+        assert contact.is_primary is True
+        assert contact.first_name == 'Renamed'
+
+
+# ---------------------------------------------------------------------------
 # MAP-186 — approval and payroll generate post to the ledger
 # ---------------------------------------------------------------------------
 
@@ -1941,7 +1998,6 @@ class TestContactFieldNormalization:
     ):
         response = authenticated_management_client.put(
             reverse('manage_billable_contact', kwargs={'pk': contact.id}),
-            # is_primary sent: a partial PUT without it is refused today (MAP-328).
             {'city': 'Toronto, ON', 'phone': '(647) 555-0199', 'is_primary': True}, format='json',
         )
 
