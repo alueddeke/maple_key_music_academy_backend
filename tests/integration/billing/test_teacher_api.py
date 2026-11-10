@@ -1223,6 +1223,27 @@ class TestTeacherRescheduleOneOccurrence:
         assert recurring.scheduled_date == self._in_month(draft_batch, 20)
         assert (recurring.original_scheduled_date, recurring.original_start_time) == first_slot
 
+    def test_a_move_back_to_the_original_slot_clears_the_origin(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        first_slot = (recurring.scheduled_date, recurring.start_time)
+        self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': self._in_month(draft_batch, 10).isoformat(), 'start_time': '09:00',
+        })
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': first_slot[0].isoformat(),
+            'start_time': first_slot[1].strftime('%H:%M'),
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert (recurring.scheduled_date, recurring.start_time) == first_slot
+        assert recurring.original_scheduled_date is None
+        assert recurring.original_start_time is None
+        assert response.data['original_scheduled_date'] is None
+        assert response.data['original_start_time'] is None
+
     def test_a_time_only_move_records_the_origin(
         self, authenticated_teacher_client, draft_batch, recurring
     ):

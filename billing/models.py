@@ -994,7 +994,8 @@ class BatchLessonItem(models.Model):
     scheduled_date = models.DateField()
     start_time = models.TimeField()
     # MAP-263: the slot this item held before its first reschedule. Set once,
-    # on the first move that changes the date or time; null = never moved.
+    # on the first move that changes the date or time, and cleared by a move
+    # back to that slot; null = never moved (or back where it started).
     # Schedule re-sync matches a moved item by this slot, not its new date.
     original_scheduled_date = models.DateField(null=True, blank=True)
     original_start_time = models.TimeField(null=True, blank=True)

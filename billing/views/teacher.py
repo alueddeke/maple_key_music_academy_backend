@@ -675,12 +675,16 @@ def _original_slot_on_first_move(item, validated_data):
     """
     MAP-263: the extra save() kwargs that record where ``item`` came from.
     Only on its first move (original_* still null) and only when the date or
-    the time actually changes; later moves keep the first origin.
+    the time actually changes; later moves keep the first origin. A move back
+    to the original slot clears it: the item is a never-moved lesson again
+    (owner ruling 2026-11-10).
     """
-    if item.original_scheduled_date is not None:
-        return {}
     new_date = validated_data.get('scheduled_date', item.scheduled_date)
     new_time = validated_data.get('start_time', item.start_time)
+    if item.original_scheduled_date is not None:
+        if (new_date, new_time) == (item.original_scheduled_date, item.original_start_time):
+            return {'original_scheduled_date': None, 'original_start_time': None}
+        return {}
     if (new_date, new_time) == (item.scheduled_date, item.start_time):
         return {}
     return {
@@ -700,7 +704,8 @@ def batch_lesson_item(request, batch_id, item_id):
     the batch's billing month; the schedule and other occurrences are
     untouched). Only a one-off also accepts lesson_type. Other keys are
     dropped. The first move that changes the date or time records the old
-    slot in original_scheduled_date / original_start_time.
+    slot in original_scheduled_date / original_start_time; a move back to
+    that slot clears them.
     DELETE: Remove a one-off lesson item only
     """
     try:
