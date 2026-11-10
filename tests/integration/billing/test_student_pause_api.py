@@ -446,3 +446,154 @@ class TestPauseCascadeToOpenBatches:
         restored = self._dates(batch, student)
         assert weds[0] in restored
         assert weds[1] in restored
+
+
+def _move(item, new_date, new_time):
+    """What the teacher lesson PUT stores on a first move (MAP-263)."""
+    item.original_scheduled_date = item.scheduled_date
+    item.original_start_time = item.start_time
+    item.scheduled_date = new_date
+    item.start_time = new_time
+    item.save()
+    return item
+
+
+@pytest.mark.django_db
+class TestReconcileKeepsMovedItems:
+    """MAP-263: reconcile matches a moved item by the slot it came from, so a
+    teacher's one-off move survives a pause that does not cover that slot and
+    is removed by one that does. The moved-from slot is never re-added."""
+
+    def _url(self, student_id):
+        return reverse('student_pause_lessons', args=[student_id])
+
+    def _slots(self, batch, student):
+        return set(
+            BatchLessonItem.objects.filter(batch=batch, student=student)
+            .values_list('scheduled_date', 'start_time')
+        )
+
+    def _pause(self, client, student, start, end):
+        resp = client.post(
+            self._url(student.id),
+            {'pause_start': start, 'pause_end': end}, format='json')
+        assert resp.status_code == status.HTTP_200_OK
+        return resp
+
+    def test_pause_not_covering_the_original_slot_keeps_the_moved_item(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'draft', weds)
+        moved_to = (weds[0] + timedelta(days=2), time(16, 30))
+        _move(BatchLessonItem.objects.get(batch=batch, scheduled_date=weds[0]), *moved_to)
+
+        next_year, next_month = _shift_month(year, month, 1)
+        self._pause(authenticated_management_client, student,
+                    *_month_bounds_iso(next_year, next_month))
+
+        # The moved item stays at its new slot; its old slot is not recreated.
+        slots = self._slots(batch, student)
+        assert moved_to in slots
+        assert (weds[0], time(15, 0)) not in slots
+        assert (weds[1], time(15, 0)) in slots
+
+    def test_pause_covering_the_original_slot_deletes_the_moved_item(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'draft', weds)
+        # Moved OUTSIDE the pause window: only its origin is paused.
+        _move(BatchLessonItem.objects.get(batch=batch, scheduled_date=weds[0]),
+              weds[0] + timedelta(days=2), time(16, 30))
+
+        self._pause(authenticated_management_client, student,
+                    weds[0].isoformat(), weds[0].isoformat())
+
+        slots = self._slots(batch, student)
+        assert (weds[0] + timedelta(days=2), time(16, 30)) not in slots
+        assert (weds[0], time(15, 0)) not in slots  # paused: not re-added either
+        assert (weds[1], time(15, 0)) in slots
+
+    def test_resume_does_not_recreate_the_moved_from_slot(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        year, month, weds = _future_month_wednesdays()
+        batch = _make_batch(teacher_user, school, student, sched, month, year, 'draft', weds)
+        moved_to = (weds[1] + timedelta(days=1), time(9, 0))
+        _move(BatchLessonItem.objects.get(batch=batch, scheduled_date=weds[1]), *moved_to)
+
+        self._pause(authenticated_management_client, student, None, None)
+
+        slots = self._slots(batch, student)
+        assert moved_to in slots
+        assert (weds[1], time(15, 0)) not in slots
+        assert (weds[0], time(15, 0)) in slots
+
+
+@pytest.mark.django_db
+class TestReconcileKeepsItemsMovedFromAPastSlot:
+    """MAP-263 option B (owner ruling 2026-11-09): a lesson moved from a slot
+    that is already past to a later date in the month is kept by an unrelated
+    pause; the live projection only holds future dates, so the original slot
+    is looked up in the whole month. The clock is pinned to the second
+    Wednesday of a fixed month so the first Wednesday is past."""
+
+    YEAR, MONTH = 2027, 3
+    FIRST_WED, SECOND_WED = date(2027, 3, 3), date(2027, 3, 10)
+
+    @pytest.fixture(autouse=True)
+    def _pin_today(self, monkeypatch):
+        import billing.views.management as management_views
+        pinned = self.SECOND_WED
+
+        class _PinnedDate(date):
+            @classmethod
+            def today(cls):
+                return pinned
+
+        monkeypatch.setattr(management_views, 'date', _PinnedDate)
+
+    def _slots(self, batch, student):
+        return set(
+            BatchLessonItem.objects.filter(batch=batch, student=student)
+            .values_list('scheduled_date', 'start_time')
+        )
+
+    def _batch_with_past_slot_moved_forward(self, teacher, school, student, sched):
+        batch = _make_batch(teacher, school, student, sched, self.MONTH, self.YEAR, 'draft',
+                            [self.FIRST_WED, self.SECOND_WED + timedelta(days=7)])
+        moved_to = (self.SECOND_WED + timedelta(days=2), time(16, 0))
+        _move(BatchLessonItem.objects.get(batch=batch, scheduled_date=self.FIRST_WED), *moved_to)
+        return batch, moved_to
+
+    def test_unrelated_pause_keeps_a_lesson_moved_from_a_past_slot(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch, moved_to = self._batch_with_past_slot_moved_forward(teacher_user, school, student, sched)
+
+        resp = authenticated_management_client.post(
+            reverse('student_pause_lessons', args=[student.id]),
+            {'pause_start': '2027-05-01', 'pause_end': '2027-05-31'}, format='json')
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert moved_to in self._slots(batch, student)
+        assert (self.FIRST_WED, time(15, 0)) not in self._slots(batch, student)
+
+    def test_pause_covering_the_past_original_slot_deletes_the_moved_lesson(
+        self, authenticated_management_client, student_one_wed_schedule, teacher_user, school
+    ):
+        student, sched = student_one_wed_schedule
+        batch, moved_to = self._batch_with_past_slot_moved_forward(teacher_user, school, student, sched)
+
+        resp = authenticated_management_client.post(
+            reverse('student_pause_lessons', args=[student.id]),
+            {'pause_start': self.FIRST_WED.isoformat(), 'pause_end': self.FIRST_WED.isoformat()},
+            format='json')
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert moved_to not in self._slots(batch, student)

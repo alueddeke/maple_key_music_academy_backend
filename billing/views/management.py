@@ -779,6 +779,14 @@ def recurring_schedule_detail(request, student_id, schedule_id):
 # STUDENT PAUSE/RESUME ENDPOINTS
 # ============================================================================
 
+def _slot_key(item):
+    """The schedule slot an item stands for: where it came from if moved (MAP-263)."""
+    return (
+        item.original_scheduled_date or item.scheduled_date,
+        item.original_start_time or item.start_time,
+    )
+
+
 def reconcile_open_batches_for_student(student, school):
     """
     Re-sync FUTURE-dated, schedule-sourced lesson items for ``student`` in this
@@ -799,6 +807,14 @@ def reconcile_open_batches_for_student(student, school):
       already happened are billable and are never removed or resurrected.
     - Only schedule-sourced items (``recurring_schedule`` set) are deleted;
       manual one-offs are left alone.
+
+    Moved items (MAP-263): an item a teacher rescheduled is matched by the
+    slot it came from, ``(original_scheduled_date or scheduled_date,
+    original_start_time or start_time)``, in both the delete check and the
+    "already present" check. A moved item is kept while its original slot is
+    still projected anywhere in the batch month (so a lesson moved from a
+    past slot to a future date survives), and deleted when a pause removes
+    that slot. Its original slot is never re-added.
     """
     today = date.today()
     teacher_ids = list(
@@ -815,11 +831,15 @@ def reconcile_open_batches_for_student(student, school):
         teacher_id__in=teacher_ids,
     )
     for batch in batches:
-        projected = [
+        month_projection = [
             d for d in batch.get_scheduled_lessons_data()
-            if d['student'].id == student.id and d['scheduled_date'] > today
+            if d['student'].id == student.id
         ]
+        projected = [d for d in month_projection if d['scheduled_date'] > today]
         projected_keys = {(d['scheduled_date'], d['start_time']) for d in projected}
+        # A moved item's original slot may be today or earlier (MAP-263), so
+        # it is looked up in the whole month's projection.
+        month_keys = {(d['scheduled_date'], d['start_time']) for d in month_projection}
 
         # DELETE future, schedule-sourced items the live projection no longer
         # includes (now inside the pause window).
@@ -830,12 +850,13 @@ def reconcile_open_batches_for_student(student, school):
             recurring_schedule__isnull=False,
         )
         for item in future_items:
-            if (item.scheduled_date, item.start_time) not in projected_keys:
+            keys = month_keys if item.original_scheduled_date is not None else projected_keys
+            if _slot_key(item) not in keys:
                 item.delete()
 
         # ADD future projected items missing from the batch (resume restores).
         present_keys = {
-            (i.scheduled_date, i.start_time)
+            _slot_key(i)
             for i in BatchLessonItem.objects.filter(batch=batch, student=student)
         }
         for d in projected:
