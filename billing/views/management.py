@@ -763,12 +763,15 @@ def recurring_schedule_detail(request, student_id, schedule_id):
         # reconcile_open_batches_for_student (open batch, scheduled_date > today,
         # schedule-sourced); past-dated items stay — they happened and are
         # billable. reconcile itself is not usable here: the schedule is still
-        # active while it runs, so it would delete nothing.
+        # active while it runs, so it would delete nothing. A lesson moved out
+        # of a slot that has already passed stays too, like the past lesson it
+        # stands for (MAP-263).
+        today = date.today()
         BatchLessonItem.objects.filter(
             recurring_schedule=schedule,
             batch__status__in=['draft', 'submitted'],
-            scheduled_date__gt=date.today(),
-        ).delete()
+            scheduled_date__gt=today,
+        ).exclude(original_scheduled_date__lte=today).delete()
         schedule.delete()
         return Response({
             'message': 'Recurring schedule deleted successfully'
@@ -778,6 +781,14 @@ def recurring_schedule_detail(request, student_id, schedule_id):
 # ============================================================================
 # STUDENT PAUSE/RESUME ENDPOINTS
 # ============================================================================
+
+def _slot_key(item):
+    """The schedule slot an item stands for: where it came from if moved (MAP-263)."""
+    return (
+        item.original_scheduled_date or item.scheduled_date,
+        item.original_start_time or item.start_time,
+    )
+
 
 def reconcile_open_batches_for_student(student, school):
     """
@@ -799,6 +810,15 @@ def reconcile_open_batches_for_student(student, school):
       already happened are billable and are never removed or resurrected.
     - Only schedule-sourced items (``recurring_schedule`` set) are deleted;
       manual one-offs are left alone.
+
+    Moved items (MAP-263): an item a teacher rescheduled is matched by the
+    slot it came from, ``(original_scheduled_date or scheduled_date,
+    original_start_time or start_time)``, in both the delete check and the
+    "already present" check. A moved item whose original slot is still in the
+    future is deleted when a pause or schedule edit removes that slot. A
+    moved item whose original slot is today or earlier is never deleted: it
+    stands for a lesson slot that has already passed, and those are never
+    removed (owner ruling 2026-11-10). Its original slot is never re-added.
     """
     today = date.today()
     teacher_ids = list(
@@ -830,12 +850,16 @@ def reconcile_open_batches_for_student(student, school):
             recurring_schedule__isnull=False,
         )
         for item in future_items:
-            if (item.scheduled_date, item.start_time) not in projected_keys:
+            # Moved out of a slot that has already passed (MAP-263): kept,
+            # like the past lesson it stands for.
+            if item.original_scheduled_date is not None and item.original_scheduled_date <= today:
+                continue
+            if _slot_key(item) not in projected_keys:
                 item.delete()
 
         # ADD future projected items missing from the batch (resume restores).
         present_keys = {
-            (i.scheduled_date, i.start_time)
+            _slot_key(i)
             for i in BatchLessonItem.objects.filter(batch=batch, student=student)
         }
         for d in projected:

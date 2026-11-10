@@ -432,13 +432,19 @@ class BatchLessonItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'student', 'student_name',
             'scheduled_date', 'start_time', 'duration', 'schedule_duration',
+            'original_scheduled_date', 'original_start_time',
             'lesson_type', 'teacher_rate', 'student_rate',
             'status', 'cancellation_reason',
             'teacher_notes', 'admin_notes', 'is_one_off',
             'teacher_payment', 'student_charge',
             'created_at'
         ]
-        read_only_fields = ['schedule_duration', 'teacher_payment', 'student_charge', 'created_at']
+        # MAP-263: original_* are written only by the teacher lesson PUT on a
+        # move (views/teacher.py batch_lesson_item), never from a request body.
+        read_only_fields = [
+            'schedule_duration', 'original_scheduled_date', 'original_start_time',
+            'teacher_payment', 'student_charge', 'created_at',
+        ]
         # MAP-179: rates are never negative (management paths keep the field list).
         extra_kwargs = {
             'teacher_rate': {'validators': [MinValueValidator(Decimal('0'))]},

@@ -976,20 +976,21 @@ class TestTeacherRecurringLessonDuration:
         recurring.refresh_from_db()
         assert recurring.duration == Decimal('1.00')
 
-    def test_recurring_item_keeps_its_date_time_and_type(
+    def test_recurring_item_keeps_its_lesson_type(
         self, authenticated_teacher_client, draft_batch, recurring
     ):
-        before = (recurring.scheduled_date, recurring.start_time, recurring.lesson_type)
+        # MAP-263: date and time may move; the type stays the schedule's.
+        before = recurring.lesson_type
+        other_type = 'in_person' if before == 'online' else 'online'
 
         response = self._put(authenticated_teacher_client, draft_batch, recurring, {
-            'duration': '0.50', 'scheduled_date': '2026-09-28',
-            'start_time': '09:00:00', 'lesson_type': 'in_person',
+            'duration': '0.50', 'lesson_type': other_type,
         })
 
         assert response.status_code == status.HTTP_200_OK, response.data
         recurring.refresh_from_db()
         assert recurring.duration == Decimal('0.50')
-        assert (recurring.scheduled_date, recurring.start_time, recurring.lesson_type) == before
+        assert recurring.lesson_type == before
 
     @pytest.mark.parametrize('bad', ['0', '0.00', '-1'])
     def test_non_positive_duration_is_rejected(
@@ -1145,3 +1146,246 @@ class TestBatchSubmitUnresolvedPast:
         response = self._submit(authenticated_teacher_client, draft_batch)
 
         assert response.status_code == status.HTTP_200_OK, response.data
+
+
+@pytest.mark.django_db
+class TestTeacherRescheduleOneOccurrence:
+    """MAP-263: a teacher moves one occurrence of a lesson inside the batch's
+    billing month; the first move records where it came from."""
+
+    def _put(self, client, batch, item, body):
+        return client.put(
+            reverse('batch_lesson_item', kwargs={'batch_id': batch.id, 'item_id': item.id}),
+            body, format='json',
+        )
+
+    @pytest.fixture
+    def schedule(self, teacher_user, assigned_student, school, school_settings):
+        return _schedule(teacher_user, assigned_student, school, school_settings)
+
+    @pytest.fixture
+    def recurring(self, draft_batch, schedule):
+        return _recurring_item(draft_batch, schedule, 7)
+
+    def _in_month(self, batch, day):
+        return _date(batch.year, batch.month, day)
+
+    def test_recurring_move_in_month_records_the_original_slot(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        old_date, old_time = recurring.scheduled_date, recurring.start_time
+        new_date = self._in_month(draft_batch, 10)
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': new_date.isoformat(), 'start_time': '17:30',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert (recurring.scheduled_date, recurring.start_time) == (new_date, _time(17, 30))
+        assert (recurring.original_scheduled_date, recurring.original_start_time) == (old_date, old_time)
+        assert response.data['scheduled_date'] == new_date.isoformat()
+        assert response.data['original_scheduled_date'] == old_date.isoformat()
+        assert response.data['original_start_time'] == old_time.strftime('%H:%M:%S')
+
+    def test_other_occurrences_and_schedule_are_untouched(
+        self, authenticated_teacher_client, draft_batch, recurring, schedule
+    ):
+        sibling = _recurring_item(draft_batch, schedule, 14)
+        sibling_slot = (sibling.scheduled_date, sibling.start_time)
+        schedule_slot = (schedule.day_of_week, schedule.start_time)
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': self._in_month(draft_batch, 9).isoformat(),
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        sibling.refresh_from_db()
+        schedule.refresh_from_db()
+        assert (sibling.scheduled_date, sibling.start_time) == sibling_slot
+        assert sibling.original_scheduled_date is None
+        assert (schedule.day_of_week, schedule.start_time) == schedule_slot
+
+    def test_a_second_move_keeps_the_first_origin(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        first_slot = (recurring.scheduled_date, recurring.start_time)
+        self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': self._in_month(draft_batch, 10).isoformat(),
+        })
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': self._in_month(draft_batch, 20).isoformat(), 'start_time': '09:00',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.scheduled_date == self._in_month(draft_batch, 20)
+        assert (recurring.original_scheduled_date, recurring.original_start_time) == first_slot
+
+    def test_a_move_back_to_the_original_slot_clears_the_origin(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        first_slot = (recurring.scheduled_date, recurring.start_time)
+        self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': self._in_month(draft_batch, 10).isoformat(), 'start_time': '09:00',
+        })
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': first_slot[0].isoformat(),
+            'start_time': first_slot[1].strftime('%H:%M'),
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert (recurring.scheduled_date, recurring.start_time) == first_slot
+        assert recurring.original_scheduled_date is None
+        assert recurring.original_start_time is None
+        assert response.data['original_scheduled_date'] is None
+        assert response.data['original_start_time'] is None
+
+    def test_a_time_only_move_records_the_origin(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        first_slot = (recurring.scheduled_date, recurring.start_time)
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {'start_time': '18:00'})
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.start_time == _time(18, 0)
+        assert (recurring.original_scheduled_date, recurring.original_start_time) == first_slot
+
+    def test_resending_the_same_date_and_time_records_no_origin(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': recurring.scheduled_date.isoformat(),
+            'start_time': recurring.start_time.strftime('%H:%M'),
+            'status': 'confirmed',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.status == 'confirmed'
+        assert recurring.original_scheduled_date is None
+        assert recurring.original_start_time is None
+        assert response.data['original_scheduled_date'] is None
+        assert response.data['original_start_time'] is None
+
+    @pytest.mark.parametrize('months', [-1, 1])
+    def test_a_date_outside_the_batch_month_is_400_and_nothing_written(
+        self, authenticated_teacher_client, draft_batch, recurring, months
+    ):
+        before = (recurring.scheduled_date, recurring.start_time, recurring.teacher_notes)
+        outside = _date(draft_batch.year, draft_batch.month, 15) + _timedelta(days=31 * months)
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': outside.isoformat(), 'start_time': '09:00',
+            'teacher_notes': 'Rescheduled:',
+        })
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {
+            'error': (
+                'Reschedule date must be within the batch billing month '
+                f'({draft_batch.year}-{draft_batch.month:02d}).'
+            )
+        }
+        recurring.refresh_from_db()
+        assert (recurring.scheduled_date, recurring.start_time, recurring.teacher_notes) == before
+        assert recurring.original_scheduled_date is None
+
+    def test_a_malformed_date_is_400_and_nothing_written(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        before = recurring.scheduled_date
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': 'next tuesday',
+        })
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {'error': 'Invalid date format. Use YYYY-MM-DD.'}
+        recurring.refresh_from_db()
+        assert recurring.scheduled_date == before
+
+    def test_a_move_on_a_submitted_batch_is_400(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        draft_batch.status = 'submitted'
+        draft_batch.save(update_fields=['status'])
+        before = recurring.scheduled_date
+
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'scheduled_date': self._in_month(draft_batch, 10).isoformat(),
+        })
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {'error': 'Cannot modify non-draft batch'}
+        recurring.refresh_from_db()
+        assert recurring.scheduled_date == before
+        assert recurring.original_scheduled_date is None
+
+    def test_a_one_off_still_moves_date_time_and_type(
+        self, authenticated_teacher_client, draft_batch, assigned_student, school_settings
+    ):
+        create = authenticated_teacher_client.post(
+            reverse('batch_add_lesson', kwargs={'batch_id': draft_batch.id}),
+            _live_payload(assigned_student, lesson_type='in_person'), format='json',
+        )
+        assert create.status_code == status.HTTP_201_CREATED, create.data
+        one_off = BatchLessonItem.objects.get(id=create.data['id'])
+        old_slot = (one_off.scheduled_date, one_off.start_time)
+
+        response = self._put(authenticated_teacher_client, draft_batch, one_off, {
+            'scheduled_date': self._in_month(draft_batch, 24).isoformat(),
+            'start_time': '11:00', 'lesson_type': 'online',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        one_off.refresh_from_db()
+        assert (one_off.scheduled_date, one_off.start_time, one_off.lesson_type) == (
+            self._in_month(draft_batch, 24), _time(11, 0), 'online',
+        )
+        assert (one_off.original_scheduled_date, one_off.original_start_time) == old_slot
+
+    def test_batch_sync_does_not_recreate_the_moved_from_slot(
+        self, authenticated_teacher_client, draft_batch, schedule
+    ):
+        # The batch POST re-syncs the schedule on every call. A moved lesson
+        # must not come back at its original slot (it would be paid twice).
+        url = reverse('teacher_monthly_batches')
+        period = {'month': draft_batch.month, 'year': draft_batch.year}
+        first = authenticated_teacher_client.post(url, period, format='json')
+        assert first.status_code == status.HTTP_200_OK, first.data
+        items = BatchLessonItem.objects.filter(batch=draft_batch, recurring_schedule=schedule)
+        synced = items.count()
+        assert synced >= 4  # every Monday of the month
+        moved = items.order_by('scheduled_date').first()
+        old_slot = (moved.scheduled_date, moved.start_time)
+        new_date = moved.scheduled_date + _timedelta(days=3)
+        assert self._put(authenticated_teacher_client, draft_batch, moved, {
+            'scheduled_date': new_date.isoformat(), 'start_time': '17:30',
+        }).status_code == status.HTTP_200_OK
+
+        again = authenticated_teacher_client.post(url, period, format='json')
+
+        assert again.status_code == status.HTTP_200_OK, again.data
+        slots = set(items.values_list('scheduled_date', 'start_time'))
+        assert items.count() == synced
+        assert old_slot not in slots
+        assert (new_date, _time(17, 30)) in slots
+
+    def test_original_slot_is_not_writable_from_the_body(
+        self, authenticated_teacher_client, draft_batch, recurring
+    ):
+        response = self._put(authenticated_teacher_client, draft_batch, recurring, {
+            'original_scheduled_date': self._in_month(draft_batch, 1).isoformat(),
+            'original_start_time': '08:00',
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        recurring.refresh_from_db()
+        assert recurring.original_scheduled_date is None
+        assert recurring.original_start_time is None

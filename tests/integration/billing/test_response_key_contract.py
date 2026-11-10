@@ -38,6 +38,7 @@ LESSON_KEYS = {
 TRIAL_LESSON_KEYS = {
     'id', 'student', 'student_name', 'scheduled_date', 'start_time', 'duration',
     'schedule_duration',  # MAP-313: null here, a trial is never schedule-sourced
+    'original_scheduled_date', 'original_start_time',  # MAP-263: null until moved
     'lesson_type', 'teacher_rate', 'student_rate', 'status', 'cancellation_reason',
     'teacher_notes', 'admin_notes', 'is_one_off', 'teacher_payment', 'student_charge',
     'created_at', 'batch_id', 'batch_status', 'teacher', 'teacher_name', 'auto_detected',

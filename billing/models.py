@@ -993,6 +993,12 @@ class BatchLessonItem(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+', limit_choices_to={'user_type':'student'})
     scheduled_date = models.DateField()
     start_time = models.TimeField()
+    # MAP-263: the slot this item held before its first reschedule. Set once,
+    # on the first move that changes the date or time, and cleared by a move
+    # back to that slot; null = never moved (or back where it started).
+    # Schedule re-sync matches a moved item by this slot, not its new date.
+    original_scheduled_date = models.DateField(null=True, blank=True)
+    original_start_time = models.TimeField(null=True, blank=True)
     # Decimal default: a float default made calculate_teacher_payment() raise
     # TypeError on an unsaved instance (P0 audit 2026-09-09).
     duration = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('1.00'))
