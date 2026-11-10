@@ -1329,6 +1329,33 @@ class TestTeacherRescheduleOneOccurrence:
         )
         assert (one_off.original_scheduled_date, one_off.original_start_time) == old_slot
 
+    def test_batch_sync_does_not_recreate_the_moved_from_slot(
+        self, authenticated_teacher_client, draft_batch, schedule
+    ):
+        # The batch POST re-syncs the schedule on every call. A moved lesson
+        # must not come back at its original slot (it would be paid twice).
+        url = reverse('teacher_monthly_batches')
+        period = {'month': draft_batch.month, 'year': draft_batch.year}
+        first = authenticated_teacher_client.post(url, period, format='json')
+        assert first.status_code == status.HTTP_200_OK, first.data
+        items = BatchLessonItem.objects.filter(batch=draft_batch, recurring_schedule=schedule)
+        synced = items.count()
+        assert synced >= 4  # every Monday of the month
+        moved = items.order_by('scheduled_date').first()
+        old_slot = (moved.scheduled_date, moved.start_time)
+        new_date = moved.scheduled_date + _timedelta(days=3)
+        assert self._put(authenticated_teacher_client, draft_batch, moved, {
+            'scheduled_date': new_date.isoformat(), 'start_time': '17:30',
+        }).status_code == status.HTTP_200_OK
+
+        again = authenticated_teacher_client.post(url, period, format='json')
+
+        assert again.status_code == status.HTTP_200_OK, again.data
+        slots = set(items.values_list('scheduled_date', 'start_time'))
+        assert items.count() == synced
+        assert old_slot not in slots
+        assert (new_date, _time(17, 30)) in slots
+
     def test_original_slot_is_not_writable_from_the_body(
         self, authenticated_teacher_client, draft_batch, recurring
     ):

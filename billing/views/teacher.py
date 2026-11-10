@@ -22,6 +22,7 @@ import uuid
 from datetime import date
 from zoneinfo import ZoneInfo
 from django.db import transaction
+from django.db.models import Q
 from django.core.exceptions import FieldDoesNotExist
 
 logger = logging.getLogger(__name__)
@@ -486,12 +487,21 @@ def teacher_monthly_batches(request):
 
         # For each expected lesson, check if it already exists in the batch
         for lesson_data in scheduled_lessons:
-            # Check if this lesson already exists (same student, date, time)
+            # Check if this lesson already exists (same student, date, time).
+            # A moved item (MAP-263) stands for the slot it came from, not its
+            # new date, so its original slot is never created a second time:
+            # the same key as reconcile_open_batches_for_student.
+            slot_date = lesson_data['scheduled_date']
+            slot_time = lesson_data['start_time']
             existing_lesson = BatchLessonItem.objects.filter(
+                Q(original_scheduled_date=slot_date, original_start_time=slot_time)
+                | Q(
+                    original_scheduled_date__isnull=True,
+                    scheduled_date=slot_date,
+                    start_time=slot_time,
+                ),
                 batch=batch,
                 student=lesson_data['student'],
-                scheduled_date=lesson_data['scheduled_date'],
-                start_time=lesson_data['start_time'],
             ).first()
 
             # Only create if it doesn't already exist (preserves manual edits)
