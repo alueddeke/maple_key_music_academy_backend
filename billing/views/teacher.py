@@ -22,6 +22,7 @@ import uuid
 from datetime import date
 from zoneinfo import ZoneInfo
 from django.db import transaction
+from django.db.models import Q
 from django.core.exceptions import FieldDoesNotExist
 
 logger = logging.getLogger(__name__)
@@ -486,12 +487,21 @@ def teacher_monthly_batches(request):
 
         # For each expected lesson, check if it already exists in the batch
         for lesson_data in scheduled_lessons:
-            # Check if this lesson already exists (same student, date, time)
+            # Check if this lesson already exists (same student, date, time).
+            # A moved item (MAP-263) stands for the slot it came from, not its
+            # new date, so its original slot is never created a second time:
+            # the same key as reconcile_open_batches_for_student.
+            slot_date = lesson_data['scheduled_date']
+            slot_time = lesson_data['start_time']
             existing_lesson = BatchLessonItem.objects.filter(
+                Q(original_scheduled_date=slot_date, original_start_time=slot_time)
+                | Q(
+                    original_scheduled_date__isnull=True,
+                    scheduled_date=slot_date,
+                    start_time=slot_time,
+                ),
                 batch=batch,
                 student=lesson_data['student'],
-                scheduled_date=lesson_data['scheduled_date'],
-                start_time=lesson_data['start_time'],
             ).first()
 
             # Only create if it doesn't already exist (preserves manual edits)
@@ -665,12 +675,16 @@ def _original_slot_on_first_move(item, validated_data):
     """
     MAP-263: the extra save() kwargs that record where ``item`` came from.
     Only on its first move (original_* still null) and only when the date or
-    the time actually changes; later moves keep the first origin.
+    the time actually changes; later moves keep the first origin. A move back
+    to the original slot clears it: the item is a never-moved lesson again
+    (owner ruling 2026-11-10).
     """
-    if item.original_scheduled_date is not None:
-        return {}
     new_date = validated_data.get('scheduled_date', item.scheduled_date)
     new_time = validated_data.get('start_time', item.start_time)
+    if item.original_scheduled_date is not None:
+        if (new_date, new_time) == (item.original_scheduled_date, item.original_start_time):
+            return {'original_scheduled_date': None, 'original_start_time': None}
+        return {}
     if (new_date, new_time) == (item.scheduled_date, item.start_time):
         return {}
     return {
@@ -690,7 +704,8 @@ def batch_lesson_item(request, batch_id, item_id):
     the batch's billing month; the schedule and other occurrences are
     untouched). Only a one-off also accepts lesson_type. Other keys are
     dropped. The first move that changes the date or time records the old
-    slot in original_scheduled_date / original_start_time.
+    slot in original_scheduled_date / original_start_time; a move back to
+    that slot clears them.
     DELETE: Remove a one-off lesson item only
     """
     try:
