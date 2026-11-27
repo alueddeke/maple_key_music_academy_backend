@@ -184,6 +184,42 @@ def _serialize_invoice(invoice):
     }
 
 
+def _rows_from_lessons(lessons):
+    """Removal rows (id, sku, date, price) for an invoice built from Lesson rows."""
+    return [
+        {
+            'id': l.id,
+            'sku': f'LESSON-{l.pk}',
+            'date': (
+                l.scheduled_date.date().strftime('%Y-%m-%d')
+                if l.scheduled_date is not None
+                else None
+            ),
+            'price': Decimal(str(l.student_rate)) * Decimal(str(l.duration)),
+        }
+        for l in lessons
+    ]
+
+
+def _rows_from_issued(items):
+    """
+    Removal rows for a schedule-projected (prepaid) invoice (MAP-391). Its
+    lines live only in the issued_items snapshot (MAP-186), with negative ids.
+    """
+    return [
+        {
+            'id': item['id'],
+            'sku': f"LESSON-P{abs(item['id'])}",
+            'date': item['scheduled_date'],
+            'price': Decimal(str(item['charge'])),
+        }
+        for item in items
+    ]
+
+
+def _row_description(row):
+    return f"Lesson on {row['date']}" if row['date'] is not None else 'Lesson'
+
 
 # ---------------------------------------------------------------------------
 # View functions
@@ -481,14 +517,24 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     """
     POST /api/billing/management/pre-billing/<invoice_id>/remove-lesson/
 
-    Remove a lesson from a sent/adjusted invoice via create + void (MAP-184):
+    Remove a lesson from a sent/adjusted invoice via create + void (MAP-184).
+
+    Two invoice sources share the flow (MAP-391):
+    - built from real Lesson rows (the ``lessons`` M2M): ``lesson_id`` is a
+      Lesson id; the row leaves the M2M and the snapshot is rebuilt.
+    - schedule-projected ("prepaid", empty M2M): the lines live only in the
+      ``issued_items`` snapshot and ``lesson_id`` is that line's negative id.
+      The line leaves the snapshot (the other ids are NOT renumbered, so a
+      stale page can never remove a different date) and its date is added
+      to ``excluded_dates``.
 
     1. Validate everything first — invoice (school-scoped, status guard,
        lesson membership), last-lesson guard, billing contact + Helcim
        customer. No remote call happens until all of it passes.
     2. Credit rule: original_credit = original_gross − invoice.amount, where
-       original_gross is the gross of the lessons on the invoice BEFORE this
-       removal (current DB rows); new_credit = min(original_credit, new_gross);
+       original_gross is the gross of the lines on the invoice BEFORE this
+       removal (current Lesson rows, or the snapshot for a prepaid invoice);
+       new_credit = min(original_credit, new_gross);
        amount = new_gross − new_credit.
     3. OUTSIDE transaction: create the replacement Helcim invoice with
        discount = new_credit under our own number. Failure → look the
@@ -535,18 +581,26 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     except (ValueError, TypeError):
         return Response({'error': 'lesson_id must be integer'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Step 1d: Look up lesson within the invoice's M2M set (T-19-04-02)
-    try:
-        lesson = invoice.lessons.get(id=lesson_id)
-    except Lesson.DoesNotExist:
+    # Step 1d: Look the id up among the invoice's own lines (T-19-04-02).
+    # Real lessons: the M2M set, positive Lesson ids. Prepaid (MAP-391): the
+    # M2M is empty and the lines are the issued snapshot, negative ids.
+    real_lessons = list(invoice.lessons.all().order_by('scheduled_date'))
+    is_projected = not real_lessons and bool(invoice.issued_items)
+    rows = (
+        _rows_from_issued(invoice.issued_items)
+        if is_projected
+        else _rows_from_lessons(real_lessons)
+    )
+    target = next((r for r in rows if r['id'] == lesson_id), None)
+    if target is None:
         return Response(
             {'error': 'Lesson not part of this invoice'},
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    # Step 2: Remaining lessons (post-removal) + last-lesson guard, before
+    # Step 2: Remaining lines (post-removal) + last-lesson guard, before
     # any remote call.
-    remaining = list(invoice.lessons.exclude(id=lesson_id).order_by('scheduled_date'))
+    remaining = [r for r in rows if r['id'] != lesson_id]
     if len(remaining) == 0:
         return Response(
             {'error': 'Cannot remove last lesson date. Cancel the invoice instead.'},
@@ -571,51 +625,36 @@ def management_pre_billing_remove_lesson(request, invoice_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Step 4: Original line items from the invoice's current lessons
+    # Step 4: Original line items from the invoice's current lines
     # (pre-removal). Passed to cancel_invoice defensively per Pitfall 7 / A1
     # in 19-RESEARCH.md; also the source of original_gross for the credit rule.
-    original_lessons = list(invoice.lessons.all().order_by('scheduled_date'))
     original_line_items = [
         {
-            'description': (
-                f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
-                if l.scheduled_date is not None
-                else 'Lesson'
-            ),
+            'description': _row_description(r),
             'quantity': 1,
-            'price': float(Decimal(str(l.student_rate)) * Decimal(str(l.duration))),
+            'price': float(r['price']),
         }
-        for l in original_lessons
+        for r in rows
     ]
 
     # Step 5: Credit rule (MAP-184) — credit applied at send is preserved,
     # capped at the new gross; the parent is asked for the net.
-    original_gross = sum(
-        (Decimal(str(l.student_rate)) * Decimal(str(l.duration)) for l in original_lessons),
-        Decimal('0.00'),
-    )
-    new_gross = sum(
-        (Decimal(str(l.student_rate)) * Decimal(str(l.duration)) for l in remaining),
-        Decimal('0.00'),
-    )
+    original_gross = sum((r['price'] for r in rows), Decimal('0.00'))
+    new_gross = sum((r['price'] for r in remaining), Decimal('0.00'))
     original_credit = original_gross - invoice.amount
     new_credit = min(original_credit, new_gross)
     amount = new_gross - new_credit
 
-    # Step 6: Replacement line items from remaining lessons (post-removal)
+    # Step 6: Replacement line items from the remaining lines (post-removal)
     line_items = [
         {
             # Helcim requires a sku for line items to appear on the invoice.
-            'sku': f'LESSON-{l.pk}',
-            'description': (
-                f"Lesson on {l.scheduled_date.date().strftime('%Y-%m-%d')}"
-                if l.scheduled_date is not None
-                else 'Lesson'
-            ),
+            'sku': r['sku'],
+            'description': _row_description(r),
             'quantity': 1,
-            'price': float(Decimal(str(l.student_rate)) * Decimal(str(l.duration))),
+            'price': float(r['price']),
         }
-        for l in remaining
+        for r in remaining
     ]
 
     # Step 7: OUTSIDE transaction — create replacement Helcim invoice with the
@@ -662,9 +701,22 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     # Step 9: Minimal transaction.atomic for ALL DB writes (T-19-04-06). From
     # here the DB points at the invoice the parent should pay.
     with transaction.atomic():
-        invoice.lessons.remove(lesson)
         # The issued snapshot follows the replacement Helcim invoice (MAP-186).
-        invoice.issued_items = _issued_line_items(remaining, [])
+        if is_projected:
+            # Prepaid (MAP-391): drop the line, keep the other ids as issued,
+            # and record the date as skipped (not billed).
+            invoice.issued_items = [
+                item for item in invoice.issued_items if item['id'] != lesson_id
+            ]
+            if target['date'] is not None:
+                invoice.excluded_dates = sorted(
+                    set(invoice.excluded_dates or []) | {target['date']}
+                )
+        else:
+            invoice.lessons.remove(lesson_id)
+            invoice.issued_items = _issued_line_items(
+                [l for l in real_lessons if l.id != lesson_id], []
+            )
         invoice.previous_helcim_invoice_id = invoice.helcim_invoice_id
         invoice.previous_helcim_invoice_number = invoice.helcim_invoice_number
         invoice.helcim_invoice_id = str(helcim_response['invoiceId'])
@@ -703,12 +755,7 @@ def management_pre_billing_remove_lesson(request, invoice_id):
     invoice.save(update_fields=['cancel_outcome', 'updated_at'])
 
     # Step 11: OUTSIDE atomic — send replacement email (D-17)
-    lesson_dates = [
-        l.scheduled_date.date().strftime('%Y-%m-%d')
-        if l.scheduled_date is not None
-        else 'Unknown'
-        for l in remaining
-    ]
+    lesson_dates = [r['date'] or 'Unknown' for r in remaining]
     period_label = invoice.period_start.strftime('%B %Y')
     email_result, email_message = PreBillingEmailService.send_payment_request(
         contact.email,

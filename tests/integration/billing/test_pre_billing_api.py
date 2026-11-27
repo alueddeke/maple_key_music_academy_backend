@@ -753,6 +753,304 @@ def test_replacement_create_unconfirmed_when_lookup_also_fails(
     assert invoice.lessons.count() == 2
 
 
+# ---------------------------------------------------------------------------
+# Tests — remove a date from a sent schedule-projected ("prepaid") invoice
+# (MAP-391). The lessons M2M is empty; the lines are the issued_items
+# snapshot with negative ids.
+# ---------------------------------------------------------------------------
+
+PROJECTED_DATES = [date(2026, 12, 6), date(2026, 12, 13), date(2026, 12, 20), date(2026, 12, 27)]
+PROJECTED_RATE = Decimal('60.00')
+PROJECTED_DURATION = Decimal('1.0')
+PROJECTED_CHARGE = (PROJECTED_RATE * PROJECTED_DURATION).quantize(Decimal('0.01'))
+
+
+def _make_sent_projected_invoice(student, school, lesson_dates=None,
+                                 applied_credit=Decimal('0.00'), status='sent'):
+    """
+    Invoice sent ahead of its month: no Lesson rows, the snapshot written by
+    the send pipeline (issued_line_items) is the only record of its lines.
+    amount = gross − applied_credit, exactly as send computes it.
+    """
+    from billing.services.invoice_sending import issued_line_items
+
+    lesson_dates = PROJECTED_DATES if lesson_dates is None else lesson_dates
+    snapshot = issued_line_items([], [
+        {'date': d, 'rate': PROJECTED_RATE, 'duration': PROJECTED_DURATION, 'teacher_name': 'T Teacher'}
+        for d in lesson_dates
+    ])
+    gross = PROJECTED_CHARGE * len(lesson_dates)
+    return PreBillingInvoice.objects.create(
+        student=student,
+        school=school,
+        status=status,
+        amount=gross - applied_credit,
+        period_start=date(2026, 12, 1),
+        period_end=date(2026, 12, 31),
+        helcim_invoice_id='inv_old_456',
+        helcim_invoice_number='INV-OLD-456',
+        payment_token='tok_old_xyz',
+        issued_items=snapshot,
+    )
+
+
+def _remove_projected(client, invoice, lesson_id, create_response=None):
+    """POST remove-lesson with Helcim create/void and the email mocked."""
+    with patch('billing.services.helcim_client.requests.put') as mock_put, \
+         patch('billing.services.helcim_client.requests.post') as mock_post, \
+         patch('billing.services.email_service.PreBillingEmailService.send_payment_request') as mock_email:
+        mock_put.return_value = _helcim_cancel_invoice_ok()
+        mock_post.return_value = create_response or _helcim_create_invoice_ok()
+        mock_email.return_value = (True, 'sent')
+        response = client.post(
+            reverse('management_pre_billing_remove_lesson', kwargs={'invoice_id': invoice.id}),
+            data={'lesson_id': lesson_id}, format='json',
+        )
+    return response, mock_post, mock_put, mock_email
+
+
+@pytest.mark.django_db
+def test_remove_projected_date_reissues_invoice(management_client, school, student_with_contact):
+    """
+    MAP-391: removing a date from a sent prepaid invoice creates a replacement
+    Helcim invoice for the remaining dates, voids the old one, sets the
+    invoice to adjusted, records the date as skipped and emails the contact.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_projected_1'
+    contact.save()
+    invoice = _make_sent_projected_invoice(student, school)
+    assert invoice.lessons.count() == 0  # fixture sanity: snapshot-only invoice
+    before = list(invoice.issued_items)
+    removed = before[-1]
+    kept = before[:-1]
+
+    response, mock_post, mock_put, mock_email = _remove_projected(
+        management_client, invoice, removed['id'],
+    )
+
+    assert response.status_code == 200
+    assert 'warning' not in response.data
+    assert response.data['status'] == 'adjusted'
+    assert response.data['is_projected'] is True
+    assert response.data['lessons'] == kept
+    assert response.data['excluded_dates'] == [removed['scheduled_date']]
+
+    mock_post.assert_called_once()
+    payload = mock_post.call_args.kwargs['json']
+    assert [li['sku'] for li in payload['lineItems']] == [f"LESSON-P{abs(i['id'])}" for i in kept]
+    assert [li['description'] for li in payload['lineItems']] == [
+        f"Lesson on {i['scheduled_date']}" for i in kept
+    ]
+    assert sum(li['price'] for li in payload['lineItems']) == float(PROJECTED_CHARGE * len(kept))
+    assert 'discount' not in payload
+    assert payload['invoiceNumber'].startswith(f'MK{invoice.pk}-')
+    mock_put.assert_called_once()
+    assert mock_put.call_args.args[0].endswith('/invoices/inv_old_456')
+
+    mock_email.assert_called_once()
+    email_args = mock_email.call_args.args
+    assert email_args[0] == contact.email
+    assert email_args[4] == PROJECTED_CHARGE * len(kept)
+    assert email_args[5] == [i['scheduled_date'] for i in kept]
+    assert 'token=tok_test_abc' in email_args[6]
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'adjusted'
+    assert invoice.issued_items == kept  # other lines keep their ids
+    assert invoice.excluded_dates == [removed['scheduled_date']]
+    assert invoice.amount == PROJECTED_CHARGE * len(kept)
+    assert invoice.helcim_invoice_id == 'inv_test_123'
+    assert invoice.helcim_invoice_number == '001'
+    assert invoice.payment_token == 'tok_test_abc'
+    assert invoice.previous_helcim_invoice_id == 'inv_old_456'
+    assert invoice.previous_helcim_invoice_number == 'INV-OLD-456'
+    assert invoice.cancel_outcome == 'done'
+    assert invoice.revision == 1
+    assert invoice.email_sent is True
+    assert invoice.lessons.count() == 0
+
+
+@pytest.mark.django_db
+def test_remove_projected_date_preserves_applied_credit(management_client, school, student_with_contact):
+    """
+    MAP-184 credit rule on the prepaid path: credit applied at send is kept,
+    capped at the new gross, and rides the replacement as the Helcim discount.
+    The wallet is not touched.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_projected_2'
+    contact.save()
+    applied_credit = Decimal('40.00')
+    wallet = StudentCreditAccount.objects.create(
+        student=student, school=school, balance=applied_credit,
+    )
+    invoice = _make_sent_projected_invoice(student, school, applied_credit=applied_credit)
+    original_gross = PROJECTED_CHARGE * len(PROJECTED_DATES)
+    assert original_gross > applied_credit > Decimal('0.00')  # fixture sanity: credit partially covers
+
+    new_gross = original_gross - PROJECTED_CHARGE
+    expected_credit = min(original_gross - invoice.amount, new_gross)
+    expected_amount = new_gross - expected_credit
+    assert expected_credit == applied_credit  # the whole credit still fits
+
+    response, mock_post, mock_put, _ = _remove_projected(
+        management_client, invoice, invoice.issued_items[0]['id'],
+    )
+
+    assert response.status_code == 200
+    payload = mock_post.call_args.kwargs['json']
+    assert payload['discount'] == {'amount': float(expected_credit), 'details': 'Account credit applied'}
+    assert sum(li['price'] for li in payload['lineItems']) == float(new_gross)
+    mock_put.assert_called_once()
+
+    invoice.refresh_from_db()
+    assert invoice.amount == expected_amount
+    assert invoice.status == 'adjusted'
+    assert invoice.cancel_outcome == 'done'
+
+    wallet.refresh_from_db()
+    assert wallet.balance == applied_credit
+    assert CreditTransaction.objects.filter(account=wallet).count() == 0
+
+
+@pytest.mark.django_db
+def test_remove_last_projected_date_rejected_before_any_provider_call(management_client, school, student_with_contact):
+    """A one-line prepaid invoice cannot lose its last date: 400, Helcim untouched."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_projected_3'
+    contact.save()
+    invoice = _make_sent_projected_invoice(student, school, lesson_dates=PROJECTED_DATES[:1])
+    snapshot = list(invoice.issued_items)
+    original_amount = invoice.amount
+
+    response, mock_post, mock_put, mock_email = _remove_projected(
+        management_client, invoice, snapshot[0]['id'],
+    )
+
+    assert response.status_code == 400
+    assert response.data['error'] == 'Cannot remove last lesson date. Cancel the invoice instead.'
+    mock_post.assert_not_called()
+    mock_put.assert_not_called()
+    mock_email.assert_not_called()
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.issued_items == snapshot
+    assert invoice.excluded_dates == []
+    assert invoice.helcim_invoice_id == 'inv_old_456'
+    assert invoice.amount == original_amount
+    assert invoice.revision == 0
+    assert invoice.cancel_outcome == 'none'
+
+
+@pytest.mark.django_db
+def test_remove_projected_unknown_id_404_before_any_provider_call(management_client, school, student_with_contact):
+    """An id that is not a line of the snapshot: 404, Helcim untouched, nothing changed."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_projected_4'
+    contact.save()
+    invoice = _make_sent_projected_invoice(student, school)
+    snapshot = list(invoice.issued_items)
+    unknown_id = min(i['id'] for i in snapshot) - 95
+    assert unknown_id not in [i['id'] for i in snapshot]
+
+    response, mock_post, mock_put, mock_email = _remove_projected(
+        management_client, invoice, unknown_id,
+    )
+
+    assert response.status_code == 404
+    assert response.data['error'] == 'Lesson not part of this invoice'
+    mock_post.assert_not_called()
+    mock_put.assert_not_called()
+    mock_email.assert_not_called()
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'sent'
+    assert invoice.issued_items == snapshot
+    assert invoice.excluded_dates == []
+    assert invoice.revision == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('invoice_status', ['paid', 'draft'])
+def test_remove_projected_date_refused_on_paid_and_draft(
+    management_client, school, student_with_contact, invoice_status,
+):
+    """Only sent/adjusted prepaid invoices can be corrected; a draft keeps Skip."""
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_projected_5'
+    contact.save()
+    invoice = _make_sent_projected_invoice(student, school, status=invoice_status)
+    snapshot = list(invoice.issued_items)
+
+    response, mock_post, mock_put, mock_email = _remove_projected(
+        management_client, invoice, snapshot[0]['id'],
+    )
+
+    assert response.status_code == 400
+    assert response.data['error'] == 'Only sent or adjusted invoices support lesson removal'
+    mock_post.assert_not_called()
+    mock_put.assert_not_called()
+    mock_email.assert_not_called()
+
+    invoice.refresh_from_db()
+    assert invoice.status == invoice_status
+    assert invoice.issued_items == snapshot
+    assert invoice.excluded_dates == []
+    assert invoice.revision == 0
+
+
+@pytest.mark.django_db
+def test_remove_projected_date_twice(management_client, school, student_with_contact):
+    """
+    A second removal works on the adjusted invoice: the ids left by the first
+    removal are still the addressable ones, and the second void targets the
+    first replacement.
+    """
+    student, contact = student_with_contact
+    contact.helcim_customer_id = 'cust_projected_6'
+    contact.save()
+    invoice = _make_sent_projected_invoice(student, school)
+    first, second, *kept = invoice.issued_items
+
+    response, _, _, _ = _remove_projected(management_client, invoice, first['id'])
+    assert response.status_code == 200
+    invoice.refresh_from_db()
+    assert invoice.status == 'adjusted'
+    assert invoice.revision == 1
+
+    second_replacement = Mock(
+        ok=True, status_code=200, text='',
+        json=lambda: {'invoiceId': 'inv_second_789', 'token': 'tok_new_xyz', 'invoiceNumber': '002'},
+    )
+    response, mock_post, mock_put, mock_email = _remove_projected(
+        management_client, invoice, second['id'], create_response=second_replacement,
+    )
+
+    assert response.status_code == 200
+    assert response.data['lessons'] == kept
+    payload = mock_post.call_args.kwargs['json']
+    assert [li['sku'] for li in payload['lineItems']] == [f"LESSON-P{abs(i['id'])}" for i in kept]
+    assert mock_put.call_args.args[0].endswith('/invoices/inv_test_123')
+    assert mock_email.call_args.args[5] == [i['scheduled_date'] for i in kept]
+
+    invoice.refresh_from_db()
+    assert invoice.status == 'adjusted'
+    assert invoice.revision == 2
+    assert invoice.issued_items == kept
+    assert invoice.excluded_dates == sorted([first['scheduled_date'], second['scheduled_date']])
+    assert invoice.amount == PROJECTED_CHARGE * len(kept)
+    assert invoice.helcim_invoice_id == 'inv_second_789'
+    assert invoice.previous_helcim_invoice_id == 'inv_test_123'
+    assert invoice.cancel_outcome == 'done'
+
+    # Removing the first id again is a 404: ids are never reused.
+    response, mock_post, _, _ = _remove_projected(management_client, invoice, first['id'])
+    assert response.status_code == 404
+    mock_post.assert_not_called()
+
+
 def _failed_cancel_invoice(student, school, **overrides):
     fields = dict(
         student=student,
