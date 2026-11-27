@@ -1022,7 +1022,7 @@ def test_remove_projected_date_twice(management_client, school, student_with_con
 
     second_replacement = Mock(
         ok=True, status_code=200, text='',
-        json=lambda: {'invoiceId': 'inv_second_789', 'token': 'tok_second_789', 'invoiceNumber': '002'},
+        json=lambda: {'invoiceId': 'inv_second_789', 'token': 'tok_new_xyz', 'invoiceNumber': '002'},
     )
     response, mock_post, mock_put, mock_email = _remove_projected(
         management_client, invoice, second['id'], create_response=second_replacement,
